@@ -1,0 +1,10 @@
+{
+  "hooks": {
+    "Stop": [
+      {"hooks": [{"type": "command", "command": "python scripts/capture/session_capture.py"}]}
+    ],
+    "SessionEnd": [
+      {"hooks": [{"type": "command", "command": "python scripts/capture/session_capture.py"}]}
+    ]
+  }
+}

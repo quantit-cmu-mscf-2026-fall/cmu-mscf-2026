@@ -1,0 +1,12 @@
+# Deploy registry — the single source of truth for what runs on the team's
+# Interactive Brokers paper-trading account.
+#
+# A strategy enters this file by pull request, and that PR must link the
+# strategy's validation gate report. main + latest deploy-* tag = what is live.
+#
+# Schema (one entry per strategy):
+#   - id:          short unique name, e.g. momo-weekly-v2
+#     module:      python path implementing the strategy contract
+#     gate_report: link or repo path to the validation artifact
+#     enabled:     true | false
+strategies: []
