@@ -37,8 +37,10 @@ information:
 | Your **GitHub username** | This is how we add you to the organization. Bring it. |
 
 After that you will receive: an Arkraft account (public/synthetic data only),
-the Claude Max team credentials, GitHub organization membership, and the
-Interactive Brokers paper-trading details when the execution leg starts.
+the Claude Max team credentials, GitHub organization membership. For the execution leg later in the
+semester, the team sets up its **own** Interactive Brokers paper account —
+Quantit does not provision, hold, or fund it; we provide connection guidance
+when that leg starts.
 
 ---
 
