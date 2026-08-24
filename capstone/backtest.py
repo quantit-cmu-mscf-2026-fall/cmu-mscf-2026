@@ -205,7 +205,7 @@ def summarize(
     )
 
 
-def sweep(panel: "SyntheticPanel", *, cost_bps: float = 0.0, freq: str = "daily") -> pd.DataFrame:
+def sweep(panel: SyntheticPanel, *, cost_bps: float = 0.0, freq: str = "daily") -> pd.DataFrame:
     """Backtest every candidate in a `SyntheticPanel` and summarize each.
 
     Args:

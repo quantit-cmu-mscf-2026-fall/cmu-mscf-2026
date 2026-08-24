@@ -47,7 +47,7 @@ def main() -> int:
         shutil.copyfile(src, out_dir / f"{user}-{sid8}.jsonl")
 
         index_entry = {
-            "ts_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "ts_utc": datetime.datetime.now(datetime.UTC).isoformat(),
             "session_id": session_id,
             "user": user,
             "file": f"transcripts/{user}-{sid8}.jsonl",

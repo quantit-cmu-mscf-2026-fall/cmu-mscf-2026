@@ -51,7 +51,7 @@ class TestGroundTruth:
             seed=7,
         )
         real, null = [], []
-        for name, signal, is_real in candidate_frames(panel):
+        for _name, signal, is_real in candidate_frames(panel):
             sharpe = summarize(run_backtest(signal, panel.returns)).sharpe
             (real if is_real else null).append(sharpe)
 

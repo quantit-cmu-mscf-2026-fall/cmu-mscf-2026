@@ -18,7 +18,7 @@ import json
 import os
 import subprocess
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 LEDGER_FILENAME = "runs.jsonl"
@@ -86,7 +86,7 @@ def log_run(
         The dict that was written, including the generated bookkeeping fields.
     """
     entry = {
-        "ts_utc": datetime.now(timezone.utc).isoformat(),
+        "ts_utc": datetime.now(UTC).isoformat(),
         "user": os.environ.get("GITHUB_USER") or os.environ.get("USER") or "unknown",
         "git_sha": _git_sha(),
         "session_id": os.environ.get("CLAUDE_SESSION_ID"),
@@ -110,8 +110,8 @@ def _read_entries() -> list[dict]:
         return []
     entries = []
     with path.open(encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
+        for raw in fh:
+            line = raw.strip()
             if line:
                 entries.append(json.loads(line))
     return entries
@@ -133,9 +133,10 @@ def _cmd_list(last: int) -> None:
     """Print the most recent entries, one compact line each."""
     for entry in _read_entries()[-last:]:
         metrics = json.dumps(entry.get("metrics") or {}, separators=(",", ":"))
-        print(
-            f"{entry.get('ts_utc', '?')}  {entry.get('user', '?')}  {entry.get('name', '?')}  {metrics}"
-        )
+        ts = entry.get("ts_utc", "?")
+        user = entry.get("user", "?")
+        name = entry.get("name", "?")
+        print(f"{ts}  {user}  {name}  {metrics}")
 
 
 def main(argv: list[str] | None = None) -> None:
