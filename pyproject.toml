@@ -12,7 +12,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0", "ruff>=0.6"]
+dev = ["pytest>=7.0", "ruff==0.15.5"]  # pinned: an unpinned linter reds CI on its own schedule
 
 [build-system]
 requires = ["setuptools>=68"]
@@ -28,3 +28,23 @@ markers = ["network: requires internet access (skips cleanly if unavailable)"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+
+# Pin the rule set explicitly. Left to its defaults, ruff's selection widens
+# between releases, so an unpinned project goes red on CI the week a new version
+# ships — with a diff nobody wrote. Everything below is chosen; adding a rule is
+# a decision the team makes, not one that arrives on its own.
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "I",    # import sorting
+    "UP",   # pyupgrade — keep syntax current for the target version
+    "B",    # bugbear — the mistakes that actually bite
+    "PLW",  # pylint warnings
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests drive a script through subprocess on purpose and assert on the exit
+# code themselves; PLW1510 would have us write check=False everywhere to say
+# what the assertion already says.
+"tests/*" = ["PLW1510"]
