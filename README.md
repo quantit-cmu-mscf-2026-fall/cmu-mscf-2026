@@ -1,14 +1,43 @@
-# Capstone Starter Kit — Quantit × CMU MSCF (46-983, Fall 2026)
+# Quantit × CMU MSCF Capstone — Team Repository (46-983, Fall 2026)
 
-Plumbing so that week 1 is spent on research rather than on data loaders.
+This is the team's working repository: where the semester's code, experiments,
+and decisions land.
 
-Nothing here is a required part of the project. It is scaffolding you may keep,
-rewrite, or delete. If you replace all of it with something better, that is a
-good outcome — but you should not have to write a CSV parser to get started.
+It begins as a copy of the starter kit — plumbing so that week 1 goes to
+research rather than to data loaders. None of that scaffolding is required.
+Keep it, rewrite it, or delete it; replacing all of it with something better is
+a good outcome. What you build on top of it is the project.
 
 > **New to the project? Start with [`GETTING_STARTED.md`](GETTING_STARTED.md)** —
 > day one to your first merged PR, in order, including the parts that involve
-> waiting on someone else.
+> waiting on someone else. The [open issues labelled
+> `good first issue`](../../issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)
+> are that first week, one at a time.
+
+## How we work here
+
+Review protects the code that runs. It is not a gate on thinking out loud —
+putting one there would only move the thinking somewhere nobody can see it.
+
+**Goes through a pull request**: code, tests, `deploy/strategies.yml`, and the
+docs describing how the code works. Green CI, one teammate's review, squash-merge.
+
+**Post it yourself — no PR, no review, no waiting on us**:
+
+| Where | For |
+|---|---|
+| [Issues → *Paper round*](../../issues/new/choose) | Your weekly one-pager, and the report-back a week later on the same issue |
+| [Issues → *Topic*](../../issues/new/choose) | A research direction the team is shaping. Edit each other's freely |
+| [Issues → *Work item*](../../issues/new/choose) | Something specific someone will do |
+| [Wiki](../../wiki) | Notes, references, derivations, write-ups |
+| [Discussions](../../discussions) | Questions and half-formed ideas |
+
+The topics and work items are the team's own map of this project — you write it,
+and you rewrite it as your understanding changes. Around week 2 your project
+proposal supersedes ours entirely.
+
+Full workflow, including what a reviewer is actually looking for:
+[`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## What is in here
 
