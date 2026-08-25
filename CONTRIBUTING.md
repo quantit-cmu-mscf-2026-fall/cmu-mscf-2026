@@ -6,11 +6,34 @@ it. All of it is standard, public software practice.
 
 ## Ground rules
 
-- **`main` is protected.** No direct pushes, no force pushes. Everything lands
+- **`main` is protected.** No direct pushes, no force pushes. Code lands
   through a pull request with green CI and at least one approving review.
 - **`main` is always deployable.** If it's on `main`, it should be safe to run.
 - **You own what you merge.** The agents write most of the code; a human is
   accountable for every line that lands. Review accordingly.
+
+## What needs review, and what doesn't
+
+Review exists to protect the thing that breaks when it's wrong — the code that
+runs. It is not a gate on thinking out loud, and putting one there would only
+teach everyone to think somewhere we can't see.
+
+**Goes through a PR**: anything in `main` — code, tests, `deploy/strategies.yml`,
+and the docs that describe how the code works.
+
+**Post it yourself, no review**:
+
+- **Paper rounds** — open an issue with the *Paper round* template. It's yours;
+  edit it after the discussion and fill in the report-back the week after.
+- **Topics and work items** — the *Topic* and *Work item* templates. The team's
+  map of what this project is about is written by the team. Open topics when you
+  have a direction, edit anyone's when the thread has moved past what it says,
+  close the ones that went nowhere (with a line saying so).
+- **The wiki** — notes, references, derivations, write-ups. Write freely.
+- **Discussions** — questions, half-formed ideas, anything not yet a topic.
+
+You do not need permission for any of the second group, and you don't need to
+wait for us. We read all of it as participants.
 
 ## Branches and pull requests
 
