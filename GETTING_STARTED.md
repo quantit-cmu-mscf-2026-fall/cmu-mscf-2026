@@ -194,6 +194,12 @@ to the public repo.
   differently if it is right, and the smallest experiment that would tell us.
   The following week, whoever's idea the team adopted reports what happened —
   including "no effect", which is the common answer and worth saying plainly.
+  Post it as an issue with the **Paper round** template — no PR, no review, no
+  waiting on us. Fill in the report-back section on the same issue a week later.
+- **Topics and work items are yours to write.** Use the *Topic* template for a
+  direction the team is chewing on and *Work item* for something specific
+  someone will do. Edit each other's freely; the wiki and Discussions are open
+  the same way. Only code goes through review — see `CONTRIBUTING.md`.
 - **Around week 2** you write your own project proposal. From that point your
   document supersedes ours.
 
@@ -214,7 +220,7 @@ this directory is touched. See `docs/telemetry.md`.
 [ ] Brief and plan read; four [start here] papers identified
 [ ] First PR opened, reviewed by a teammate, merged
 [ ] First experiment in the run ledger
-[ ] First paper page ready for the sync
+[ ] First paper round posted as an issue
 ```
 
 When all of these are done you are set up. Everything after that is the actual
