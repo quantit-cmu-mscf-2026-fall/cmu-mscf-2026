@@ -2,7 +2,6 @@
 name: Work item
 about: Something specific someone is going to do.
 title: "<what will be done>"
-labels: ""
 ---
 
 <!-- Work items come out of topics and paper rounds once the team knows what
