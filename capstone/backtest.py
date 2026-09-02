@@ -27,7 +27,8 @@ def to_weights(signal: pd.DataFrame, *, demean: bool = True, gross: float = 1.0)
         signal: dates x assets raw signal values.
         demean: if True, subtract each row's cross-sectional mean first,
             producing a dollar-neutral book.
-        gross: target sum of |weight| per date.
+        gross: target sum of |weight| per date. With `demean=True`, a nonzero row is dollar-neutral,
+            so `gross=1.0` corresponds to 0.5 long and 0.5 short exposure.
 
     Returns:
         DataFrame of the same shape/index/columns as `signal`. A row that is
