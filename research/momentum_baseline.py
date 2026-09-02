@@ -30,6 +30,11 @@ LOOKBACK = 20
 COST_BPS = 10.0
 FREQ = "daily"
 
+# `load_sample_prices()` takes no seed argument; this mirrors the default seed
+# `capstone.sample_data.generate_sample_prices` uses, so the ledger records the
+# value the panel was actually generated with rather than null.
+SAMPLE_SEED = 20260825
+
 
 def momentum_signal(prices: pd.DataFrame, lookback: int = LOOKBACK) -> pd.DataFrame:
     """Trailing `lookback`-day simple return per asset, observed at each date.
@@ -72,6 +77,7 @@ def main() -> None:
             "n_assets": int(signal.shape[1]),
         },
         metrics=summary.as_dict(),
+        seed=SAMPLE_SEED,
         tags=["momentum", "baseline", "sample-data"],
         notes=(
             "Cross-sectional 20-day momentum on the bundled synthetic sample "
