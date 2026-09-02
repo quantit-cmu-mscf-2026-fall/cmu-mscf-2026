@@ -219,4 +219,7 @@ class TestCompareRejectionRules:
         assert comparison["rejections"].ge(0).all()
         assert comparison["power"].between(0.0, 1.0).all()
         assert (comparison["fdr"].isna() | (comparison["fdr"] >= 0.0)).all()
-        assert comparison.loc["benjamini_hochberg", "rejections"] >= comparison.loc["bonferroni", "rejections"]
+        assert (
+            comparison.loc["benjamini_hochberg", "rejections"]
+            >= comparison.loc["bonferroni", "rejections"]
+        )

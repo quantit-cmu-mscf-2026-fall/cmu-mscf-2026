@@ -243,7 +243,9 @@ def compare_rejection_rules(
 
     pvalues = pd.Series(
         [
-            sharpe_pvalue(float(row["sharpe"]), int(row["n_obs"]), periods_per_year=periods_per_year)
+            sharpe_pvalue(
+                float(row["sharpe"]), int(row["n_obs"]), periods_per_year=periods_per_year
+            )
             for _, row in summary.iterrows()
         ],
         index=summary.index,

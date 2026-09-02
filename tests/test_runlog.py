@@ -160,7 +160,7 @@ def test_screened_candidate_has_trial_and_outcome_entries(tmp_path, monkeypatch)
         source="economic-reasoning",
         tags=["backlog-screen"],
     )
-    outcome = runlog.log_outcome(
+    runlog.log_outcome(
         trial_ref=trial["run_id"],
         decision="nothing",
         metrics={"decision": "nothing", "sharpe": -0.41},
@@ -170,7 +170,10 @@ def test_screened_candidate_has_trial_and_outcome_entries(tmp_path, monkeypatch)
         tags=["backlog-screen"],
     )
 
-    entries = [json.loads(line) for line in (tmp_path / "runs.jsonl").read_text(encoding="utf-8").splitlines()]
+    entries = [
+        json.loads(line)
+        for line in (tmp_path / "runs.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
     trial_rows = [entry for entry in entries if entry.get("kind") == "trial"]
     outcome_rows = [entry for entry in entries if entry.get("kind") == "outcome"]
     assert len(trial_rows) == 1

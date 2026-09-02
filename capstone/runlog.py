@@ -33,12 +33,15 @@ def _stable_run_id(seed: int | None, name: str, params: dict | None, ts_utc: str
     timestamp of the trial entry. The outcome record then appends a second row
     referencing this id without altering the original entry.
     """
-    payload = json.dumps({
-        "name": name,
-        "seed": seed,
-        "params": params or {},
-        "ts_utc": ts_utc,
-    }, sort_keys=True)
+    payload = json.dumps(
+        {
+            "name": name,
+            "seed": seed,
+            "params": params or {},
+            "ts_utc": ts_utc,
+        },
+        sort_keys=True,
+    )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
@@ -205,7 +208,6 @@ def _cmd_digest() -> None:
     """
     entries = _read_entries()
     grouped: dict[str, list[dict]] = {}
-    trials_by_id = {entry.get("run_id"): entry for entry in entries if entry.get("kind") == "trial"}
     outcomes_by_trial_ref = {}
     for entry in entries:
         if entry.get("kind") == "outcome":
@@ -234,7 +236,9 @@ def _cmd_digest() -> None:
             seen_trial_ids.add(trial_id)
             trial = entry
             outcome = (outcomes_by_trial_ref.get(trial_id) or [{}])[-1]
-            decision = str(outcome.get("decision", (trial.get("metrics") or {}).get("decision", "unknown")))
+            decision = str(
+                outcome.get("decision", (trial.get("metrics") or {}).get("decision", "unknown"))
+            )
             hypothesis = trial.get("hypothesis") or outcome.get("hypothesis") or "-"
             source = trial.get("source") or outcome.get("source") or "-"
             decision_ref = outcome.get("decision_ref") or trial.get("decision_ref") or "-"

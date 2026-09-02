@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import pandas as pd
-
 from capstone.backtest import sweep
 from capstone.evaluate import compare_rejection_rules
 from capstone.runlog import log_run
