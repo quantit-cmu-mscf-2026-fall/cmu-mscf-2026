@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import pandas as pd
-
 from capstone.acceptance import strategy_accepts
 from capstone.backtest import run_backtest
 from capstone.forecaster_momentum import momentum_signal
