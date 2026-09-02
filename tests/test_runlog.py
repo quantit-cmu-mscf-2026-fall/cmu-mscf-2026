@@ -29,6 +29,9 @@ ENTRY_FIELDS = (
     "metrics",
     "tags",
     "notes",
+    "hypothesis",
+    "source",
+    "decision_ref",
 )
 
 
@@ -59,6 +62,26 @@ def test_log_run_appends(tmp_path, monkeypatch):
     assert entries[2]["notes"] == "baseline"
 
 
+def test_log_run_extended_schema(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+
+    entry = runlog.log_run(
+        "alpha",
+        params={"lookback": 20},
+        metrics={"decision": "pass"},
+        seed=7,
+        hypothesis="BH screening retains the signal in the faint regime",
+        source="machine-generated",
+        decision_ref="docs/decisions.md",
+        tags=["screening"],
+    )
+
+    assert entry["hypothesis"] == "BH screening retains the signal in the faint regime"
+    assert entry["source"] == "machine-generated"
+    assert entry["decision_ref"] == "docs/decisions.md"
+    assert entry["metrics"]["decision"] == "pass"
+
+
 def test_git_sha_fallback(tmp_path, monkeypatch):
     monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
 
@@ -70,6 +93,103 @@ def test_git_sha_fallback(tmp_path, monkeypatch):
     # A missing git must degrade the SHA, never raise out of log_run.
     entry = runlog.log_run("gamma")
     assert entry["git_sha"] == "unknown"
+
+
+def test_digest_cli_groups_by_tag_and_decision_ref(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    trial_a = runlog.log_run(
+        "alpha",
+        hypothesis="Keep the signal in the faint regime",
+        source="machine-generated",
+        decision_ref="docs/decisions.md",
+        metrics={"decision": "pass"},
+        tags=["screening"],
+    )
+    runlog.log_outcome(
+        trial_ref=trial_a["run_id"],
+        decision="pass",
+        metrics={"decision": "pass", "sharpe": 1.1},
+        source="machine-generated",
+        decision_ref="docs/decisions.md",
+        tags=["screening"],
+    )
+    trial_b = runlog.log_run(
+        "beta",
+        hypothesis="Reject nulls under strict control",
+        source="literature:benjamini_hochberg+2024-01-01",
+        decision_ref="docs/decisions.md",
+        metrics={"decision": "nothing"},
+        tags=["screening"],
+    )
+    runlog.log_outcome(
+        trial_ref=trial_b["run_id"],
+        decision="nothing",
+        metrics={"decision": "nothing", "sharpe": -0.3},
+        source="literature:benjamini_hochberg+2024-01-01",
+        decision_ref="docs/decisions.md",
+        tags=["screening"],
+    )
+
+    env = dict(os.environ, CAPSTONE_LEDGER_DIR=str(tmp_path))
+    result = subprocess.run(
+        [sys.executable, "-m", "capstone.runlog", "digest"],
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+        env=env,
+        check=True,
+    )
+
+    assert "screening" in result.stdout
+    assert "Hypothesis" in result.stdout
+    assert "Source" in result.stdout
+    assert "Decision" in result.stdout
+    assert "docs/decisions.md" in result.stdout
+    assert "pass" in result.stdout
+    assert "nothing" in result.stdout
+
+
+def test_screened_candidate_has_trial_and_outcome_entries(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+
+    trial = runlog.log_run(
+        "candidate_screen",
+        params={"n_candidates": 2, "alpha": 0.05},
+        seed=7,
+        hypothesis="Low-volatility premium",
+        source="economic-reasoning",
+        tags=["backlog-screen"],
+    )
+    outcome = runlog.log_outcome(
+        trial_ref=trial["run_id"],
+        decision="nothing",
+        metrics={"decision": "nothing", "sharpe": -0.41},
+        source="economic-reasoning",
+        hypothesis="Low-volatility premium",
+        decision_ref="docs/decisions.md",
+        tags=["backlog-screen"],
+    )
+
+    entries = [json.loads(line) for line in (tmp_path / "runs.jsonl").read_text(encoding="utf-8").splitlines()]
+    trial_rows = [entry for entry in entries if entry.get("kind") == "trial"]
+    outcome_rows = [entry for entry in entries if entry.get("kind") == "outcome"]
+    assert len(trial_rows) == 1
+    assert len(outcome_rows) == 1
+    assert outcome_rows[0]["trial_ref"] == trial["run_id"]
+    assert outcome_rows[0]["metrics"]["decision"] == "nothing"
+
+    env = dict(os.environ, CAPSTONE_LEDGER_DIR=str(tmp_path))
+    result = subprocess.run(
+        [sys.executable, "-m", "capstone.runlog", "digest"],
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+        env=env,
+        check=True,
+    )
+    assert "Low-volatility premium" in result.stdout
+    assert "economic-reasoning" in result.stdout
+    assert "Decision: nothing" in result.stdout
 
 
 def test_stats_cli(tmp_path, monkeypatch):

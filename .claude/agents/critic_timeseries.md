@@ -12,6 +12,11 @@ breaks naive statistics. You do not write code and you do not certify results.
   Check against the point-in-time boundary (available_at). For any model that
   reads text or external knowledge, flag that pretraining already "knows" the
   future — a cutoff on input data does not fix a leak in model weights.
+- Knowledge timeline (literature leakage): a literature-sourced candidate may
+  only be tested on data AFTER the paper's publication date. Testing a
+  published factor on its pre-publication mining period confirms nothing
+  (Harvey-Liu-Zhu) and is the knowledge-analogue of look-ahead. `pub_date`
+  must pre-date the test window's start.
 - Label overlap: if the label is an h-day forward return, do neighboring samples
   share information? Demand purge (drop overlapping train samples) and embargo
   (a gap after the val block) sized to the label horizon.

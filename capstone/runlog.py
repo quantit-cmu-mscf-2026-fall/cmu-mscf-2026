@@ -14,6 +14,7 @@ can be read with nothing but the standard library.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -22,6 +23,23 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 LEDGER_FILENAME = "runs.jsonl"
+
+
+def _stable_run_id(seed: int | None, name: str, params: dict | None, ts_utc: str) -> str:
+    """Stable ledger id used to link a trial to its outcome.
+
+    We do not attempt to mutate history. Instead, the id is a deterministic key
+    based on the experiment identifier, the seed, the parameter set, and the
+    timestamp of the trial entry. The outcome record then appends a second row
+    referencing this id without altering the original entry.
+    """
+    payload = json.dumps({
+        "name": name,
+        "seed": seed,
+        "params": params or {},
+        "ts_utc": ts_utc,
+    }, sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
 def _ledger_dir() -> Path:
@@ -67,26 +85,21 @@ def log_run(
     seed: int | None = None,
     tags: list[str] | None = None,
     notes: str = "",
+    hypothesis: str | None = None,
+    source: str | None = None,
+    decision_ref: str | None = None,
 ) -> dict:
-    """Append one experiment run to the ledger and return the entry written.
+    """Append the initial trial entry for an experiment.
 
-    Call this once per experiment, at the moment the result exists. The entry
-    records who ran what, on which commit, with which parameters and outcome —
-    enough to make the trial count auditable and each trial reconstructible.
-
-    Args:
-        name: short experiment identifier; reuse the same name across a sweep.
-        params: configuration that defines the trial (lookbacks, thresholds).
-        metrics: outcome numbers (sharpe, hit rate) — the tested quantity.
-        seed: RNG seed, so a run can be reproduced exactly.
-        tags: free-form labels for later filtering.
-        notes: anything the fields above cannot express.
-
-    Returns:
-        The dict that was written, including the generated bookkeeping fields.
+    A trial is logged before results are read. That entry is append-only and
+    permanently preserves the original trial context. A later outcome record can
+    reference the same `run_id` without mutating the original history.
     """
+    ts_utc = datetime.now(UTC).isoformat()
     entry = {
-        "ts_utc": datetime.now(UTC).isoformat(),
+        "kind": "trial",
+        "run_id": _stable_run_id(seed, name, params, ts_utc),
+        "ts_utc": ts_utc,
         "user": os.environ.get("GITHUB_USER") or os.environ.get("USER") or "unknown",
         "git_sha": _git_sha(),
         "session_id": os.environ.get("CLAUDE_SESSION_ID"),
@@ -96,6 +109,50 @@ def log_run(
         "metrics": metrics or {},
         "tags": tags or [],
         "notes": notes,
+        "hypothesis": hypothesis,
+        "source": source,
+        "decision_ref": decision_ref,
+    }
+    ledger_dir = _ledger_dir()
+    ledger_dir.mkdir(parents=True, exist_ok=True)
+    with (ledger_dir / LEDGER_FILENAME).open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(entry) + "\n")
+    return entry
+
+
+def log_outcome(
+    *,
+    trial_ref: str,
+    decision: str,
+    metrics: dict | None = None,
+    tags: list[str] | None = None,
+    notes: str = "",
+    hypothesis: str | None = None,
+    source: str | None = None,
+    decision_ref: str | None = None,
+) -> dict:
+    """Append the final outcome for a previously logged trial.
+
+    This preserves append-only history: the original trial entry remains intact,
+    and a second JSONL row references it via `trial_ref` and records the final
+    decision after the gate has run.
+    """
+    ts_utc = datetime.now(UTC).isoformat()
+    entry = {
+        "kind": "outcome",
+        "run_id": _stable_run_id(None, "outcome", {"trial_ref": trial_ref}, ts_utc),
+        "trial_ref": trial_ref,
+        "ts_utc": ts_utc,
+        "user": os.environ.get("GITHUB_USER") or os.environ.get("USER") or "unknown",
+        "git_sha": _git_sha(),
+        "session_id": os.environ.get("CLAUDE_SESSION_ID"),
+        "decision": decision,
+        "metrics": metrics or {},
+        "tags": tags or [],
+        "notes": notes,
+        "hypothesis": hypothesis,
+        "source": source,
+        "decision_ref": decision_ref,
     }
     ledger_dir = _ledger_dir()
     ledger_dir.mkdir(parents=True, exist_ok=True)
@@ -139,6 +196,57 @@ def _cmd_list(last: int) -> None:
         print(f"{ts}  {user}  {name}  {metrics}")
 
 
+def _cmd_digest() -> None:
+    """Print a human-readable synopsis grouped by tag.
+
+    Each trial is reported with its hypothesis, source, and the final decision
+    from its linked outcome record, so a reviewer can follow the narrative in one
+    place without reading the raw JSONL.
+    """
+    entries = _read_entries()
+    grouped: dict[str, list[dict]] = {}
+    trials_by_id = {entry.get("run_id"): entry for entry in entries if entry.get("kind") == "trial"}
+    outcomes_by_trial_ref = {}
+    for entry in entries:
+        if entry.get("kind") == "outcome":
+            outcomes_by_trial_ref.setdefault(entry.get("trial_ref"), []).append(entry)
+        tags = entry.get("tags") or []
+        if isinstance(tags, str):
+            tags = [tags]
+        if not tags:
+            tags = ["untagged"]
+        for tag in tags:
+            grouped.setdefault(tag, []).append(entry)
+
+    if not entries:
+        print("No runs in the ledger.")
+        return
+
+    for tag in sorted(grouped):
+        print(f"Tag: {tag}")
+        seen_trial_ids = set()
+        for entry in grouped[tag]:
+            if entry.get("kind") == "outcome":
+                continue
+            trial_id = entry.get("run_id")
+            if trial_id in seen_trial_ids:
+                continue
+            seen_trial_ids.add(trial_id)
+            trial = entry
+            outcome = (outcomes_by_trial_ref.get(trial_id) or [{}])[-1]
+            decision = str(outcome.get("decision", (trial.get("metrics") or {}).get("decision", "unknown")))
+            hypothesis = trial.get("hypothesis") or outcome.get("hypothesis") or "-"
+            source = trial.get("source") or outcome.get("source") or "-"
+            decision_ref = outcome.get("decision_ref") or trial.get("decision_ref") or "-"
+            name = trial.get("name", "?")
+            print(f"  - Name: {name}")
+            print(f"    Hypothesis: {hypothesis}")
+            print(f"    Source: {source}")
+            print(f"    Decision: {decision}")
+            print(f"    Decision ref: {decision_ref}")
+        print()
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         prog="python -m capstone.runlog",
@@ -148,11 +256,14 @@ def main(argv: list[str] | None = None) -> None:
     subparsers.add_parser("stats", help="trial count, runs per name, distinct users")
     list_parser = subparsers.add_parser("list", help="most recent runs, compactly")
     list_parser.add_argument("--last", type=int, default=10, help="how many entries to show")
+    subparsers.add_parser("digest", help="readable summary grouped by tag")
     args = parser.parse_args(argv)
     if args.command == "stats":
         _cmd_stats()
-    else:
+    elif args.command == "list":
         _cmd_list(args.last)
+    else:
+        _cmd_digest()
 
 
 if __name__ == "__main__":

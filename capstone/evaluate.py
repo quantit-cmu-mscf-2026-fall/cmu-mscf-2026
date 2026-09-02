@@ -216,3 +216,50 @@ def power(rejected: pd.Series, truth: pd.Series) -> float:
     if n_true == 0:
         return float("nan")
     return int((rejected & aligned_truth).sum()) / n_true
+
+
+def compare_rejection_rules(
+    summary: pd.DataFrame,
+    truth: pd.Series,
+    *,
+    alpha: float = 0.05,
+    periods_per_year: int = 252,
+) -> pd.DataFrame:
+    """Compare Benjamini-Hochberg and Bonferroni on the same candidate set.
+
+    Args:
+        summary: per-candidate backtest summary, as produced by `capstone.backtest.sweep`.
+        truth: boolean Series indexed by candidate name, True where the candidate is real.
+        alpha: target family-wise or false-discovery level.
+        periods_per_year: annualisation factor to match the Sharpe used in the summary.
+
+    Returns:
+        DataFrame indexed by method with columns `rejections`, `power`, and `fdr`.
+    """
+    aligned_truth = truth.reindex(summary.index).astype(bool)
+    if aligned_truth.isna().any():
+        missing = aligned_truth.index[aligned_truth.isna()].tolist()
+        raise KeyError(f"no ground truth for candidates: {missing[:5]}")
+
+    pvalues = pd.Series(
+        [
+            sharpe_pvalue(float(row["sharpe"]), int(row["n_obs"]), periods_per_year=periods_per_year)
+            for _, row in summary.iterrows()
+        ],
+        index=summary.index,
+    )
+
+    rows = []
+    for name, selector in [("benjamini_hochberg", benjamini_hochberg), ("bonferroni", bonferroni)]:
+        rejected = selector(pvalues, alpha=alpha)
+        fdr = false_discovery_rate(rejected, aligned_truth)
+        rows.append(
+            {
+                "method": name,
+                "rejections": int(rejected.sum()),
+                "power": float(power(rejected, aligned_truth)),
+                "fdr": float(fdr) if not np.isnan(fdr) else float("nan"),
+            }
+        )
+
+    return pd.DataFrame(rows).set_index("method")["rejections power fdr".split()]

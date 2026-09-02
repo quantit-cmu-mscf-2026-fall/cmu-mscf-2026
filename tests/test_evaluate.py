@@ -10,15 +10,18 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from capstone.backtest import sweep
 from capstone.evaluate import (
     benjamini_hochberg,
     bonferroni,
+    compare_rejection_rules,
     deflated_sharpe_ratio,
     expected_max_sharpe,
     false_discovery_rate,
     power,
     sharpe_pvalue,
 )
+from capstone.synth import make_panel
 
 
 def _uniform_pvalues(n: int, seed: int = 0) -> pd.Series:
@@ -203,3 +206,17 @@ class TestPower:
         never_fires = pd.Series(False, index=names)
         assert np.isnan(false_discovery_rate(never_fires, truth))
         assert power(never_fires, truth) == 0.0
+
+
+class TestCompareRejectionRules:
+    def test_returns_side_by_side_metrics_for_both_corrections(self):
+        panel = make_panel(n_dates=600, n_assets=25, n_candidates=80, n_real=10, seed=0)
+        summary = sweep(panel, cost_bps=0.0, freq="daily")
+        comparison = compare_rejection_rules(summary, panel.truth)
+
+        assert list(comparison.index) == ["benjamini_hochberg", "bonferroni"]
+        assert list(comparison.columns) == ["rejections", "power", "fdr"]
+        assert comparison["rejections"].ge(0).all()
+        assert comparison["power"].between(0.0, 1.0).all()
+        assert (comparison["fdr"].isna() | (comparison["fdr"] >= 0.0)).all()
+        assert comparison.loc["benjamini_hochberg", "rejections"] >= comparison.loc["bonferroni", "rejections"]
