@@ -143,3 +143,15 @@ class TestBootstrap:
     def test_rejects_empty_returns(self):
         with pytest.raises(ValueError):
             bootstrap_from_real(pd.DataFrame(), n_candidates=5)
+
+
+class TestCandidateFrames:
+    def test_yields_all_candidates(self):
+        panel = make_panel(n_dates=100, n_assets=5, n_candidates=10, seed=0)
+        names = [name for name, _, _ in candidate_frames(panel)]
+        assert names == list(panel.truth.index)
+
+    def test_real_flag_matches_truth(self):
+        panel = make_panel(n_dates=100, n_assets=5, n_candidates=10, n_real=4, seed=0)
+        for name, _frame, is_real in candidate_frames(panel):
+            assert is_real == panel.truth[name]
