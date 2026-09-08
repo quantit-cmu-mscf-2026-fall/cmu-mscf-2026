@@ -152,6 +152,52 @@ uses one: session capture. You will write one yourselves later in September.
 
 ---
 
+## 5b · Harnessing — the five mechanisms, and why you keep tending them
+
+"Harness" is the word for everything around the model that makes it behave like a member of this
+team rather than a clever stranger: what it reads at startup, what it may do, what it is stopped
+from doing, and what it knows only when it needs to. Five mechanisms, two axes.
+
+| Mechanism | Who writes it | When it loads | Advisory or binding | Use it for |
+|---|---|---|---|---|
+| `CLAUDE.md` | you | every session | advisory | short, always-true facts: commands, conventions, hard "never" rules |
+| Auto memory | the agent | every session | advisory | your corrections and preferences, accumulated without you writing them |
+| `.claude/rules/*.md` | you | every session, or only for matching `paths:` | advisory | conventions that belong to one part of the repository |
+| Skills | you | when relevant, or on `/name` | advisory | procedures and domain knowledge too long to keep in context always |
+| Hooks | you | at a lifecycle event | **binding** | things that must happen every time, including blocking an action |
+
+Read the two axes off the table. **Always-loaded vs on-demand** decides context cost: `CLAUDE.md`,
+memory and unscoped rules are paid every session, so they must be short; skills and path-scoped
+rules are paid on use, so they can be long. **Advisory vs binding** decides trust: four of the five
+shape what the agent *tends* to do; only a hook decides what it *can* do.
+
+**Why it needs tending.** A harness decays, for four reasons that all look like "the agent got
+worse": the code moved and a rule now points at a function that no longer exists; `CLAUDE.md`
+grew past the point where every line is read; auto memory saved a correction that was right in
+July and wrong in September; a skill froze while the note it came from advanced. None of these
+announce themselves. The weekly habit is prune → promote → measure: prune what the agent already
+does right without the line, promote what you keep re-explaining up the ladder (chat → memory →
+`CLAUDE.md` → rule → skill → hook), and after any change watch whether behaviour actually shifted.
+The test of a harness line is: would removing it cause a mistake?
+
+**Four practices that hold up**, all from the public documentation or this project:
+
+1. **A "never" that is ignored twice becomes a hook.** The ledger rule ("log every run") lived in
+   `CLAUDE.md` and was skipped; as a `PreToolUse` hook that refuses a backtest without a `run_id`, it
+   cannot be. Instructions are for judgment calls; hooks are for invariants.
+2. **Prune `CLAUDE.md` until every line earns its place.** A file that doubles in length halves
+   its adherence. Move procedures into skills, scope conventions into `paths:` rules, and keep the
+   root file to what applies to every session. `/doctor` proposes cuts; `/context` shows what loaded.
+3. **A skill's description is the product.** The body is read only after invocation; the
+   description is what the agent matches against. Write it as *what it does and when to use it*,
+   then test from a fresh session without naming the skill. If it does not fire, rewrite the
+   description, not the body.
+4. **Audit auto memory like you audit a teammate's notes.** Open `/memory` monthly. Delete what is
+   stale, correct what is wrong, and move anything that should be a rule into `CLAUDE.md` where you
+   control it. The agent's model of you is only as good as the last correction it saved.
+
+---
+
 ## 6 · Prompting, concretely
 
 The pattern that separates a useful prompt from a vague one is *specificity about the source and
