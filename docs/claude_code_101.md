@@ -275,7 +275,7 @@ Say this out loud once, because the semester depends on it.
 
 ## 10 · One-page command reference
 
-**Shell**
+### Shell
 
 | Command | Does |
 |---|---|
@@ -287,7 +287,7 @@ Say this out loud once, because the semester depends on it.
 | `claude --permission-mode plan` | start in plan mode |
 | `claude --worktree <name>` | isolated parallel session on its own branch |
 
-**In-session**
+### In-session
 
 | Command | Does |
 |---|---|

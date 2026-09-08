@@ -160,9 +160,9 @@ Then write your own. A `PostToolUse` hook on `Edit|Write` that rebuilds `notes/I
 a note changes is the one you will want by Part 7:
 
 ```text
-Write a PostToolUse hook on Edit|Write that runs .claude/hooks/rebuild_index.py when the
-edited file is under notes/. The script lists every notes/*.md with its first heading into
-notes/INDEX.md. Register it in .claude/settings.json and show me it firing.
+The template already registers .claude/hooks/rebuild_index.sh as a PostToolUse hook on
+Edit|Write. Read it and explain what it does. Then edit notes/<my note>.md — add one word —
+and show me notes/INDEX.md changing because the hook fired.
 ```
 
 Browse what is registered with `/hooks`. **Check and commit**: two hooks registered, both seen
