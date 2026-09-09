@@ -149,4 +149,5 @@ team + mentors, removable on request: see `docs/telemetry.md`.
 
 - [`docs/claude_code_101.md`](docs/claude_code_101.md) — the tool itself: the loop, plan mode, context, and the five ways to make it behave like a team member.
 - [`docs/exercise_knowledge_to_skill.md`](docs/exercise_knowledge_to_skill.md) — the September practice track: distil your own lecture notes into a `CLAUDE.md`, a rule, a hook and a skill, in your own `kb-<username>` repository created from [`kb-template`](https://github.com/quantit-cmu-mscf-2026-fall/kb-template).
+- [`docs/exercise_git_week3.md`](docs/exercise_git_week3.md) — the git drills: prove your commits are yours, stop committing machine noise, one change one PR, fold duplicates, review someone else's, survive a rebase conflict.
 - *GitHub, A to Z* lives on the [wiki](https://github.com/quantit-cmu-mscf-2026-fall/cmu-mscf-2026/wiki).
