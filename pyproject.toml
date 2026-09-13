@@ -9,6 +9,7 @@ dependencies = [
     "scipy>=1.10",
     "statsmodels>=0.14",
     "requests>=2.28",
+    "pydantic>=2.0",
 ]
 
 [project.optional-dependencies]
