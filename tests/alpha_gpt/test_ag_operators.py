@@ -90,6 +90,40 @@ class TestCausality:
         pd.testing.assert_frame_equal(before, after)
 
     @pytest.mark.parametrize("name", sorted(OPERATORS))
+    def test_masked_rows_never_leak_into_finite_outputs(self, name):
+        """A NaN row (a masked CV fold) may only produce NaN or values that ignore it.
+
+        Any output that is finite with the row masked must be the same whatever
+        the row's real values were — otherwise a fold's data could reach the
+        procedure trained around it.
+        """
+        spec = OPERATORS[name]
+        rng = np.random.default_rng(2)
+        args = _arguments(spec, rng)
+        row = 20
+
+        def with_row(values):
+            out = []
+            for arg in args:
+                if isinstance(arg, pd.DataFrame):
+                    changed = arg.copy()
+                    changed.iloc[row] = values(changed.shape[1])
+                    out.append(changed)
+                else:
+                    out.append(arg)
+            return spec(*out)
+
+        masked = with_row(lambda n: np.nan)
+        finite = masked.notna()
+        assert finite.to_numpy().any()
+        for _ in range(2):
+            revealed = with_row(lambda n: rng.normal(0.0, 5.0, size=n))
+            # Tolerance: pandas' rolling accumulators carry ~1e-15 rounding differences.
+            pd.testing.assert_frame_equal(
+                masked.where(finite), revealed.where(finite), check_exact=False, rtol=1e-9
+            )
+
+    @pytest.mark.parametrize("name", sorted(OPERATORS))
     def test_output_is_aligned_and_has_no_infinity(self, name):
         spec = OPERATORS[name]
         args = _arguments(spec, np.random.default_rng(1))

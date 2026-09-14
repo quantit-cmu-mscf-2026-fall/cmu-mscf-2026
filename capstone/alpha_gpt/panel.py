@@ -11,6 +11,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 #: The field every panel must carry: metrics score an alpha against it.
@@ -64,6 +65,37 @@ class OHLCVPanel:
     @property
     def assets(self) -> pd.Index:
         return self.fields[RETURNS_FIELD].columns
+
+    def mask(self, start: str | pd.Timestamp, end: str | pd.Timestamp) -> OHLCVPanel:
+        """The panel with every field NaN on dates in [start, end].
+
+        `returns` is also NaN on the first date after `end`, because that return
+        is measured from `end`'s close. Everything computed from the masked rows
+        — a label that realises inside them, a rolling feature whose window
+        reaches into them — comes out NaN too, which is how a cross-validation
+        fold is kept out of the procedure trained around it: the data is absent,
+        not merely skipped by an index.
+        """
+        start, end = pd.Timestamp(start), pd.Timestamp(end)
+        if start > end:
+            raise ValueError("mask start is after its end")
+        hidden = (self.dates >= start) & (self.dates <= end)
+        after = np.flatnonzero(self.dates > end)
+
+        fields = {}
+        for name, frame in self.fields.items():
+            masked = frame.copy()
+            masked.loc[hidden] = np.nan
+            if name == RETURNS_FIELD and after.size:
+                masked.iloc[after[0]] = np.nan
+            fields[name] = masked
+
+        descriptor = dict(self.descriptor)
+        descriptor["masked"] = [
+            *descriptor.get("masked", []),
+            [start.date().isoformat(), end.date().isoformat()],
+        ]
+        return OHLCVPanel(fields=fields, groups=dict(self.groups), descriptor=descriptor)
 
     def until(self, date: str | pd.Timestamp) -> OHLCVPanel:
         """The panel restricted to dates strictly before `date`.

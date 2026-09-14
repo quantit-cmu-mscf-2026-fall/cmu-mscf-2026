@@ -109,6 +109,24 @@ class TestPanelContainer:
         with pytest.raises(ValueError, match="no label"):
             OHLCVPanel(fields={"returns": returns}, groups={"sector": pd.Series({"A": "x"})})
 
+    def test_mask_hides_the_range_and_the_return_measured_from_its_last_close(self, null_panel):
+        start, end = null_panel.dates[100], null_panel.dates[149]
+        masked = null_panel.mask(start, end)
+
+        for name, frame in masked.fields.items():
+            original = null_panel.fields[name]
+            assert frame.loc[start:end].isna().all().all(), name
+            assert frame.iloc[:100].equals(original.iloc[:100]), name
+            assert frame.iloc[151:].equals(original.iloc[151:]), name
+        assert masked.fields["returns"].iloc[150].isna().all()
+        assert masked.fields["close"].iloc[150].equals(null_panel.fields["close"].iloc[150])
+        assert masked.descriptor["masked"] == [[start.date().isoformat(), end.date().isoformat()]]
+        assert "masked" not in null_panel.descriptor
+
+    def test_mask_rejects_a_reversed_range(self, null_panel):
+        with pytest.raises(ValueError, match="after its end"):
+            null_panel.mask(null_panel.dates[10], null_panel.dates[5])
+
     def test_until_drops_the_cutoff_and_everything_after(self, null_panel):
         cutoff = null_panel.dates[300]
         head = null_panel.until(cutoff)
