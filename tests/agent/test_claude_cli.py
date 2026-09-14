@@ -83,6 +83,30 @@ class TestInvocation:
         assert args[0] == "/opt/claude"
         assert kwargs["timeout"] == 12.5
 
+    def test_extra_args_follow_base_flags_and_precede_max_turns(self):
+        runner = FakeRunner(stdout=_payload())
+        run_claude("say hi", max_turns=1, extra_args=["--tools", ""], runner=runner)
+
+        args, _ = runner.calls[0]
+        assert args == [
+            "claude",
+            "-p",
+            "--output-format",
+            "json",
+            "--tools",
+            "",
+            "--max-turns",
+            "1",
+        ]
+
+    def test_cwd_is_forwarded_and_defaults_to_none(self, tmp_path):
+        runner = FakeRunner(stdout=_payload())
+        run_claude("say hi", cwd=tmp_path, runner=runner)
+        run_claude("say hi", runner=runner)
+
+        assert runner.calls[0][1]["cwd"] == tmp_path
+        assert runner.calls[1][1]["cwd"] is None
+
     def test_default_runner_is_subprocess_run(self, monkeypatch):
         fake = FakeRunner(stdout=_payload())
         monkeypatch.setattr(claude_cli.subprocess, "run", fake)
@@ -97,6 +121,13 @@ class TestInputValidation:
         runner = FakeRunner(stdout=_payload())
         with pytest.raises(ValueError, match="max_turns"):
             run_claude("say hi", max_turns=bad, runner=runner)
+        assert runner.calls == []
+
+    @pytest.mark.parametrize("bad", ["--tools", [1], ["--tools", None]])
+    def test_rejects_extra_args_that_are_not_a_sequence_of_str(self, bad):
+        runner = FakeRunner(stdout=_payload())
+        with pytest.raises(ValueError, match="extra_args"):
+            run_claude("say hi", extra_args=bad, runner=runner)
         assert runner.calls == []
 
     @pytest.mark.parametrize("blank", ["", "   \n"])

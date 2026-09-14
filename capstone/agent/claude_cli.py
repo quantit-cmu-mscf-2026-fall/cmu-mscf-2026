@@ -15,8 +15,9 @@ The subprocess dependency is injectable (`runner=`) so tests never call Claude.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 CLAUDE_EXECUTABLE = "claude"
 
@@ -46,14 +47,21 @@ class ClaudeCLIError(RuntimeError):
 
 
 def build_command(
-    *, max_turns: int | None = None, executable: str = CLAUDE_EXECUTABLE
+    *,
+    max_turns: int | None = None,
+    executable: str = CLAUDE_EXECUTABLE,
+    extra_args: Sequence[str] = (),
 ) -> list[str]:
     """The argv for one non-interactive call. The prompt goes on stdin, not here.
 
     Keeping the prompt out of argv avoids the OS argument-length limit and keeps
-    prompt text out of process listings.
+    prompt text out of process listings. `extra_args` are appended verbatim after
+    the base flags, e.g. `("--tools", "")` to run the model with no tools at all.
     """
-    command = [executable, "-p", "--output-format", "json"]
+    # A bare string is a Sequence[str] too; "--tools" would become "-", "-", "t", ...
+    if isinstance(extra_args, str) or not all(isinstance(arg, str) for arg in extra_args):
+        raise ValueError(f"extra_args must be a sequence of str, got {extra_args!r}")
+    command = [executable, "-p", "--output-format", "json", *extra_args]
     if max_turns is not None:
         command += ["--max-turns", str(max_turns)]
     return command
@@ -65,6 +73,8 @@ def run_claude(
     max_turns: int | None = None,
     timeout: float | None = None,
     executable: str = CLAUDE_EXECUTABLE,
+    extra_args: Sequence[str] = (),
+    cwd: str | os.PathLike[str] | None = None,
     runner: Runner | None = None,
 ) -> str:
     """Send `prompt` to `claude -p` and return the final result text.
@@ -74,6 +84,11 @@ def run_claude(
         max_turns: forwarded as `--max-turns`; None leaves the CLI default.
         timeout: seconds before the subprocess is killed; None waits forever.
         executable: the CLI to invoke, for installs not named `claude` on PATH.
+        extra_args: further CLI flags, appended verbatim (see `build_command`).
+        cwd: working directory for the subprocess. Claude Code reads the project
+            it is started in (CLAUDE.md, settings, files its tools can open), so
+            a caller that must keep the model away from the repository passes
+            an empty directory here. None inherits the caller's cwd.
         runner: stand-in for `subprocess.run`. Resolved at call time, so
             monkeypatching `subprocess.run` in this module also works.
 
@@ -81,7 +96,8 @@ def run_claude(
         The `result` field of Claude Code's JSON output.
 
     Raises:
-        ValueError: if `prompt` is blank or `max_turns` is not a positive int.
+        ValueError: if `prompt` is blank, `max_turns` is not a positive int, or
+            `extra_args` is not a sequence of strings.
         ClaudeCLIError: if the CLI is missing, times out, exits non-zero,
             prints output that is not the expected JSON object, or reports an
             unsuccessful run (including hitting `max_turns`).
@@ -95,7 +111,7 @@ def run_claude(
         raise ValueError(f"max_turns must be a positive int, got {max_turns!r}")
 
     run = runner or subprocess.run
-    command = build_command(max_turns=max_turns, executable=executable)
+    command = build_command(max_turns=max_turns, executable=executable, extra_args=extra_args)
 
     try:
         completed = run(
@@ -105,6 +121,7 @@ def run_claude(
             text=True,
             timeout=timeout,
             check=False,
+            cwd=cwd,
         )
     except FileNotFoundError as exc:
         raise ClaudeCLIError(
