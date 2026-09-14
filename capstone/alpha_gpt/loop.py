@@ -144,17 +144,26 @@ class CVResult:
         return sum(len(fold.procedure.trials) for fold in self.folds)
 
     def summary(self) -> dict[str, Any]:
-        """Out-of-fold performance of the procedure's top pick, fold by fold and pooled."""
+        """Out-of-fold performance of the procedure's top pick, fold by fold and pooled.
+
+        Compare `mean_train_ic` with `held_out_ic_mean` to gauge overfitting — not the
+        t-stats: t grows with sqrt(dates), and a training set is several times longer
+        than its held-out fold, so t would fall even for an alpha that did not decay.
+        """
         tops = [fold.held_out[0] for fold in self.folds if fold.held_out]
         held_ic = np.array([top.held_out.ic_mean for top in tops], dtype=float)
         k = int(np.isfinite(held_ic).sum())
         mean_ic = float(np.nanmean(held_ic)) if k else math.nan
         spread = float(np.nanstd(held_ic, ddof=1)) if k >= 2 else math.nan
         t_across = mean_ic / spread * math.sqrt(k) if k >= 2 and spread > 0 else math.nan
+        train_ic = _mean([top.train.ic_mean for top in tops])
+        retained = mean_ic / train_ic if math.isfinite(train_ic) and train_ic > 0 else math.nan
         return _finite_or_none(
             {
                 "n_folds": len(self.folds),
+                "mean_train_ic": train_ic,
                 "held_out_ic_mean": mean_ic,
+                "held_out_share_of_train_ic": retained,
                 "held_out_ic_t_across_folds": t_across,
                 "share_of_folds_positive": float(np.mean(held_ic[np.isfinite(held_ic)] > 0))
                 if k

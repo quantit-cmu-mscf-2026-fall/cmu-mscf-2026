@@ -259,11 +259,11 @@ def format_cv_summary(cv_result: CVResult) -> str:
             )
     s = cv_result.summary()
     lines.append(
-        f"held-out ic mean {_fmt(s['held_out_ic_mean'], '+.4f')} "
-        f"(t across folds {_fmt(s['held_out_ic_t_across_folds'], '.2f')}, "
-        f"positive in {_fmt(s['share_of_folds_positive'], '.0%')} of folds); "
-        f"mean train t {_fmt(s['mean_train_t'], '.2f')} vs "
-        f"mean held-out t {_fmt(s['mean_held_out_t'], '.2f')}"
+        f"held-out ic mean {_fmt(s['held_out_ic_mean'], '+.4f')} vs mean train ic "
+        f"{_fmt(s['mean_train_ic'], '+.4f')} "
+        f"({_fmt(s['held_out_share_of_train_ic'], '.0%')} retained; "
+        f"t across folds {_fmt(s['held_out_ic_t_across_folds'], '.2f')}, "
+        f"positive in {_fmt(s['share_of_folds_positive'], '.0%')} of folds)"
     )
     return "\n".join(lines)
 
@@ -289,15 +289,20 @@ def format_overview(summary: dict[str, Any]) -> str:
             "\n== overfitting check ==",
             f"family size (search trials in every fold and the final run): "
             f"{summary['family_size']}",
-            f"in-sample, final selection: train t = "
-            f"{_fmt(in_sample.get('train_ic_tstat'), '.2f')}, deflated Sharpe ratio = "
+            f"in-sample, final selection: train ic = "
+            f"{_fmt(in_sample.get('train_ic_mean'), '+.4f')} "
+            f"(t = {_fmt(in_sample.get('train_ic_tstat'), '.2f')}), deflated Sharpe ratio = "
             f"{_fmt(in_sample.get('deflated_sharpe_ratio'), '.3f')}",
-            f"cross-validated procedure: mean train t = {_fmt(cv['mean_train_t'], '.2f')} -> "
-            f"mean held-out t = {_fmt(cv['mean_held_out_t'], '.2f')}",
-            f"TEST: t = {_fmt(test['test_ic_tstat'], '.2f')}, "
+            f"cross-validated procedure: mean train ic = {_fmt(cv['mean_train_ic'], '+.4f')} -> "
+            f"mean held-out ic = {_fmt(cv['held_out_ic_mean'], '+.4f')} "
+            f"({_fmt(cv['held_out_share_of_train_ic'], '.0%')} of train IC retained)",
+            f"TEST: ic = {_fmt(test['test_ic_mean'], '+.4f')}, "
+            f"t = {_fmt(test['test_ic_tstat'], '.2f')}, "
             f"p = {_fmt(test['test_ic_pvalue'], '.4f')}"
             if test
             else "TEST: not evaluated (--skip-test)",
+            "(compare IC across these lines, not t: t grows with the number of dates, "
+            "and a training set is longer than a held-out fold)",
         ]
     )
 

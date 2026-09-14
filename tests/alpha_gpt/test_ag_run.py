@@ -102,6 +102,7 @@ def test_end_to_end_run_writes_run_dir_and_ledger(config_path, tmp_path, ledger,
     assert "cross-validation" in stdout
     assert "TEST (evaluated once)" in stdout
     assert "overfitting check" in stdout
+    assert "of train IC retained" in stdout
 
 
 def test_skip_test_leaves_test_untouched(config_path, tmp_path, ledger):

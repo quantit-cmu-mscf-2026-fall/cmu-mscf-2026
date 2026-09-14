@@ -429,3 +429,21 @@ class TestTestLock:
             n_dates=800, n_assets=100, pattern="reversal", strength=0.06, seed=4
         )
         assert previous_test_runs(other_data, splits) == []
+
+
+def test_cv_summary_measures_overfitting_by_ic_shrinkage(planted, tmp_path, ledger):
+    """t falls with a shorter held-out fold even without decay, so shrinkage is measured in IC."""
+    panel, splits = planted
+    llm = RoleLLM(rounds=[_seed(*JUNK, "neg(returns)")])
+    result = _cv(panel, splits, llm, tmp_path, n_splits=3, n_rounds=1, n_alphas=4)
+    summary = result.summary()
+    tops = [fold.held_out[0] for fold in result.folds]
+
+    assert summary["mean_train_ic"] == pytest.approx(np.mean([t.train.ic_mean for t in tops]))
+    assert summary["held_out_share_of_train_ic"] == pytest.approx(
+        summary["held_out_ic_mean"] / summary["mean_train_ic"]
+    )
+    # A planted, undecaying signal keeps most of its IC out of fold...
+    assert 0.5 < summary["held_out_share_of_train_ic"] < 1.5
+    # ...even though its t-stat drops with the shorter held-out sample.
+    assert summary["mean_held_out_t"] < summary["mean_train_t"]
