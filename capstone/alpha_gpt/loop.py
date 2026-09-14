@@ -20,7 +20,8 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass, field
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +46,7 @@ from capstone.alpha_gpt.trials import (
     TrialRecord,
     evaluate_on_test,
 )
+from capstone.runlog import read_entries
 
 FINAL_TEST_FILE = "final_test.json"
 
@@ -286,14 +288,30 @@ def finalize_on_test(
     *,
     context: LedgerContext,
     run_dir: Path,
+    reuse_test: bool = False,
 ) -> FinalReport:
-    """Evaluate the selected alphas on TEST, once per run directory.
+    """Evaluate the selected alphas on TEST, once per run directory and once per dataset.
 
-    The result file is created exclusively before anything is computed, so a
-    second call — or a call after a crash midway — refuses rather than letting
-    TEST be looked at again.
+    Two locks, both checked before anything is computed:
+
+    - the run directory: a second call for the same run refuses;
+    - the ledger: if any earlier run already evaluated TEST on the same data and
+      split dates, this refuses unless `reuse_test=True`, in which case every
+      TEST entry is tagged `test_reuse` so the peek stays visible in the record.
     """
     path = Path(run_dir) / FINAL_TEST_FILE
+    if path.exists():
+        raise FileExistsError(f"TEST was already evaluated for this run: {path}")
+
+    previous = previous_test_runs(panel, splits)
+    if previous and not reuse_test:
+        raise TestAlreadyEvaluated(
+            f"TEST on this data and split was already evaluated by run(s) {previous}; "
+            "pass reuse_test=True (--reuse-test) to evaluate it again as a recorded reuse"
+        )
+    if previous:
+        context = replace(context, tags=(*context.tags, "test_reuse"))
+
     try:
         handle = path.open("x", encoding="utf-8")
     except FileExistsError as exc:
@@ -316,3 +334,29 @@ def finalize_on_test(
         report = FinalReport(result.run_id, len(result.trials), entries)
         json.dump(report.as_dict(), handle, indent=2)
     return report
+
+
+class TestAlreadyEvaluated(RuntimeError):
+    """TEST on this data and split was already looked at by an earlier run."""
+
+    __test__ = False  # not a pytest test class, despite the name
+
+
+def previous_test_runs(panel: OHLCVPanel, splits: SplitSpec) -> list[str]:
+    """run_ids of ledger entries that evaluated TEST on the same data and split dates."""
+    descriptor = _without_masks(panel.descriptor)
+    split_dates = splits.as_dict()
+    runs = set()
+    for entry in read_entries():
+        params = entry.get("params") or {}
+        if (
+            params.get("phase") == "test"
+            and params.get("splits") == split_dates
+            and _without_masks(params.get("panel") or {}) == descriptor
+        ):
+            runs.add(str(params.get("run_id")))
+    return sorted(runs)
+
+
+def _without_masks(descriptor: Mapping[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in descriptor.items() if key != "masked"}

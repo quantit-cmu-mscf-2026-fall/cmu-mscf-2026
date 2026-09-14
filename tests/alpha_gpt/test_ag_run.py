@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from capstone.alpha_gpt.loop import TestAlreadyEvaluated
 from capstone.alpha_gpt.run import build_panel, load_config, main
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -122,3 +123,18 @@ def test_shipped_configs_are_valid(name):
     assert cfg.name == name
     assert cfg.data.pattern == ("reversal" if name == "baseline_synth" else "none")
     assert build_panel(cfg).descriptor["n_dates"] == 1260
+
+
+def test_second_run_on_the_same_data_needs_reuse_test(config_path, tmp_path, ledger):
+    out = str(tmp_path / "out")
+    main(["--config", str(config_path), "--out-dir", out, "--run-id", "first"], llm=_llm())
+    with pytest.raises(TestAlreadyEvaluated):
+        main(["--config", str(config_path), "--out-dir", out, "--run-id", "second"], llm=_llm())
+    main(
+        ["--config", str(config_path), "--out-dir", out, "--run-id", "third", "--reuse-test"],
+        llm=_llm(),
+    )
+
+    test_tags = [e["tags"] for e in ledger() if e["tags"][-1] == "test"]
+    assert len(test_tags) == 2
+    assert "test_reuse" not in test_tags[0] and "test_reuse" in test_tags[1]

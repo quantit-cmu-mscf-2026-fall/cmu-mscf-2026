@@ -104,6 +104,15 @@ def log_run(
     return entry
 
 
+def read_entries() -> list[dict]:
+    """Every ledger entry, oldest first; an empty list if nothing has been logged.
+
+    For procedures that must consult the record before acting — e.g. refusing to
+    evaluate a held-out TEST set that an earlier run already looked at.
+    """
+    return _read_entries()
+
+
 def _read_entries() -> list[dict]:
     path = _ledger_dir() / LEDGER_FILENAME
     if not path.exists():

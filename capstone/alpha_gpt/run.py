@@ -107,6 +107,11 @@ def main(argv: Sequence[str] | None = None, *, llm: LLM | None = None) -> int:
     parser.add_argument(
         "--skip-test", action="store_true", help="stop after selection; do not touch TEST"
     )
+    parser.add_argument(
+        "--reuse-test",
+        action="store_true",
+        help="evaluate TEST even if an earlier run did on this data (tagged test_reuse)",
+    )
     args = parser.parse_args(argv)
 
     cfg = load_config(args.config)
@@ -142,7 +147,15 @@ def main(argv: Sequence[str] | None = None, *, llm: LLM | None = None) -> int:
     print(format_search_summary(result, splits))
 
     if not args.skip_test:
-        report = finalize_on_test(result, panel, splits, loop_cfg, context=context, run_dir=run_dir)
+        report = finalize_on_test(
+            result,
+            panel,
+            splits,
+            loop_cfg,
+            context=context,
+            run_dir=run_dir,
+            reuse_test=args.reuse_test,
+        )
         print(format_test_summary(report))
     print(f"\nrun directory: {run_dir}")
     return 0

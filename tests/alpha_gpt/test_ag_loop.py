@@ -10,7 +10,9 @@ import pytest
 
 from capstone.alpha_gpt.loop import (
     LoopConfig,
+    TestAlreadyEvaluated,
     finalize_on_test,
+    previous_test_runs,
     run_seed_analyst_loop,
     select_best,
 )
@@ -248,3 +250,49 @@ def test_on_null_data_the_pipeline_can_say_nothing_here(tmp_path, ledger):
 
     assert bh_empty >= 8
     assert test_significant <= 1
+
+
+def test_test_is_locked_across_runs_unless_the_reuse_is_recorded(planted, tmp_path, ledger):
+    panel, splits = planted
+
+    def search(run_dir):
+        llm = ScriptedLLM([_seed("neg(returns)", "returns")])
+        return _run(panel, splits, llm, run_dir, n_rounds=1, n_alphas=2)
+
+    config, first = search(tmp_path / "a")
+    finalize_on_test(first, panel, splits, config, context=CONTEXT, run_dir=tmp_path / "a")
+
+    _, second = search(tmp_path / "b")
+    with pytest.raises(TestAlreadyEvaluated, match="run-test"):
+        finalize_on_test(second, panel, splits, config, context=CONTEXT, run_dir=tmp_path / "b")
+    assert not (tmp_path / "b" / "final_test.json").exists()
+
+    finalize_on_test(
+        second, panel, splits, config, context=CONTEXT, run_dir=tmp_path / "b", reuse_test=True
+    )
+    test_entries = [e for e in ledger() if e["tags"][-1] == "test"]
+    assert len(test_entries) == 2
+    assert "test_reuse" not in test_entries[0]["tags"]
+    assert "test_reuse" in test_entries[1]["tags"]
+
+
+def test_test_lock_is_specific_to_the_data_and_split(planted, tmp_path, ledger):
+    panel, splits = planted
+    config, result = _run(
+        panel,
+        splits,
+        ScriptedLLM([_seed("neg(returns)", "returns")]),
+        tmp_path,
+        n_rounds=1,
+        n_alphas=2,
+    )
+    assert previous_test_runs(panel, splits) == []
+    finalize_on_test(result, panel, splits, config, context=CONTEXT, run_dir=tmp_path)
+
+    assert previous_test_runs(panel, splits) == ["run-test"]
+    other_split = SplitSpec.from_fractions(panel.dates, train_frac=0.5, valid_frac=0.2)
+    assert previous_test_runs(panel, other_split) == []
+    other_data = make_ohlcv_panel(
+        n_dates=800, n_assets=100, pattern="reversal", strength=0.06, seed=4
+    )
+    assert previous_test_runs(other_data, splits) == []

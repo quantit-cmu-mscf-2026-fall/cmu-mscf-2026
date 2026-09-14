@@ -59,6 +59,18 @@ def test_log_run_appends(tmp_path, monkeypatch):
     assert entries[2]["notes"] == "baseline"
 
 
+def test_read_entries_returns_everything_logged_in_order(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    assert runlog.read_entries() == []
+
+    runlog.log_run("alpha", params={"x": 1})
+    runlog.log_run("beta")
+
+    entries = runlog.read_entries()
+    assert [e["name"] for e in entries] == ["alpha", "beta"]
+    assert entries[0]["params"] == {"x": 1}
+
+
 def test_git_sha_fallback(tmp_path, monkeypatch):
     monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
 
