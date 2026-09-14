@@ -45,7 +45,7 @@ def to_weights(signal: pd.DataFrame, *, demean: bool = True, gross: float = 1.0)
     return values.mul(scale, axis=0)
 
 
-def _backtest_components(
+def backtest_components(
     signal: pd.DataFrame,
     returns: pd.DataFrame,
     *,
@@ -99,7 +99,7 @@ def run_backtest(
         `to_weights(signal).shift(1)`, so the first observation is always
         NaN (no prior signal to trade on).
     """
-    net_returns, _turnover = _backtest_components(
+    net_returns, _turnover = backtest_components(
         signal, returns, cost_bps=cost_bps, demean=demean, gross=gross
     )
     return net_returns
@@ -222,7 +222,7 @@ def sweep(panel: SyntheticPanel, *, cost_bps: float = 0.0, freq: str = "daily") 
 
     rows = {}
     for name, signal, is_real in candidate_frames(panel):
-        net_returns, turnover = _backtest_components(
+        net_returns, turnover = backtest_components(
             signal, panel.returns, cost_bps=cost_bps, demean=True, gross=1.0
         )
         summary = summarize(net_returns, freq=freq, turnover=float(turnover.mean()))
