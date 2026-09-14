@@ -9,7 +9,6 @@ import pandas as pd
 import pytest
 
 from capstone.alpha_gpt.metrics import forward_returns, rank_ic_series, split_metrics
-from capstone.alpha_gpt.splits import SplitSpec
 from capstone.alpha_gpt.synth_ohlcv import make_ohlcv_panel
 from capstone.cv import average_uniqueness, label_end_times
 
@@ -61,12 +60,9 @@ class TestRankIC:
 
 
 class TestSplitMetrics:
-    def test_planted_reversal_is_significant_on_validation(self, reversal_panel):
+    def test_planted_reversal_is_significant_on_a_later_block(self, reversal_panel):
         returns = reversal_panel.fields["returns"]
-        spec = SplitSpec.from_fractions(reversal_panel.dates)
-        metrics = split_metrics(
-            -returns, returns, spec.dates(reversal_panel.dates, "valid"), split="valid"
-        )
+        metrics = split_metrics(-returns, returns, reversal_panel.dates[250:390], split="valid")
         assert metrics.ic_tstat > 3
         assert metrics.ic_pvalue < 0.01
         assert metrics.ls_sharpe > 1

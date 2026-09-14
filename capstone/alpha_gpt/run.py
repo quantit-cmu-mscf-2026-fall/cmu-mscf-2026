@@ -2,37 +2,43 @@
 
     python -m capstone.alpha_gpt.run --config experiments/alpha_gpt/baseline_synth.toml
 
-Writes a run directory under experiments/alpha_gpt/out/ (gitignored) with the
-config, every LLM prompt and reply, trials, Analyst reviews and the final TEST
-report, and appends every evaluation to the run ledger. Real Claude is called
-through `claude -p`; tests pass a scripted `llm` instead.
+Cross-validates the discovery procedure with purged k-fold inside DEVELOPMENT,
+runs it once more on all of DEVELOPMENT, then evaluates that selection on TEST
+once. Writes a run directory under experiments/alpha_gpt/out/ (gitignored) and
+appends every evaluation to the run ledger. Real Claude is called through
+`claude -p`; tests pass a scripted `llm` instead.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import tomllib
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from capstone.alpha_gpt.loop import (
+    CVResult,
     FinalReport,
     LoopConfig,
-    LoopResult,
+    ProcedureResult,
+    cross_validate_procedure,
+    experiment_summary,
     finalize_on_test,
-    run_seed_analyst_loop,
+    run_final_procedure,
 )
 from capstone.alpha_gpt.panel import OHLCVPanel
 from capstone.alpha_gpt.prompts import noise_tstat
 from capstone.alpha_gpt.roles import LLM, claude_llm
 from capstone.alpha_gpt.splits import SplitSpec
 from capstone.alpha_gpt.synth_ohlcv import make_ohlcv_panel
-from capstone.alpha_gpt.trials import LedgerContext
+from capstone.alpha_gpt.trials import LedgerContext, Scoring
+from capstone.cv import PurgedKFold
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_OUT_DIR = REPO_ROOT / "experiments" / "alpha_gpt" / "out"
@@ -52,9 +58,19 @@ class DataConfig(_Section):
 
 
 class SplitsConfig(_Section):
-    train_frac: float = 0.6
-    valid_frac: float = 0.2
-    embargo_days: int = 5
+    test_frac: float = Field(0.2, gt=0.0, lt=1.0)
+    embargo_days: int = Field(5, ge=1)
+
+
+class CVConfig(_Section):
+    n_splits: int = Field(4, ge=2)
+    embargo_pct: float = Field(0.01, ge=0.0, lt=1.0)
+
+
+class ScoringConfig(_Section):
+    label_horizon: int = Field(1, ge=1)
+    cost_bps: float = Field(0.0, ge=0.0)
+    min_assets: int = Field(20, ge=2)
 
 
 class LoopSection(_Section):
@@ -62,9 +78,7 @@ class LoopSection(_Section):
     n_alphas: int = Field(5, ge=1, le=20)
     max_attempts: int = Field(3, ge=1)
     top_k: int = Field(1, ge=1)
-    cost_bps: float = Field(0.0, ge=0.0)
     max_trials: int = Field(100, ge=1)
-    min_assets: int = Field(20, ge=2)
 
 
 class LLMConfig(_Section):
@@ -78,6 +92,8 @@ class BaselineConfig(_Section):
     seed: int = 0
     data: DataConfig = DataConfig()
     splits: SplitsConfig = SplitsConfig()
+    cv: CVConfig = CVConfig()
+    scoring: ScoringConfig = ScoringConfig()
     loop: LoopSection = LoopSection()
     llm: LLMConfig = LLMConfig()
 
@@ -105,7 +121,7 @@ def main(argv: Sequence[str] | None = None, *, llm: LLM | None = None) -> int:
     parser.add_argument("--out-dir", default=str(DEFAULT_OUT_DIR), help="parent of run dirs")
     parser.add_argument("--run-id", default=None, help="defaults to <name>-<UTC timestamp>")
     parser.add_argument(
-        "--skip-test", action="store_true", help="stop after selection; do not touch TEST"
+        "--skip-test", action="store_true", help="stop before TEST; do not touch it"
     )
     parser.add_argument(
         "--reuse-test",
@@ -117,6 +133,14 @@ def main(argv: Sequence[str] | None = None, *, llm: LLM | None = None) -> int:
     cfg = load_config(args.config)
     panel = build_panel(cfg)
     splits = SplitSpec.from_fractions(panel.dates, **cfg.splits.model_dump())
+    scoring = Scoring(
+        horizon=cfg.scoring.label_horizon,
+        cost_bps=cfg.scoring.cost_bps,
+        min_assets=cfg.scoring.min_assets,
+    )
+    splits.check_horizon(scoring.horizon)
+    cv = PurgedKFold(cfg.cv.n_splits, horizon=scoring.horizon, embargo_pct=cfg.cv.embargo_pct)
+
     run_id = args.run_id or f"{cfg.name}-{datetime.now(UTC):%Y%m%dT%H%M%SZ}"
     run_dir = Path(args.out_dir) / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
@@ -140,42 +164,63 @@ def main(argv: Sequence[str] | None = None, *, llm: LLM | None = None) -> int:
         extra_params={"config_name": cfg.name, "idea": cfg.idea},
     )
     loop_cfg = LoopConfig(**cfg.loop.model_dump())
-    model = claude_llm(timeout=cfg.llm.timeout_s, model=cfg.llm.model or None)
-    result = run_seed_analyst_loop(
-        cfg.idea, panel, splits, loop_cfg, llm=llm or model, context=context, run_dir=run_dir
-    )
-    print(format_search_summary(result, splits))
+    chosen = llm or claude_llm(timeout=cfg.llm.timeout_s, model=cfg.llm.model or None)
 
+    cv_result = cross_validate_procedure(
+        cfg.idea,
+        panel,
+        splits,
+        loop_cfg,
+        cv,
+        llm=chosen,
+        context=context,
+        run_dir=run_dir,
+        scoring=scoring,
+    )
+    print(format_cv_summary(cv_result))
+
+    final = run_final_procedure(
+        cfg.idea,
+        panel,
+        splits,
+        loop_cfg,
+        llm=chosen,
+        context=context,
+        run_dir=run_dir,
+        scoring=scoring,
+    )
+    print(format_procedure(final, "final procedure on all of DEVELOPMENT"))
+
+    report = None
     if not args.skip_test:
         report = finalize_on_test(
-            result,
+            final,
             panel,
             splits,
-            loop_cfg,
             context=context,
             run_dir=run_dir,
+            scoring=scoring,
             reuse_test=args.reuse_test,
         )
         print(format_test_summary(report))
+
+    summary = experiment_summary(cv_result, final, report)
+    (run_dir / "summary.json").write_text(json.dumps(summary, indent=2))
+    print(format_overview(summary))
     print(f"\nrun directory: {run_dir}")
     return 0
 
 
-def format_search_summary(result: LoopResult, splits: SplitSpec) -> str:
-    ranges = splits.as_dict()
-    lines = [
-        f"run {result.run_id}",
-        f"TRAIN {ranges['train'][0]}..{ranges['train'][1]}  "
-        f"VALID {ranges['valid'][0]}..{ranges['valid'][1]}",
-    ]
+def format_procedure(result: ProcedureResult, title: str) -> str:
+    lines = [f"\n== {title} =="]
     for rnd in result.rounds:
-        lines.append(f"\n== round {rnd.round} ==")
+        lines.append(f"-- round {rnd.round} --")
         lines.append(f"idea: {rnd.idea}")
         for record in rnd.trials:
             lines.append(
-                f"  {record.trial_id:6s} train t={record.train.ic_tstat:6.2f}  "
-                f"valid t={record.valid.ic_tstat:6.2f} ic={record.valid.ic_mean:+.4f} "
-                f"ls_sharpe={record.valid.ls_sharpe:5.2f}  {record.expression}"
+                f"  {record.trial_id:6s} train t={record.train.ic_tstat:6.2f} "
+                f"ic={record.train.ic_mean:+.4f} ls_sharpe={record.train.ls_sharpe:5.2f}  "
+                f"{record.expression}"
             )
         if rnd.duplicates:
             lines.append(f"  duplicates not re-evaluated: {[d.expression for d in rnd.duplicates]}")
@@ -185,26 +230,82 @@ def format_search_summary(result: LoopResult, splits: SplitSpec) -> str:
             lines.append(f"  analyst: {rnd.review.summary}")
     n = len(result.trials)
     lines.append(
-        f"\nsearch trials: {n}; best-of-{n} noise benchmark t ~ {noise_tstat(n):.2f}"
+        f"trials: {n}; best-of-{n} noise benchmark t ~ {noise_tstat(n):.2f}"
         + ("; trial budget exhausted" if result.budget_exhausted else "")
     )
     for record in result.selected:
         lines.append(
-            f"selected {record.trial_id}: {record.expression} (valid t={record.valid.ic_tstat:.2f})"
+            f"selected {record.trial_id}: {record.expression} (train t={record.train.ic_tstat:.2f})"
         )
+    return "\n".join(lines)
+
+
+def format_cv_summary(cv_result: CVResult) -> str:
+    lines = [
+        "\n== cross-validation: each fold held out from the whole procedure (purged k-fold) =="
+    ]
+    for fold in cv_result.folds:
+        train, valid = fold.train_span, fold.valid_span
+        lines.append(
+            f"fold {fold.fold}: train {train[0]}..{train[1]} ({train[2]} dates), "
+            f"held out {valid[0]}..{valid[1]} ({valid[2]} dates), "
+            f"{len(fold.procedure.trials)} trials"
+        )
+        for score in fold.held_out:
+            lines.append(
+                f"  {score.expression}\n"
+                f"    train t={score.train.ic_tstat:.2f} -> held-out "
+                f"ic={score.held_out.ic_mean:+.4f} t={score.held_out.ic_tstat:.2f}"
+            )
+    s = cv_result.summary()
+    lines.append(
+        f"held-out ic mean {_fmt(s['held_out_ic_mean'], '+.4f')} "
+        f"(t across folds {_fmt(s['held_out_ic_t_across_folds'], '.2f')}, "
+        f"positive in {_fmt(s['share_of_folds_positive'], '.0%')} of folds); "
+        f"mean train t {_fmt(s['mean_train_t'], '.2f')} vs "
+        f"mean held-out t {_fmt(s['mean_held_out_t'], '.2f')}"
+    )
     return "\n".join(lines)
 
 
 def format_test_summary(report: FinalReport) -> str:
     lines = ["\n== TEST (evaluated once) =="]
     for entry in report.entries:
-        t = entry.test
+        t = entry.held_out
         lines.append(
             f"  {entry.trial_id}: {entry.expression}\n"
             f"    ic={t.ic_mean:+.4f} icir={t.icir:.3f} t={t.ic_tstat:.2f} p={t.ic_pvalue:.4f} "
             f"ls_sharpe={t.ls_sharpe:.2f} turnover={t.turnover:.3f} days={t.n_days}"
         )
     return "\n".join(lines)
+
+
+def format_overview(summary: dict[str, Any]) -> str:
+    in_sample = summary["in_sample"] or {}
+    cv = summary["cross_validation"]
+    test = summary["test"]
+    return "\n".join(
+        [
+            "\n== overfitting check ==",
+            f"family size (search trials in every fold and the final run): "
+            f"{summary['family_size']}",
+            f"in-sample, final selection: train t = "
+            f"{_fmt(in_sample.get('train_ic_tstat'), '.2f')}, deflated Sharpe ratio = "
+            f"{_fmt(in_sample.get('deflated_sharpe_ratio'), '.3f')}",
+            f"cross-validated procedure: mean train t = {_fmt(cv['mean_train_t'], '.2f')} -> "
+            f"mean held-out t = {_fmt(cv['mean_held_out_t'], '.2f')}",
+            f"TEST: t = {_fmt(test['test_ic_tstat'], '.2f')}, "
+            f"p = {_fmt(test['test_ic_pvalue'], '.4f')}"
+            if test
+            else "TEST: not evaluated (--skip-test)",
+        ]
+    )
+
+
+def _fmt(value: float | None, spec: str) -> str:
+    if value is None or (isinstance(value, float) and not math.isfinite(value)):
+        return "n/a"
+    return format(value, spec)
 
 
 if __name__ == "__main__":

@@ -11,8 +11,8 @@ Daily panel, one value per (date, asset).
 Fields: $fields
 Groups (only as the group argument of grouped_* operators): $groups
 `returns` on day t is the simple return from the previous close to day t's close.
-An alpha's value at day t's close is ranked across assets against each asset's return on
-day t+1. Higher value = higher expected next-day return.
+An alpha's value at day t's close is ranked across assets against each asset's
+$target. Higher value = higher expected return over that horizon.
 
 # Operators (the only functions allowed)
 $operators

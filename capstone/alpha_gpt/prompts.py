@@ -5,9 +5,9 @@ the JSON examples in them need no brace escaping, and `substitute` raises on a
 missing value instead of sending a half-filled prompt.
 
 What the LLM may see is decided by these function signatures. Neither renderer
-accepts a panel, a SplitSpec or anything carrying TEST dates or TEST metrics:
-the Analyst gets TRAIN/VALIDATION ranges as strings and `TrialRecord`s, which
-have no TEST field.
+accepts a panel, a SplitSpec or anything carrying held-out dates or metrics:
+the Analyst gets a description of its TRAIN dates and `TrialRecord`s, which
+carry TRAIN metrics only.
 """
 
 from __future__ import annotations
@@ -45,12 +45,20 @@ def operator_spec_text(*, groups_available: bool) -> str:
     return "\n".join(lines)
 
 
+def target_text(horizon: int) -> str:
+    """How the prediction target is described to both roles."""
+    if horizon == 1:
+        return "return on day t+1"
+    return f"compounded return over days t+1 to t+{horizon}"
+
+
 def render_quant_developer(
     *,
     idea: str,
     fields: Collection[str],
     groups: Collection[str],
     n_alphas: int,
+    horizon: int = 1,
     limits: Limits = DEFAULT_LIMITS,
     prior: PriorRound | None = None,
 ) -> str:
@@ -59,6 +67,7 @@ def render_quant_developer(
         idea=idea.strip(),
         fields=", ".join(fields),
         groups=", ".join(groups) if groups else "none (grouped_* operators are unavailable)",
+        target=target_text(horizon),
         operators=operator_spec_text(groups_available=bool(groups)),
         min_window=limits.min_window,
         max_window=limits.max_window,
@@ -74,16 +83,16 @@ def render_analyst(
     *,
     idea: str,
     records: Sequence[TrialRecord],
-    train_range: str,
-    valid_range: str,
+    train_description: str,
     cost_bps: float,
+    horizon: int = 1,
 ) -> str:
     return _render(
         "analyst",
         idea=idea.strip(),
+        target=target_text(horizon),
         cost_bps=f"{cost_bps:g}",
-        train_range=train_range,
-        valid_range=valid_range,
+        train_description=train_description,
         n_trials=len(records),
         noise_t=f"{noise_tstat(len(records)):.2f}",
         results_table=results_table(records),
@@ -102,24 +111,19 @@ def noise_tstat(n_trials: int) -> float:
 
 
 def results_table(records: Sequence[TrialRecord]) -> str:
-    header = (
-        "| id | round | expression | train ic_mean | train t | valid ic_mean | valid icir "
-        "| valid t | valid ls_sharpe | valid turnover | valid coverage |"
-    )
-    lines = [header, "|" + "---|" * 11]
+    header = "| id | round | expression | ic_mean | icir | t | ls_sharpe | turnover | coverage |"
+    lines = [header, "|" + "---|" * 9]
     for r in records:
         cells = [
             r.trial_id,
             str(r.round),
             f"`{r.expression}`",
             _num(r.train.ic_mean, 4),
+            _num(r.train.icir, 3),
             _num(r.train.ic_tstat, 2),
-            _num(r.valid.ic_mean, 4),
-            _num(r.valid.icir, 3),
-            _num(r.valid.ic_tstat, 2),
-            _num(r.valid.ls_sharpe, 2),
-            _num(r.valid.turnover, 3),
-            _num(r.valid.coverage, 2),
+            _num(r.train.ls_sharpe, 2),
+            _num(r.train.turnover, 3),
+            _num(r.train.coverage, 2),
         ]
         lines.append("| " + " | ".join(cells) + " |")
     return "\n".join(lines)

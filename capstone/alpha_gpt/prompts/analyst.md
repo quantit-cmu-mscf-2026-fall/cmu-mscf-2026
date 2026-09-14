@@ -7,26 +7,27 @@ state any number that is not in the table.
 $idea
 
 # Protocol (fixed; computed by the harness)
-- IC: daily Spearman correlation across assets between the alpha at close t and the return
-  on day t+1.
+- IC: daily Spearman correlation across assets between the alpha at close t and the
+  $target.
 - ic_mean, icir (ic mean / ic std, daily), t (IC t-statistic), ls_sharpe (annualised
   dollar-neutral long-short Sharpe, $cost_bps bps costs), turnover (mean daily),
   coverage (share of asset-days where the alpha is defined).
-- TRAIN $train_range; VALIDATION $valid_range. A held-out period exists; you will never
-  see it.
-- $n_trials distinct alphas have been evaluated in this run. The best of that many
-  pure-noise alphas would typically show t near $noise_t. Significance is decided by the
-  harness, not by you.
+- Every number is in-sample, on the TRAIN dates: $train_description. Held-out periods
+  exist to judge this whole process, including your feedback; you will never see them.
+- $n_trials distinct alphas have been evaluated so far. The best of that many pure-noise
+  alphas would typically show t near $noise_t. Significance is decided by the harness,
+  not by you.
 
-# Results (all rounds so far)
+# Results (all rounds so far, TRAIN only)
 $results_table
 
 # Task
 1. Summarise what the evidence says about the idea, referring to the table.
-2. Diagnose notable alphas: sign flipped, horizon mismatch, TRAIN/VALIDATION gap (overfit),
-   low coverage, high turnover.
+2. Diagnose notable alphas: sign flipped, horizon mismatch, fragility (a t barely above
+   what noise produces, low coverage), high turnover.
 3. Write a revised trading idea for the next round - a hypothesis in words, not expressions.
-   It may narrow, flip or abandon the idea.
+   It may narrow, flip or abandon the idea. Prefer economically motivated revisions over
+   chasing whichever alpha happened to score best.
 
 # Output
 Exactly one JSON object and nothing else - no markdown fences, no prose:

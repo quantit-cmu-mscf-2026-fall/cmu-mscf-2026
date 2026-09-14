@@ -1,6 +1,6 @@
 # Control: identical to baseline_synth.toml except nothing is planted.
-# Expected: the best VALIDATION t sits near the noise benchmark and TEST is
-# not significant — the pipeline must be able to say "nothing here".
+# Expected: in-sample t of the selected alphas is inflated by selection, while
+# held-out folds and TEST show nothing — the pipeline must say "nothing here".
 name = "baseline_null"
 idea = "Stocks that fell sharply recently tend to bounce back, and stocks that rose sharply tend to give back their gains."
 seed = 0
@@ -14,18 +14,24 @@ pattern = "none"
 strength = 0.0
 
 [splits]
-train_frac = 0.6
-valid_frac = 0.2
+test_frac = 0.2
 embargo_days = 5
+
+[cv]
+n_splits = 4
+embargo_pct = 0.01
+
+[scoring]
+label_horizon = 1
+cost_bps = 0.0
+min_assets = 20
 
 [loop]
 n_rounds = 3
 n_alphas = 5
 max_attempts = 3
 top_k = 1
-cost_bps = 0.0
 max_trials = 100
-min_assets = 20
 
 [llm]
 timeout_s = 300

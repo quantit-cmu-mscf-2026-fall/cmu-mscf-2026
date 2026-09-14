@@ -1,17 +1,22 @@
 """Evaluating an alpha is a trial, and every trial is in the ledger before anyone sees it.
 
-`TrialEvaluator` is the only place the search phase turns an expression into
-numbers. It computes TRAIN and VALIDATION metrics and appends the ledger entry
+`TrialEvaluator` is the only place a discovery procedure turns an expression into
+numbers. It scores the procedure's TRAIN dates and appends the ledger entry
 (`capstone.runlog.log_run`) before returning, so no caller — the loop, the
 Analyst, a human — can see a result that was not counted.
 
-It is built on the search panel (TEST removed), and `TrialRecord` has no TEST
-field, so test-period performance cannot leak into selection or into a prompt.
-TEST is evaluated separately and once, by `evaluate_on_test`, which also logs
-before returning.
+A procedure only ever holds a panel view: TEST removed (`SplitSpec.search_panel`)
+and, inside cross-validation, its held-out fold masked (`OHLCVPanel.mask`). The
+evaluator refuses a panel that still contains TEST dates, and `TrialRecord` has
+TRAIN metrics only. Held-out scores — cross-validation folds and TEST — come from
+`evaluate_holdout`, which also logs before returning and which the procedure
+itself never calls.
 
-Re-proposing an expression already evaluated in this run (same canonical form,
-same data and splits) is not a new hypothesis test: the numbers would be
+Every score uses the same `Scoring` settings and the same label-uniqueness
+sample weights (`capstone.cv.average_uniqueness`), in TRAIN and held out alike.
+
+Re-proposing an expression this procedure already evaluated (same canonical form,
+same data and dates) is not a new hypothesis test: the numbers would be
 identical. It returns a `Duplicate` and writes nothing to the ledger.
 """
 
@@ -21,20 +26,52 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+import pandas as pd
+
 from capstone.alpha_gpt.dsl import Node, canonical, evaluate
 from capstone.alpha_gpt.metrics import SplitMetrics, split_metrics
 from capstone.alpha_gpt.panel import RETURNS_FIELD, OHLCVPanel
-from capstone.alpha_gpt.splits import SplitSpec
+from capstone.cv import average_uniqueness, label_end_times
 from capstone.runlog import log_run
+
+#: Ledger phase -> the prefix its metrics are logged under.
+HOLDOUT_PHASES = {"cv_valid": "valid", "test": "test"}
 
 
 class TrialBudgetExhausted(RuntimeError):
-    """The run has evaluated `max_trials` distinct alphas."""
+    """The procedure has evaluated `max_trials` distinct alphas."""
+
+
+@dataclass(frozen=True)
+class Scoring:
+    """How every alpha in a run is scored — identically on TRAIN, VALIDATION and TEST."""
+
+    horizon: int = 1
+    cost_bps: float = 0.0
+    min_assets: int = 20
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"horizon": self.horizon, "cost_bps": self.cost_bps, "min_assets": self.min_assets}
+
+
+DEFAULT_SCORING = Scoring()
+
+
+def sample_weights(dates: pd.DatetimeIndex, horizon: int) -> pd.Series:
+    """Label-uniqueness weights (AFML ch. 4) for every date with a complete label."""
+    return average_uniqueness(label_end_times(dates, horizon), dates)
+
+
+def date_span(dates: pd.DatetimeIndex) -> list[Any]:
+    """[first ISO date, last ISO date, count] — how date sets are recorded."""
+    if len(dates) == 0:
+        return [None, None, 0]
+    return [dates[0].date().isoformat(), dates[-1].date().isoformat(), len(dates)]
 
 
 @dataclass(frozen=True)
 class TrialRecord:
-    """One evaluated alpha. Deliberately has no TEST metrics."""
+    """One evaluated alpha, with TRAIN metrics only."""
 
     trial_id: str
     round: int
@@ -42,7 +79,6 @@ class TrialRecord:
     raw_expression: str
     rationale: str
     train: SplitMetrics
-    valid: SplitMetrics
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -52,13 +88,12 @@ class TrialRecord:
             "raw_expression": self.raw_expression,
             "rationale": self.rationale,
             **self.train.as_flat("train"),
-            **self.valid.as_flat("valid"),
         }
 
 
 @dataclass(frozen=True)
 class Duplicate:
-    """An expression this run already evaluated, as trial `of`."""
+    """An expression this procedure already evaluated, as trial `of`."""
 
     expression: str
     raw_expression: str
@@ -77,28 +112,33 @@ class LedgerContext:
 
 
 class TrialEvaluator:
-    """Evaluate alphas on TRAIN and VALIDATION, logging each distinct one as a trial."""
+    """Score alphas on a procedure's TRAIN dates, logging each distinct one as a trial."""
 
     def __init__(
         self,
         panel: OHLCVPanel,
-        splits: SplitSpec,
+        train_dates: pd.DatetimeIndex,
         context: LedgerContext,
         *,
-        cost_bps: float = 0.0,
-        min_assets: int = 20,
+        test_start: pd.Timestamp,
+        scoring: Scoring = DEFAULT_SCORING,
+        weights: pd.Series | None = None,
+        scope: Mapping[str, Any] | None = None,
         max_trials: int | None = None,
     ) -> None:
-        self.panel = splits.search_panel(panel)
-        self.splits = splits
+        if (panel.dates >= pd.Timestamp(test_start)).any():
+            raise ValueError("a search panel must not contain TEST dates")
+        self.panel = panel
+        self.train_dates = pd.DatetimeIndex(train_dates)
         self.context = context
-        self.cost_bps = cost_bps
-        self.min_assets = min_assets
+        self.scoring = scoring
+        self.weights = (
+            weights if weights is not None else sample_weights(panel.dates, scoring.horizon)
+        )
+        self.scope = dict(scope or {})
         self.max_trials = max_trials
         self.records: list[TrialRecord] = []
         self._seen: dict[str, str] = {}
-        self._train_dates = splits.dates(self.panel.dates, "train")
-        self._valid_dates = splits.dates(self.panel.dates, "valid")
 
     @property
     def n_trials(self) -> int:
@@ -123,74 +163,82 @@ class TrialEvaluator:
         if self.max_trials is not None and self.n_trials >= self.max_trials:
             raise TrialBudgetExhausted(f"max_trials={self.max_trials} reached")
 
-        signal = evaluate(node, self.panel)
-        returns = self.panel.fields[RETURNS_FIELD]
-        train = split_metrics(
-            signal, returns, self._train_dates, split="train", **self._metric_kwargs()
-        )
-        valid = split_metrics(
-            signal, returns, self._valid_dates, split="valid", **self._metric_kwargs()
-        )
-
+        train = _score(node, self.panel, self.train_dates, "train", self.scoring, self.weights)
         # Logged before the record exists anywhere a caller could read it.
         _log(
             self.context,
             phase="search",
             params={
+                **self.scope,
                 "round": round,
                 "trial_id": trial_id,
                 "expression": expression,
                 "panel": dict(self.panel.descriptor),
-                "splits": self.splits.as_dict(),
-                "cost_bps": self.cost_bps,
-                "min_assets": self.min_assets,
+                "train_dates": date_span(self.train_dates),
+                **self.scoring.as_dict(),
             },
-            metrics={**train.as_flat("train"), **valid.as_flat("valid")},
+            metrics=train.as_flat("train"),
         )
 
-        record = TrialRecord(trial_id, round, expression, raw_expression, rationale, train, valid)
+        record = TrialRecord(trial_id, round, expression, raw_expression, rationale, train)
         self._seen[expression] = trial_id
         self.records.append(record)
         return record
 
-    def _metric_kwargs(self) -> dict[str, Any]:
-        return {"cost_bps": self.cost_bps, "min_assets": self.min_assets}
 
-
-def evaluate_on_test(
+def evaluate_holdout(
     node: Node,
     panel: OHLCVPanel,
-    splits: SplitSpec,
+    dates: pd.DatetimeIndex,
     context: LedgerContext,
     *,
+    phase: str,
     trial_id: str,
-    cost_bps: float = 0.0,
-    min_assets: int = 20,
+    scoring: Scoring = DEFAULT_SCORING,
+    weights: pd.Series | None = None,
+    scope: Mapping[str, Any] | None = None,
 ) -> SplitMetrics:
-    """TEST metrics for one selected alpha on the full panel, logged before returning."""
-    signal = evaluate(node, panel)
-    metrics = split_metrics(
-        signal,
-        panel.fields[RETURNS_FIELD],
-        splits.dates(panel.dates, "test"),
-        split="test",
-        cost_bps=cost_bps,
-        min_assets=min_assets,
-    )
+    """Score one selected alpha on held-out dates (a CV fold or TEST), logged before returning."""
+    if phase not in HOLDOUT_PHASES:
+        raise ValueError(f"phase must be one of {sorted(HOLDOUT_PHASES)}, got {phase!r}")
+    prefix = HOLDOUT_PHASES[phase]
+    if weights is None:
+        weights = sample_weights(panel.dates, scoring.horizon)
+    metrics = _score(node, panel, pd.DatetimeIndex(dates), prefix, scoring, weights)
     _log(
         context,
-        phase="test",
+        phase=phase,
         params={
+            **dict(scope or {}),
             "trial_id": trial_id,
             "expression": canonical(node),
             "panel": dict(panel.descriptor),
-            "splits": splits.as_dict(),
-            "cost_bps": cost_bps,
-            "min_assets": min_assets,
+            "held_out_dates": date_span(pd.DatetimeIndex(dates)),
+            **scoring.as_dict(),
         },
-        metrics=metrics.as_flat("test"),
+        metrics=metrics.as_flat(prefix),
     )
     return metrics
+
+
+def _score(
+    node: Node,
+    panel: OHLCVPanel,
+    dates: pd.DatetimeIndex,
+    split: str,
+    scoring: Scoring,
+    weights: pd.Series,
+) -> SplitMetrics:
+    return split_metrics(
+        evaluate(node, panel),
+        panel.fields[RETURNS_FIELD],
+        dates,
+        split=split,
+        cost_bps=scoring.cost_bps,
+        min_assets=scoring.min_assets,
+        horizon=scoring.horizon,
+        weights=weights,
+    )
 
 
 def _log(

@@ -24,44 +24,39 @@ n_assets = 40
 pattern = "reversal"
 strength = 0.08
 
+[cv]
+n_splits = 2
+
 [loop]
 n_rounds = 2
 n_alphas = 2
 """
 
 
+def _proposal(*expressions):
+    alphas = [{"expression": e, "rationale": "r"} for e in expressions]
+    return json.dumps({"type": "seed_proposal", "alphas": alphas})
+
+
 def _llm():
-    replies = iter(
-        [
-            json.dumps(
-                {
-                    "type": "seed_proposal",
-                    "alphas": [
-                        {"expression": "ts_mean(volume, 10)", "rationale": "r"},
-                        {"expression": "minus(high, low)", "rationale": "r"},
-                    ],
-                }
-            ),
-            json.dumps(
-                {
-                    "type": "analyst_review",
-                    "summary": "no effect",
-                    "diagnoses": [{"alpha_id": "r1a1", "note": "flat"}],
-                    "revised_idea": "one-day reversal",
-                }
-            ),
-            json.dumps(
-                {
-                    "type": "seed_proposal",
-                    "alphas": [
-                        {"expression": "neg(returns)", "rationale": "r"},
-                        {"expression": "neg(ts_delta(close, 3))", "rationale": "r"},
-                    ],
-                }
-            ),
-        ]
+    """Round 1 proposes noise, the Analyst suggests reversal, round 2 proposes it."""
+    review = json.dumps(
+        {
+            "type": "analyst_review",
+            "summary": "no effect",
+            "diagnoses": [{"alpha_id": "r1a1", "note": "flat"}],
+            "revised_idea": "one-day reversal",
+        }
     )
-    return lambda prompt: next(replies)
+
+    def reply(prompt):
+        if prompt.startswith("# Role\nYou are the Analyst"):
+            return review
+        if "after round 1." in prompt:
+            return _proposal("neg(returns)", "neg(ts_delta(close, 3))")
+        return _proposal("ts_mean(volume, 10)", "minus(high, low)")
+
+    return reply
 
 
 @pytest.fixture
@@ -71,43 +66,74 @@ def config_path(tmp_path):
     return path
 
 
-def test_end_to_end_run_writes_run_dir_and_ledger(config_path, tmp_path, ledger, capsys):
-    out = tmp_path / "out"
-    code = main(["--config", str(config_path), "--out-dir", str(out), "--run-id", "t1"], llm=_llm())
+def _main(config_path, out, run_id, *flags):
+    return main(
+        ["--config", str(config_path), "--out-dir", str(out), "--run-id", run_id, *flags],
+        llm=_llm(),
+    )
 
-    assert code == 0
-    run_dir = out / "t1"
-    for name in ["config.json", "llm_calls.jsonl", "trials.jsonl", "reviews.jsonl", "events.jsonl"]:
+
+def test_end_to_end_run_writes_run_dir_and_ledger(config_path, tmp_path, ledger, capsys):
+    assert _main(config_path, tmp_path / "out", "t1") == 0
+
+    run_dir = tmp_path / "out" / "t1"
+    for name in [
+        "config.json",
+        "summary.json",
+        "final_test.json",
+        "cv_folds.jsonl",
+        "fold1/llm_calls.jsonl",
+        "fold2/trials.jsonl",
+        "final/reviews.jsonl",
+    ]:
         assert (run_dir / name).exists(), name
     final = json.loads((run_dir / "final_test.json").read_text())
     assert final["selected"][0]["expression"] == "neg(returns)"
+    summary = json.loads((run_dir / "summary.json").read_text())
+    assert summary["family_size"] == 12
+    assert summary["cross_validation"]["n_folds"] == 2
 
     entries = ledger()
-    assert [e["tags"][-1] for e in entries] == ["search"] * 4 + ["test"]
+    tags = [e["tags"][-1] for e in entries]
+    assert tags.count("search") == 12 and tags.count("cv_valid") == 2 and tags.count("test") == 1
     assert {e["params"]["config_name"] for e in entries} == {"tiny"}
 
     stdout = capsys.readouterr().out
-    assert "selected r2a1: neg(returns)" in stdout
+    assert "cross-validation" in stdout
     assert "TEST (evaluated once)" in stdout
+    assert "overfitting check" in stdout
 
 
 def test_skip_test_leaves_test_untouched(config_path, tmp_path, ledger):
-    out = tmp_path / "out"
-    main(
-        ["--config", str(config_path), "--out-dir", str(out), "--run-id", "t2", "--skip-test"],
-        llm=_llm(),
-    )
-    assert not (out / "t2" / "final_test.json").exists()
-    assert all(e["tags"][-1] == "search" for e in ledger())
+    _main(config_path, tmp_path / "out", "t2", "--skip-test")
+    run_dir = tmp_path / "out" / "t2"
+    assert not (run_dir / "final_test.json").exists()
+    assert json.loads((run_dir / "summary.json").read_text())["test"] is None
+    assert all(e["tags"][-1] != "test" for e in ledger())
 
 
 def test_existing_run_dir_is_not_overwritten(config_path, tmp_path, ledger):
     (tmp_path / "out" / "t3").mkdir(parents=True)
     with pytest.raises(FileExistsError):
-        main(
-            ["--config", str(config_path), "--out-dir", str(tmp_path / "out"), "--run-id", "t3"],
-            llm=_llm(),
-        )
+        _main(config_path, tmp_path / "out", "t3")
+
+
+def test_second_run_on_the_same_data_needs_reuse_test(config_path, tmp_path, ledger):
+    _main(config_path, tmp_path / "out", "first")
+    with pytest.raises(TestAlreadyEvaluated):
+        _main(config_path, tmp_path / "out", "second")
+    _main(config_path, tmp_path / "out", "third", "--reuse-test")
+
+    test_tags = [e["tags"] for e in ledger() if e["tags"][-1] == "test"]
+    assert len(test_tags) == 2
+    assert "test_reuse" not in test_tags[0] and "test_reuse" in test_tags[1]
+
+
+def test_label_horizon_beyond_the_embargo_is_refused(tmp_path, ledger):
+    path = tmp_path / "long.toml"
+    path.write_text(CONFIG + "\n[scoring]\nlabel_horizon = 10\n")
+    with pytest.raises(ValueError, match="exceeds embargo_days"):
+        _main(path, tmp_path / "out", "t4")
 
 
 def test_unknown_config_keys_are_rejected(tmp_path):
@@ -122,19 +148,5 @@ def test_shipped_configs_are_valid(name):
     cfg = load_config(REPO_ROOT / "experiments" / "alpha_gpt" / f"{name}.toml")
     assert cfg.name == name
     assert cfg.data.pattern == ("reversal" if name == "baseline_synth" else "none")
+    assert cfg.cv.n_splits == 4 and cfg.scoring.label_horizon == 1
     assert build_panel(cfg).descriptor["n_dates"] == 1260
-
-
-def test_second_run_on_the_same_data_needs_reuse_test(config_path, tmp_path, ledger):
-    out = str(tmp_path / "out")
-    main(["--config", str(config_path), "--out-dir", out, "--run-id", "first"], llm=_llm())
-    with pytest.raises(TestAlreadyEvaluated):
-        main(["--config", str(config_path), "--out-dir", out, "--run-id", "second"], llm=_llm())
-    main(
-        ["--config", str(config_path), "--out-dir", out, "--run-id", "third", "--reuse-test"],
-        llm=_llm(),
-    )
-
-    test_tags = [e["tags"] for e in ledger() if e["tags"][-1] == "test"]
-    assert len(test_tags) == 2
-    assert "test_reuse" not in test_tags[0] and "test_reuse" in test_tags[1]

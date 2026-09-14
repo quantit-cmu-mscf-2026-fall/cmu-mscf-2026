@@ -1,11 +1,14 @@
-"""TRAIN / VALIDATION / TEST date ranges, separated by an embargo.
+"""DEVELOPMENT / TEST date ranges, separated by an embargo.
 
-TRAIN is for search fitness, VALIDATION for selection and the Analyst's
-feedback, TEST for one final evaluation (docs/experiments/alpha_gpt.md).
+TEST is evaluated once, at the very end (docs/experiments/alpha_gpt.md).
+Everything before it is DEVELOPMENT, which `capstone.cv.PurgedKFold` divides
+into TRAIN (where a discovery procedure searches, takes feedback and selects)
+and VALIDATION (held-out folds that measure how that procedure does out of
+sample). See `capstone/alpha_gpt/loop.py`.
 
-An alpha observed at the close of day t is scored against the return realised
-on day t+1, so the last signal of a split reads one day past the split's end.
-The embargo (at least one day) keeps that day out of the next split.
+A label at date t is realised over the next `horizon` returns, so the embargo
+between DEVELOPMENT and TEST must be at least the horizon; otherwise the last
+development labels would read TEST returns.
 """
 
 from __future__ import annotations
@@ -17,8 +20,8 @@ import pandas as pd
 
 from capstone.alpha_gpt.panel import OHLCVPanel
 
-Split = Literal["train", "valid", "test"]
-SPLITS: tuple[Split, ...] = ("train", "valid", "test")
+Split = Literal["development", "test"]
+SPLITS: tuple[Split, ...] = ("development", "test")
 
 #: Fewest dates a split may have; `backtest.summarize` refuses shorter series.
 MIN_SPLIT_DAYS = 60
@@ -26,10 +29,9 @@ MIN_SPLIT_DAYS = 60
 
 @dataclass(frozen=True)
 class SplitSpec:
-    """Inclusive (start, end) date ranges for each split."""
+    """Inclusive (start, end) date ranges for DEVELOPMENT and TEST."""
 
-    train: tuple[pd.Timestamp, pd.Timestamp]
-    valid: tuple[pd.Timestamp, pd.Timestamp]
+    development: tuple[pd.Timestamp, pd.Timestamp]
     test: tuple[pd.Timestamp, pd.Timestamp]
     embargo_days: int
 
@@ -40,53 +42,51 @@ class SplitSpec:
             start, end = getattr(self, name)
             if start > end:
                 raise ValueError(f"{name} starts after it ends")
-        if not self.train[1] < self.valid[0] or not self.valid[1] < self.test[0]:
-            raise ValueError("splits must be ordered train < valid < test without overlap")
+        if not self.development[1] < self.test[0]:
+            raise ValueError("splits must be ordered development < test without overlap")
 
     @classmethod
     def from_fractions(
         cls,
         dates: pd.DatetimeIndex,
         *,
-        train_frac: float = 0.6,
-        valid_frac: float = 0.2,
+        test_frac: float = 0.2,
         embargo_days: int = 5,
     ) -> SplitSpec:
-        """Chronological splits of `dates`, with `embargo_days` dates dropped between each.
-
-        The fractions apply to the dates left after removing the two embargo gaps;
-        TEST takes the remainder.
-        """
+        """DEVELOPMENT then TEST, with `embargo_days` dates dropped between them."""
         if embargo_days < 1:
             raise ValueError("embargo_days must be >= 1: a signal at t is scored on t+1")
-        if not (0 < train_frac < 1 and 0 < valid_frac < 1 and train_frac + valid_frac < 1):
-            raise ValueError("need 0 < train_frac, valid_frac and train_frac + valid_frac < 1")
+        if not 0 < test_frac < 1:
+            raise ValueError("test_frac must be in (0, 1)")
 
-        usable = len(dates) - 2 * embargo_days
-        n_train = int(usable * train_frac)
-        n_valid = int(usable * valid_frac)
-        n_test = usable - n_train - n_valid
-        if min(n_train, n_valid, n_test) < MIN_SPLIT_DAYS:
+        usable = len(dates) - embargo_days
+        n_test = int(usable * test_frac)
+        n_development = usable - n_test
+        if min(n_development, n_test) < MIN_SPLIT_DAYS:
             raise ValueError(
-                f"each split needs >= {MIN_SPLIT_DAYS} dates; got train={n_train}, "
-                f"valid={n_valid}, test={n_test} from {len(dates)} dates"
+                f"each split needs >= {MIN_SPLIT_DAYS} dates; got development={n_development}, "
+                f"test={n_test} from {len(dates)} dates"
             )
-
-        valid_start = n_train + embargo_days
-        test_start = valid_start + n_valid + embargo_days
         return cls(
-            train=(dates[0], dates[n_train - 1]),
-            valid=(dates[valid_start], dates[valid_start + n_valid - 1]),
-            test=(dates[test_start], dates[-1]),
+            development=(dates[0], dates[n_development - 1]),
+            test=(dates[n_development + embargo_days], dates[-1]),
             embargo_days=embargo_days,
         )
+
+    def check_horizon(self, horizon: int) -> None:
+        """Refuse a label horizon whose last DEVELOPMENT labels would reach into TEST."""
+        if horizon > self.embargo_days:
+            raise ValueError(
+                f"label horizon {horizon} exceeds embargo_days {self.embargo_days}: "
+                "the last development labels would read TEST returns"
+            )
 
     def dates(self, dates: pd.DatetimeIndex, split: Split) -> pd.DatetimeIndex:
         start, end = getattr(self, split)
         return dates[(dates >= start) & (dates <= end)]
 
     def search_panel(self, panel: OHLCVPanel) -> OHLCVPanel:
-        """The panel with the TEST period removed — all the search phase ever gets."""
+        """The panel with the TEST period removed — all a discovery procedure ever gets."""
         return panel.until(self.test[0])
 
     def as_dict(self) -> dict[str, object]:

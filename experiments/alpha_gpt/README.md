@@ -1,4 +1,4 @@
-# Alpha-GPT baseline: Seed + Analyst loop
+# Alpha-GPT baseline: Seed + Analyst, cross-validated
 
 Methodological replication of Alpha-GPT (arXiv 2308.00016v2); the experiment
 definition is in `docs/experiments/alpha_gpt.md`. Code: `capstone/alpha_gpt/`.
@@ -11,50 +11,69 @@ python -m capstone.alpha_gpt.run --config experiments/alpha_gpt/baseline_null.to
 python -m capstone.runlog stats          # trial counts
 ```
 
-`--skip-test` stops after selection without touching TEST. Each run calls
-`claude -p` roughly `2 * n_rounds - 1` times (more on retries).
+`--skip-test` stops before TEST. `--reuse-test` evaluates a TEST that an earlier
+run already looked at, and tags that in the ledger. With `n_splits = 4` and 3
+rounds a run makes about `(n_splits + 1) * (2 * n_rounds - 1)` = 25 `claude -p`
+calls (more on retries).
+
+## Splits
+
+| | dates | used for |
+|---|---|---|
+| **TRAIN** | purged, embargoed folds of DEVELOPMENT | the procedure: Quant Developer proposals, trial scores, Analyst feedback, selection |
+| **VALIDATION** | each held-out DEVELOPMENT fold | scoring the procedure's picks out of fold; the procedure never sees it |
+| **TEST** | the last `test_frac`, after an embargo | the final selection, once |
 
 ## What happens
 
-1. **Quant Developer** (`claude -p`) turns the idea into `n_alphas` expressions in
-   the operator DSL (`capstone/alpha_gpt/prompts/quant_developer.md`).
-2. Each valid, new expression is evaluated on TRAIN and VALIDATION and **logged
-   to the ledger at that moment** — before the loop, the Analyst or you see it.
-3. **Analyst** (`claude -p`) reads the results table (TRAIN/VALIDATION only) and
-   writes a revised idea for the next round.
-4. After the last round, the best alpha by VALIDATION IC t-stat is evaluated
-   **once** on TEST (`final_test.json`; a second attempt refuses).
+1. **The procedure** (`run_procedure`): the Quant Developer proposes `n_alphas`
+   expressions; each valid, new one is scored on TRAIN and **logged to the ledger
+   at that moment**; the Analyst reads the TRAIN table and revises the idea; after
+   `n_rounds` the best alpha by TRAIN IC t-stat is selected.
+2. **Cross-validation** (`cross_validate_procedure`, López de Prado AFML ch. 7):
+   DEVELOPMENT is split by `capstone.cv.PurgedKFold`. For each fold the whole
+   procedure runs on a panel where the fold — and every return its labels are
+   built from — is masked to NaN, on TRAIN dates purged of label overlap and
+   embargoed after the fold. Its pick is then scored on the fold.
+3. **Final**: the procedure runs once on all of DEVELOPMENT.
+4. **TEST**: that selection is scored once (`final_test.json`).
+
+The report prints *in-sample t → cross-validated held-out t → TEST t*, the family
+size (every search trial in every fold plus the final run) and the deflated
+Sharpe ratio for that family. The gap between in-sample and held-out is the
+procedure's overfitting, measured.
 
 ## Run directory (`experiments/alpha_gpt/out/<run_id>/`, gitignored)
 
-| file | contents |
+| path | contents |
 |---|---|
 | `config.json` | config, panel descriptor, split dates |
-| `llm_calls.jsonl` | every prompt and raw reply, with rejection reasons |
-| `trials.jsonl` | canonical expression + TRAIN/VALIDATION metrics per trial |
-| `reviews.jsonl` | Analyst summaries, diagnoses, revised ideas |
-| `events.jsonl` | rounds, DSL rejections, duplicates, selection |
-| `final_test.json` | TEST metrics of the selected alpha(s) |
+| `fold<j>/`, `final/` | per procedure: `llm_calls.jsonl` (every prompt and raw reply), `trials.jsonl`, `reviews.jsonl`, `events.jsonl` |
+| `cv_folds.jsonl` | per fold: TRAIN/held-out dates, picks with TRAIN and held-out metrics |
+| `final_test.json` | TEST metrics of the final selection |
+| `summary.json` | in-sample vs cross-validated vs TEST, family size, DSR |
 
 Keep run outputs out of the repo; put results in the PR description.
 
 ## Guarantees and their limits
 
 - **The LLM sees only its prompt.** Role calls run `claude -p` in an empty temp
-  directory with `--tools ""`, one turn and no session persistence. Those
-  nested calls are therefore not captured by this repo's session hook; the run
-  directory's `llm_calls.jsonl` is their record.
+  directory with `--tools ""`, one turn and no session persistence. Those nested
+  calls are not captured by this repo's session hook; `llm_calls.jsonl` is their
+  record.
 - **No arbitrary code.** Alphas are parsed with `ast` against a whitelist; lags
-  cannot be negative; every operator is tested to be causal.
-- **TEST is structurally hidden** from search: the evaluator holds a panel with
-  the TEST period removed, and no prompt renderer accepts TEST data.
-- **Trial counting.** Rejected (unparseable) expressions are not trials. A
-  canonical duplicate within a run is not re-logged. How repeated runs on the
-  same data count toward a family size is a team decision; the ledger keeps
-  expression, data descriptor and split dates for every trial so it can be
-  computed later.
-- **VALIDATION is not clean.** The Analyst's feedback is built from VALIDATION
-  results and steers later rounds — inherent to the paper's design. Only TEST
-  is an unbiased estimate, which is why it is evaluated once.
-- **No significance gate yet.** Selection is "best VALIDATION t". The
-  Benjamini–Hochberg FDR gate is a later phase.
+  cannot be negative; every operator is tested to be causal and to never turn a
+  masked row into a finite value that depends on it.
+- **Held-out data is absent, not skipped.** The procedure holds a panel with TEST
+  removed and its CV fold masked; the evaluator refuses a panel containing TEST
+  dates; prompts render TRAIN metrics only. Tests scramble TEST data and a CV
+  fold's data and require the corresponding prompts to stay byte-identical.
+- **Sample weights.** Label-uniqueness weights (AFML ch. 4) are used for TRAIN,
+  held-out and TEST scores alike; with `label_horizon = 1` they are all 1.
+- **TEST is locked** per run directory and, through the ledger, per dataset and
+  split. Reuse is possible only with `--reuse-test` and is tagged.
+- **Trial counting.** Rejected (unparseable) expressions are not trials; a
+  canonical duplicate within one procedure is not re-logged. Each CV fold's
+  procedure is a separate search, so its trials count toward the family.
+- **Not yet:** a significance gate (Benjamini–Hochberg on held-out p-values) and
+  Newey–West standard errors; both are later phases.
