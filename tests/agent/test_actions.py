@@ -6,14 +6,17 @@ Inputs are the raw text Claude would return; nothing calls Claude or runs a tool
 from __future__ import annotations
 
 import json
+from typing import Literal
 
 import pytest
+from pydantic import BaseModel, ConfigDict
 
 from capstone.agent.actions import (
     ActionParseError,
     FinalAnswerAction,
     ToolCallAction,
     parse_action,
+    parse_reply,
 )
 
 
@@ -128,3 +131,54 @@ class TestSchemaViolations:
     def test_non_string_input_is_a_caller_bug(self):
         with pytest.raises(TypeError):
             parse_action(b'{"type": "final", "content": "x"}')
+
+
+class _Proposal(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
+
+    type: Literal["proposal"]
+    items: list[str]
+
+
+class TestParseReply:
+    def test_valid_reply(self):
+        reply = parse_reply('{"type": "proposal", "items": ["a", "b"]}', _Proposal)
+        assert reply == _Proposal(type="proposal", items=["a", "b"])
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            '```json\n{"type": "proposal", "items": []}\n```',
+            'Here you go: {"type": "proposal", "items": []}',
+            '{"type": "proposal", "items": [],}',
+        ],
+    )
+    def test_malformed_json_is_rejected_not_repaired(self, raw):
+        with pytest.raises(ActionParseError, match="_Proposal reply is not valid JSON") as info:
+            parse_reply(raw, _Proposal)
+        assert info.value.raw == raw
+
+    def test_duplicate_keys_are_rejected(self):
+        with pytest.raises(ActionParseError, match="duplicate key 'items'"):
+            parse_reply('{"type": "proposal", "items": [], "items": ["x"]}', _Proposal)
+
+    def test_non_object_is_rejected(self):
+        with pytest.raises(ActionParseError, match="must be a JSON object"):
+            parse_reply('["proposal"]', _Proposal)
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"type": "proposal"},
+            {"type": "other", "items": []},
+            {"type": "proposal", "items": [1]},
+            {"type": "proposal", "items": [], "extra": True},
+        ],
+    )
+    def test_schema_violations(self, payload):
+        with pytest.raises(ActionParseError, match="invalid _Proposal reply"):
+            parse_reply(json.dumps(payload), _Proposal)
+
+    def test_non_string_input_is_a_caller_bug(self):
+        with pytest.raises(TypeError):
+            parse_reply(b"{}", _Proposal)

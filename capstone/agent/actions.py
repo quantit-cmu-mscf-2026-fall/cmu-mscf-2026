@@ -14,9 +14,11 @@ longer says what the model actually produced. Parsing never executes a tool.
 from __future__ import annotations
 
 import json
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
+
+M = TypeVar("M", bound=BaseModel)
 
 
 class ActionParseError(ValueError):
@@ -72,20 +74,7 @@ def parse_action(raw: str) -> ToolCallAction | FinalAnswerAction:
         ActionParseError: if the text is not strict JSON, is not an object, has
             a missing or unsupported `type`, or does not match that type's schema.
     """
-    if not isinstance(raw, str):
-        raise TypeError(f"raw must be str, got {type(raw).__name__}")
-
-    try:
-        payload = json.loads(
-            raw, object_pairs_hook=_reject_duplicate_keys, parse_constant=_reject_constant
-        )
-    except (json.JSONDecodeError, _StrictJSONError) as exc:
-        raise ActionParseError(f"agent action is not valid JSON: {exc}", raw=raw) from exc
-
-    if not isinstance(payload, dict):
-        raise ActionParseError(
-            f"agent action must be a JSON object, got {type(payload).__name__}", raw=raw
-        )
+    payload = _loads_object(raw, what="agent action")
 
     action_type = payload.get("type")
     if action_type is None:
@@ -100,6 +89,44 @@ def parse_action(raw: str) -> ToolCallAction | FinalAnswerAction:
         return _ADAPTER.validate_python(payload)
     except ValidationError as exc:
         raise ActionParseError(f"invalid {action_type!r} action: {exc}", raw=raw) from exc
+
+
+def parse_reply(raw: str, model: type[M]) -> M:
+    """Parse Claude's raw result text into one instance of a structured reply model.
+
+    The same no-repair contract as `parse_action`, for replies whose shape is not
+    a tool call or final answer — e.g. a role that must return a list of alpha
+    expressions. `model` should itself be strict (`extra="forbid"`, no coercion);
+    this function adds the strict JSON layer in front of it.
+
+    Raises:
+        ActionParseError: if the text is not strict JSON, is not an object, or
+            does not validate against `model`.
+    """
+    payload = _loads_object(raw, what=f"{model.__name__} reply")
+    try:
+        return model.model_validate(payload)
+    except ValidationError as exc:
+        raise ActionParseError(f"invalid {model.__name__} reply: {exc}", raw=raw) from exc
+
+
+def _loads_object(raw: str, *, what: str) -> dict[str, Any]:
+    """Strict JSON -> dict, or an `ActionParseError` naming `what` was being parsed."""
+    if not isinstance(raw, str):
+        raise TypeError(f"raw must be str, got {type(raw).__name__}")
+
+    try:
+        payload = json.loads(
+            raw, object_pairs_hook=_reject_duplicate_keys, parse_constant=_reject_constant
+        )
+    except (json.JSONDecodeError, _StrictJSONError) as exc:
+        raise ActionParseError(f"{what} is not valid JSON: {exc}", raw=raw) from exc
+
+    if not isinstance(payload, dict):
+        raise ActionParseError(
+            f"{what} must be a JSON object, got {type(payload).__name__}", raw=raw
+        )
+    return payload
 
 
 class _StrictJSONError(ValueError):
