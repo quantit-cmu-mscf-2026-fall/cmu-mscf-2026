@@ -20,16 +20,30 @@ from capstone.backtest import PERIODS_PER_YEAR, backtest_components, summarize
 from capstone.evaluate import sharpe_pvalue
 
 
-def rank_ic_series(
-    signal: pd.DataFrame, returns: pd.DataFrame, *, min_assets: int = 20
-) -> pd.Series:
-    """Daily Spearman correlation across assets of signal[t] with returns[t+1].
+def forward_returns(returns: pd.DataFrame, horizon: int = 1) -> pd.DataFrame:
+    """Compounded return from close t to close t+horizon, indexed by t.
 
-    Pairs are masked jointly before ranking, so an asset with a missing signal
-    or a missing next-day return drops out of both sides. Dates with fewer than
-    `min_assets` usable pairs, or with a constant signal, are NaN.
+    NaN if any of the `horizon` daily returns is missing (e.g. masked).
     """
-    target = returns.shift(-1).reindex(index=signal.index, columns=signal.columns)
+    if isinstance(horizon, bool) or not isinstance(horizon, int) or horizon < 1:
+        raise ValueError(f"horizon must be a positive int, got {horizon!r}")
+    if horizon == 1:
+        return returns.shift(-1)
+    growth = np.log1p(returns).rolling(horizon, min_periods=horizon).sum()
+    return np.expm1(growth.shift(-horizon))
+
+
+def rank_ic_series(
+    signal: pd.DataFrame, returns: pd.DataFrame, *, min_assets: int = 20, horizon: int = 1
+) -> pd.Series:
+    """Daily Spearman correlation across assets of signal[t] with the forward return from t.
+
+    The target is `forward_returns(returns, horizon)`: the next day's return for
+    horizon 1. Pairs are masked jointly before ranking, so an asset with a
+    missing signal or a missing target drops out of both sides. Dates with fewer
+    than `min_assets` usable pairs, or with a constant signal, are NaN.
+    """
+    target = forward_returns(returns, horizon).reindex(index=signal.index, columns=signal.columns)
     usable = signal.notna() & target.notna()
     signal_ranks = signal.where(usable).rank(axis=1)
     target_ranks = target.where(usable).rank(axis=1)
@@ -48,11 +62,14 @@ class SplitMetrics:
     """One alpha's metrics on one split.
 
     Attributes:
-        split: "train", "valid" or "test".
+        split: "train", "valid", "test", or a fold name.
         n_days: dates with a usable IC.
-        ic_mean, ic_std: mean and std of the daily rank IC.
+        n_eff: effective number of independent labels — the sum of sample
+            weights over those dates (equals n_days when unweighted).
+        ic_mean, ic_std: (weighted) mean and std of the daily rank IC.
         icir: ic_mean / ic_std (daily, not annualised).
-        ic_tstat: icir * sqrt(n_days). Treats daily ICs as independent.
+        ic_tstat: icir * sqrt(n_eff). With overlapping labels, pass uniqueness
+            weights (`capstone.cv.average_uniqueness`) or this overstates t.
         ic_pvalue: two-sided normal p-value of ic_tstat.
         ls_sharpe, ls_ann_return: annualised dollar-neutral long-short Sharpe
             and mean return from `capstone.backtest`, net of costs.
@@ -63,6 +80,7 @@ class SplitMetrics:
 
     split: str
     n_days: int
+    n_eff: float
     ic_mean: float
     ic_std: float
     icir: float
@@ -93,17 +111,34 @@ def split_metrics(
     split: str,
     cost_bps: float = 0.0,
     min_assets: int = 20,
+    horizon: int = 1,
+    weights: pd.Series | None = None,
 ) -> SplitMetrics:
-    """Rank-IC and long-short metrics of `signal` on the signal dates `dates`."""
+    """Rank-IC and long-short metrics of `signal` on the signal dates `dates`.
+
+    Args:
+        horizon: label horizon for the IC target (see `forward_returns`). The
+            long-short book is always rebalanced daily.
+        weights: optional per-date sample weights (e.g. label uniqueness). They
+            must cover every scored date. None weighs every date equally.
+    """
     nan = float("nan")
 
-    ic = rank_ic_series(signal, returns, min_assets=min_assets).reindex(dates).dropna()
+    ic = (
+        rank_ic_series(signal, returns, min_assets=min_assets, horizon=horizon)
+        .reindex(dates)
+        .dropna()
+    )
     n_days = len(ic)
-    ic_mean = float(ic.mean()) if n_days else nan
-    ic_std = float(ic.std()) if n_days >= 2 else nan
+    if weights is None:
+        n_eff = float(n_days)
+        ic_mean = float(ic.mean()) if n_days else nan
+        ic_std = float(ic.std()) if n_days >= 2 else nan
+    else:
+        n_eff, ic_mean, ic_std = _weighted_moments(ic, weights)
     if n_days >= 2 and ic_std > 0:
         icir = ic_mean / ic_std
-        ic_tstat = icir * math.sqrt(n_days)
+        ic_tstat = icir * math.sqrt(n_eff)
         ic_pvalue = float(2.0 * stats.norm.sf(abs(ic_tstat)))
     else:
         icir = ic_tstat = ic_pvalue = nan
@@ -125,6 +160,7 @@ def split_metrics(
     return SplitMetrics(
         split=split,
         n_days=n_days,
+        n_eff=n_eff,
         ic_mean=ic_mean,
         ic_std=ic_std,
         icir=float(icir),
@@ -136,3 +172,22 @@ def split_metrics(
         turnover=float(turnover.shift(-1).reindex(dates).mean()),
         coverage=coverage,
     )
+
+
+def _weighted_moments(ic: pd.Series, weights: pd.Series) -> tuple[float, float, float]:
+    """(sum of weights, weighted mean, unbiased weighted std) of the scored ICs.
+
+    Reliability-weight variance, V1 - V2/V1 in the denominator, so unit weights
+    reproduce the ordinary ddof=1 standard deviation.
+    """
+    nan = float("nan")
+    w = weights.reindex(ic.index)
+    if w.isna().any() or (w < 0).any():
+        raise ValueError("weights must be non-negative and cover every scored date")
+    v1 = float(w.sum())
+    if v1 <= 0:
+        return 0.0, nan, nan
+    mean = float((w * ic).sum() / v1)
+    denominator = v1 - float((w**2).sum()) / v1
+    std = math.sqrt(float((w * (ic - mean) ** 2).sum()) / denominator) if denominator > 0 else nan
+    return v1, mean, std

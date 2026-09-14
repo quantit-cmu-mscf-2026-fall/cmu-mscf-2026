@@ -8,9 +8,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from capstone.alpha_gpt.metrics import rank_ic_series, split_metrics
+from capstone.alpha_gpt.metrics import forward_returns, rank_ic_series, split_metrics
 from capstone.alpha_gpt.splits import SplitSpec
 from capstone.alpha_gpt.synth_ohlcv import make_ohlcv_panel
+from capstone.cv import average_uniqueness, label_end_times
 
 
 @pytest.fixture(scope="module")
@@ -111,6 +112,11 @@ class TestSplitMetrics:
         metrics = split_metrics(signal, returns, dates, split="train")
         assert metrics.coverage == pytest.approx(80 / 100)
 
+    def test_unweighted_n_eff_is_the_day_count(self, null_panel):
+        returns = null_panel.fields["returns"]
+        metrics = split_metrics(-returns, returns, null_panel.dates[10:200], split="train")
+        assert metrics.n_eff == metrics.n_days == 190
+
     def test_as_flat_prefixes_and_replaces_nan(self, null_panel):
         returns = null_panel.fields["returns"]
         metrics = split_metrics(-returns, returns, null_panel.dates[10:40], split="valid")
@@ -118,3 +124,72 @@ class TestSplitMetrics:
         assert "split" not in flat and "valid_split" not in flat
         assert flat["valid_n_days"] == 30
         assert flat["valid_ls_sharpe"] is None
+
+
+class TestHorizonAndWeights:
+    def test_horizon_one_is_the_next_day_return(self, null_panel):
+        returns = null_panel.fields["returns"]
+        pd.testing.assert_frame_equal(forward_returns(returns, 1), returns.shift(-1))
+
+    def test_multi_day_forward_return_compounds(self, null_panel):
+        returns = null_panel.fields["returns"]
+        forward = forward_returns(returns, 3)
+        expected = (1 + returns.iloc[11:14, 0]).prod() - 1
+        assert forward.iloc[10, 0] == pytest.approx(expected)
+        assert forward.iloc[-3:].isna().all().all()
+
+    def test_masked_return_blanks_every_label_that_spans_it(self, null_panel):
+        returns = null_panel.fields["returns"].copy()
+        returns.iloc[50] = np.nan
+        forward = forward_returns(returns, 5)
+        assert forward.iloc[45:50].isna().all().all()
+        assert forward.iloc[44].notna().all() and forward.iloc[50].notna().all()
+
+    @pytest.mark.parametrize("bad", [0, True, 2.5])
+    def test_invalid_horizon(self, bad, null_panel):
+        with pytest.raises(ValueError, match="horizon"):
+            forward_returns(null_panel.fields["returns"], bad)
+
+    def test_cheating_signal_at_longer_horizon_has_ic_one(self, null_panel):
+        returns = null_panel.fields["returns"]
+        ic = rank_ic_series(forward_returns(returns, 5), returns, horizon=5).dropna()
+        assert ic.min() == pytest.approx(1.0)
+
+    def test_unit_weights_reproduce_the_unweighted_statistics(self, null_panel):
+        returns = null_panel.fields["returns"]
+        signal = -returns.rolling(3).mean()
+        dates = null_panel.dates[10:300]
+        plain = split_metrics(signal, returns, dates, split="train")
+        ones = pd.Series(1.0, index=null_panel.dates)
+        weighted = split_metrics(signal, returns, dates, split="train", weights=ones)
+        assert weighted.as_flat("m") == pytest.approx(plain.as_flat("m"))
+
+    def test_constant_weights_shrink_t_by_their_square_root(self, null_panel):
+        returns = null_panel.fields["returns"]
+        signal = -returns.rolling(3).mean()
+        dates = null_panel.dates[10:300]
+        plain = split_metrics(signal, returns, dates, split="train")
+        fifth = split_metrics(
+            signal, returns, dates, split="train", weights=pd.Series(0.2, index=null_panel.dates)
+        )
+        assert fifth.ic_mean == pytest.approx(plain.ic_mean)
+        assert fifth.n_eff == pytest.approx(0.2 * plain.n_days)
+        assert fifth.ic_tstat == pytest.approx(plain.ic_tstat * math.sqrt(0.2))
+
+    def test_uniqueness_weights_deflate_overlapping_label_t_stats(self, reversal_panel):
+        returns = reversal_panel.fields["returns"]
+        dates = reversal_panel.dates
+        weights = average_uniqueness(label_end_times(dates, 5), dates)
+        scored = dates[20:300]
+        plain = split_metrics(-returns, returns, scored, split="train", horizon=5)
+        weighted = split_metrics(
+            -returns, returns, scored, split="train", horizon=5, weights=weights
+        )
+        assert weighted.n_eff == pytest.approx(plain.n_days / 5)
+        assert abs(weighted.ic_tstat) < abs(plain.ic_tstat)
+
+    def test_weights_must_cover_every_scored_date(self, null_panel):
+        returns = null_panel.fields["returns"]
+        partial = pd.Series(1.0, index=null_panel.dates[:100])
+        with pytest.raises(ValueError, match="cover every scored date"):
+            split_metrics(-returns, returns, null_panel.dates[50:150], split="t", weights=partial)
