@@ -1,0 +1,32 @@
+# Alpha-GPT baseline (Seed + Analyst) on synthetic OHLCV with a planted
+# one-day reversal. Expected: the loop finds a reversal-type alpha whose
+# VALIDATION t clears the noise benchmark, and TEST confirms it.
+name = "baseline_synth"
+idea = "Stocks that fell sharply recently tend to bounce back, and stocks that rose sharply tend to give back their gains."
+seed = 0
+
+[data]
+source = "synthetic"
+n_dates = 1260
+n_assets = 100
+n_sectors = 10
+pattern = "reversal"
+strength = 0.03
+
+[splits]
+train_frac = 0.6
+valid_frac = 0.2
+embargo_days = 5
+
+[loop]
+n_rounds = 3
+n_alphas = 5
+max_attempts = 3
+top_k = 1
+cost_bps = 0.0
+max_trials = 100
+min_assets = 20
+
+[llm]
+timeout_s = 300
+model = ""

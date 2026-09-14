@@ -1,0 +1,32 @@
+# Control: identical to baseline_synth.toml except nothing is planted.
+# Expected: the best VALIDATION t sits near the noise benchmark and TEST is
+# not significant — the pipeline must be able to say "nothing here".
+name = "baseline_null"
+idea = "Stocks that fell sharply recently tend to bounce back, and stocks that rose sharply tend to give back their gains."
+seed = 0
+
+[data]
+source = "synthetic"
+n_dates = 1260
+n_assets = 100
+n_sectors = 10
+pattern = "none"
+strength = 0.0
+
+[splits]
+train_frac = 0.6
+valid_frac = 0.2
+embargo_days = 5
+
+[loop]
+n_rounds = 3
+n_alphas = 5
+max_attempts = 3
+top_k = 1
+cost_bps = 0.0
+max_trials = 100
+min_assets = 20
+
+[llm]
+timeout_s = 300
+model = ""
