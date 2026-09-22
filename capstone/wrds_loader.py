@@ -363,10 +363,17 @@ def cached_crsp_daily(conn, start: str, end: str, *, name: str, **kwargs) -> pd.
     Without that, a scoped and a wide pull under one `name` would silently serve
     each other's rows, and so would a legacy and a CIZ pull — which differ by a
     year of history. A cache that returns the wrong data is worse than none.
+
+    BOTH families carry an explicit suffix, including the default. Leaving CIZ
+    unsuffixed would put it on the bare `crsp_<name>` path that every pull
+    written before this change already occupies — so the new default would
+    silently serve year-stale legacy rows as if they were current. Caches
+    predating this change are simply never hit again, which is the right
+    outcome: they are legacy, and legacy is a year behind.
     """
     ciz = kwargs.pop("ciz", True)
     scope = "_sp500" if kwargs.get("sp500_only") else ""
-    family = "" if ciz else "_siz"
+    family = "_ciz" if ciz else "_siz"
     path = _cache_path(f"crsp_{name}{scope}{family}")
     if path.exists():
         return pd.read_parquet(path)

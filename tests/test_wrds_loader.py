@@ -191,6 +191,21 @@ def test_table_family_is_part_of_the_cache_key(tmp_path, monkeypatch):
     assert len(set(seen)) == 2, f"CIZ and legacy shared a cache key: {seen}"
 
 
+def test_ciz_cache_key_cannot_collide_with_a_pre_existing_legacy_cache(tmp_path, monkeypatch):
+    """Every cache written before this change sits on the bare `crsp_<name>` path.
+
+    If CIZ used that same bare path, the new default would hand back year-stale
+    legacy rows as though they were current — the precise failure the cache key
+    exists to prevent.
+    """
+    seen: list[str] = []
+    monkeypatch.setattr(wrds_loader, "_cache_path", lambda n: (seen.append(n), tmp_path / n)[1])
+
+    wrds_loader.cached_crsp_daily(ciz_conn(), "2020-01-01", "2020-12-31", name="legacy_era")
+    assert seen == ["crsp_legacy_era_ciz"]
+    assert "crsp_legacy_era" not in seen, "CIZ landed on the pre-existing legacy cache path"
+
+
 def test_cached_pull_defaults_to_ciz(tmp_path, monkeypatch):
     """Legacy is a year stale, so nobody should get it by accident."""
     monkeypatch.setattr(wrds_loader, "_cache_path", lambda n: tmp_path / n)
