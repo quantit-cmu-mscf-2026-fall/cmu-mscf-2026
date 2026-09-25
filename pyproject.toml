@@ -9,6 +9,7 @@ dependencies = [
     "scipy>=1.10",
     "statsmodels>=0.14",
     "requests>=2.28",
+    "pyarrow>=15",  # parquet reads and compact strings in capstone.shared_data
 ]
 
 [project.optional-dependencies]
