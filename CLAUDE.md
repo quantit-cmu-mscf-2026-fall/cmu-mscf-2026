@@ -31,6 +31,18 @@ capstone. The humans steer; you build. These rules are not optional.
 - See CONTRIBUTING.md for the full workflow (review rotation, squash merge,
   deploy registry).
 
+## Data
+
+- Load CRSP/Compustat only through `capstone.shared_data` (`sd.load(...)`), never
+  by reading files or querying WRDS directly. Select the columns you need.
+- Pick holdings with `in_universe`; take returns from every row via
+  `sd.daily_returns` (never compound `delret` onto `dlyret`), costs via
+  `sd.quoted_spread`, fundamentals only from `sd.available_from`. Key on
+  `permno`; group by `permco` for company-level signals.
+- Column meanings: `data_dictionary.csv` in `sd.cache_dir()`. Full rules:
+  `docs/shared_data.md`.
+- Record `sd.data_version()` in the params of every `log_run`.
+
 ## Research hygiene
 
 - Prefer `.py` scripts over notebooks; fixed seeds; parameters in files.

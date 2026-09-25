@@ -107,8 +107,9 @@ instrument.
 ## Summary
 
 - Fundamentals: **SEC EDGAR**, prepared by us, point-in-time, redistributable.
-- Prices: **CRSP via WRDS** with your own credentials (preferred), or any public
-  API you pull yourself.
+- Prices: **CRSP via WRDS**, preferably the team's shared pull
+  (`capstone.shared_data`, `docs/shared_data.md`), or your own credentials, or
+  any public API you pull yourself.
 - Factors/industries: **Ken French**, already in the kit.
 - Ground truth: **synthetic**, already in the kit.
 - Never: vendor-licensed data. We will not provide it and you do not need it.

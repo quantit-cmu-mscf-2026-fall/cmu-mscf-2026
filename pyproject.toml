@@ -23,7 +23,10 @@ packages = ["capstone"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["network: requires internet access (skips cleanly if unavailable)"]
+markers = [
+    "network: requires internet access (skips cleanly if unavailable)",
+    "data: requires the team's shared data locally (skips cleanly if absent)",
+]
 
 [tool.ruff]
 line-length = 100

@@ -67,6 +67,12 @@ listing file, `crsp.dsp500list` the S&P 500 membership spells.
 
 ## 4. Pull a panel with this kit
 
+> **Most of the time you don't need this.** The team keeps a shared pull
+> (S&P 500 members 1990–2025 plus Compustat) that loads without a WRDS
+> connection: see `docs/shared_data.md`. Also note that `wrds_loader` reads the
+> legacy `crsp.dsf` table, which ends at 2024-12-31; newer data is only in the
+> CIZ tables (`crsp.dsf_v2`), which the shared pull uses.
+
 ```python
 from capstone import wrds_loader
 
