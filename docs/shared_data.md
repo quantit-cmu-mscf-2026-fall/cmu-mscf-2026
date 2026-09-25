@@ -111,3 +111,38 @@ the figures first reported.
 membership counts, the delisting-return identity, completeness after the rules
 above, and a value-weighted universe return that tracks the Ken French market
 return (correlation above 0.98). They skip where the data is absent, including CI.
+
+## Updating the data (maintainers)
+
+Three scripts in `scripts/`, run from the repo root. Re-pull rather than edit
+files by hand, so every change is reproducible.
+
+1. **Pull** (one Duo push; resumable, skips files already present):
+
+   ```bash
+   python scripts/pull_wrds.py --user YOUR_WRDS_ID            # Compustat, link, broad CRSP
+   python scripts/pull_wrds.py --user YOUR_WRDS_ID --sp500    # the S&P 500 daily file
+   ```
+
+   Output lands in `data_cache/wrds/`. The S&P 500 file is built from the CIZ
+   tables (`crsp.dsf_v2`) because the legacy `crsp.dsf` ends at 2024-12-31. The
+   broad all-stocks files filter to common stocks at the source, which drops
+   CRSP's delisting rows; use the S&P 500 file for returns.
+
+2. **Document**: `python scripts/build_data_dictionary.py` writes
+   `DATA_DICTIONARY.md` and `data_dictionary.csv` to `data_cache/wrds_build/`
+   from CRSP's own metadata on WRDS (cached in `data_cache/wrds_meta/`; pass
+   `--user` the first time). It asserts every stated fact against the data and
+   fails rather than publish a claim that stopped being true.
+
+3. **Check, then publish**: run `pytest -m data` against the new files, then
+
+   ```bash
+   python scripts/publish_shared_data.py data_cache/wrds/<file>.parquet ...           # preview
+   python scripts/publish_shared_data.py data_cache/wrds/<file>.parquet ... --apply   # publish
+   ```
+
+   It copies each file into the Drive folder, re-verifies it, and rewrites
+   `SHA256SUMS`. Teammates' next `load()` picks the change up, and
+   `data_version()` changes, so runs on old and new data stay distinguishable in
+   the ledger. Tell the team when you publish.
