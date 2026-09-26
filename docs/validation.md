@@ -6,19 +6,33 @@ means the same thing no matter who or what found it. This page is the contract
 those procedures share. It grows one module at a time; the table at the bottom
 says what exists today.
 
-## The input: a return matrix
+## The input: a performance matrix
 
-Every method takes the same input: **per-period strategy returns, one column
-per candidate** (dates x candidates, a pandas DataFrame). Methods that work on
-p-values take a Series of p-values indexed by candidate name.
+Every method takes the same input: **one per-period performance series per
+candidate**, side by side (dates x candidates, a pandas DataFrame, columns named
+by candidate). Methods that work on p-values take a Series of p-values indexed by
+candidate name.
 
-- From a `SyntheticPanel`: `backtest.candidate_returns(panel)`.
-- Generated directly, with known truth: `synth.make_return_matrix(...)`.
-- From your own signals: run each through `backtest.run_backtest` and put the
-  resulting series side by side, dropping the first (untraded) date.
+The series can be whatever your pipeline scores candidates on, as long as it is
+one number per period and higher is better:
 
-A method never takes signals, prices or summaries. Whatever generates candidates
-only has to produce this matrix.
+- **Strategy returns**, the default. From a `SyntheticPanel`:
+  `backtest.candidate_returns(panel)`. From your own signals: run each through
+  `backtest.run_backtest` and put the series side by side, dropping the first
+  (untraded) date.
+- **Information coefficient**: a per-date rank IC per candidate, as the Alpha-GPT
+  pipeline computes, is already this shape.
+- **Anything else per-period**: long-short spread returns, excess returns over a
+  benchmark.
+
+The methods resample, split and test these series over time; they never see
+signals, prices or summary rows. So the direction is one way: strategy and
+generation code produce the matrix and hand it over, and validation never calls
+back into them. A new pipeline plugs in by producing this matrix, without
+changing anything here. Say in your results which kind of series you passed; a
+Sharpe ratio of an IC series is an information ratio, not a strategy Sharpe.
+
+Generated with known truth, for testing: `synth.make_return_matrix(...)`.
 
 ## The rule every method follows
 
