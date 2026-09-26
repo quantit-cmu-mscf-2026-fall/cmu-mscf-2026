@@ -67,7 +67,7 @@ log every trial before looking at its result.
 | Module | Methods | Status |
 |---|---|---|
 | `synth`, `backtest` | `make_return_matrix`, `candidate_returns` | done |
-| `evaluate` | robust Sharpe inference (autocorrelation, fat tails), PSR, MinTRL | planned |
+| `evaluate` | `sharpe_variance` / `sharpe_test` (normal, non-normal, autocorrelation-robust), PSR, MinTRL, implied independent trials | done |
 | `evaluate` | Holm, Benjamini–Yekutieli, Storey q-values | planned |
 | `bootstrap` | stationary bootstrap, block-length selection | planned |
 | `snooping` | White's Reality Check, Romano–Wolf step-down | planned |

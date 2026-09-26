@@ -12,6 +12,8 @@ this module, those tests are what tell you whether the guarantee still holds.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 import pandas as pd
 from scipy import stats
@@ -47,20 +49,36 @@ def sharpe_pvalue(sharpe: float, n_obs: int, periods_per_year: int = 252) -> flo
     return float(2.0 * stats.norm.sf(abs(statistic)))
 
 
-def expected_max_sharpe(n_trials: int, n_obs: int, periods_per_year: int = 252) -> float:
+def expected_max_sharpe(
+    n_trials: int,
+    n_obs: int,
+    periods_per_year: int = 252,
+    *,
+    trials_sharpe_variance: float | None = None,
+) -> float:
     """Annualised Sharpe you should expect from the BEST of `n_trials` nulls.
 
     This is the benchmark a candidate must clear to be interesting. Searching
     harder raises it, which is the entire point: the best of 1000 coin-flip
     strategies looks good, and this says how good.
 
-    Uses the standard extreme-value approximation for the maximum of `n_trials`
-    independent standard normals (Bailey & Lopez de Prado 2014).
+    Uses the extreme-value approximation for the maximum of `n_trials`
+    independent normals (Bailey & Lopez de Prado 2014, Eq. 1), scaled by the
+    spread of the trials' Sharpe ratios. The paper uses the variance measured
+    across the trials; by default this uses `periods_per_year / n_obs`, the
+    variance of an annualised Sharpe estimate when every trial is an IID normal
+    null. Pass `trials_sharpe_variance` (the variance of the trials' annualised
+    Sharpe ratios) when the trials are not that: real trials usually spread
+    wider, which raises the bar.
+
+    `n_trials` should count independent trials; see `implied_independent_trials`.
     """
     if n_trials < 1:
         raise ValueError("n_trials must be at least 1")
     if n_obs < 2:
         raise ValueError("n_obs must be at least 2")
+    if trials_sharpe_variance is not None and trials_sharpe_variance < 0:
+        raise ValueError("trials_sharpe_variance cannot be negative")
     if n_trials == 1:
         return 0.0
 
@@ -68,8 +86,9 @@ def expected_max_sharpe(n_trials: int, n_obs: int, periods_per_year: int = 252) 
     quantile = (1 - euler_mascheroni) * stats.norm.ppf(1 - 1.0 / n_trials) + (
         euler_mascheroni * stats.norm.ppf(1 - 1.0 / (n_trials * np.e))
     )
-    per_period = quantile / np.sqrt(n_obs)
-    return float(per_period * np.sqrt(periods_per_year))
+    if trials_sharpe_variance is None:
+        trials_sharpe_variance = periods_per_year / n_obs
+    return float(quantile * np.sqrt(trials_sharpe_variance))
 
 
 def deflated_sharpe_ratio(
@@ -79,12 +98,16 @@ def deflated_sharpe_ratio(
     skew: float = 0.0,
     kurtosis: float = 3.0,
     periods_per_year: int = 252,
+    *,
+    trials_sharpe_variance: float | None = None,
+    variance: float | None = None,
 ) -> float:
     """Probability that an observed Sharpe reflects genuine skill.
 
-    The deflated Sharpe ratio (Bailey & Lopez de Prado 2014) asks whether an
-    observed Sharpe exceeds what the best of `n_trials` null strategies would
-    have produced, correcting for the non-normality of the return series.
+    The deflated Sharpe ratio (Bailey & Lopez de Prado 2014, Eq. 2) is the
+    probabilistic Sharpe ratio measured against `expected_max_sharpe` rather
+    than against zero: does this Sharpe exceed what the best of `n_trials` null
+    strategies would have produced?
 
     Args:
         sharpe: observed annualised Sharpe ratio.
@@ -96,6 +119,10 @@ def deflated_sharpe_ratio(
         kurtosis: kurtosis of the strategy's returns (3.0 = normal). Fat tails
             make a given Sharpe less impressive.
         periods_per_year: annualisation factor used for `sharpe`.
+        trials_sharpe_variance: passed to `expected_max_sharpe`.
+        variance: asymptotic variance of the per-period Sharpe estimate, from
+            `sharpe_variance`. Defaults to the skew/kurtosis expression, which
+            assumes no autocorrelation; see `sharpe_variance`.
 
     Returns:
         Probability in [0, 1]. Conventionally a candidate is retained at > 0.95.
@@ -110,17 +137,256 @@ def deflated_sharpe_ratio(
     if n_obs < 2:
         raise ValueError("n_obs must be at least 2")
 
-    benchmark = expected_max_sharpe(n_trials, n_obs, periods_per_year)
+    threshold = expected_max_sharpe(
+        n_trials, n_obs, periods_per_year, trials_sharpe_variance=trials_sharpe_variance
+    )
+    return probabilistic_sharpe_ratio(
+        sharpe,
+        n_obs,
+        benchmark=threshold,
+        skew=skew,
+        kurtosis=kurtosis,
+        variance=variance,
+        periods_per_year=periods_per_year,
+    )
 
-    sr = sharpe / np.sqrt(periods_per_year)
-    sr0 = benchmark / np.sqrt(periods_per_year)
 
-    # Variance of the Sharpe estimator under non-normal returns.
-    variance = (1.0 - skew * sr + (kurtosis - 1.0) / 4.0 * sr**2) / (n_obs - 1)
-    if variance <= 0:
+def _nonnormal_variance(sr: float, skew: float, kurtosis: float) -> float:
+    # Mertens (2002), as written in Bailey & Lopez de Prado (2012, Eqs. 8 and 11).
+    return 1.0 - skew * sr + (kurtosis - 1.0) / 4.0 * sr**2
+
+
+def newey_west_lags(n_obs: int) -> int:
+    """Default truncation lag for `sharpe_variance`: floor(4 (T/100)^(2/9)).
+
+    The conventional Newey-West rule of thumb: it grows with the sample, slowly
+    enough that the lag stays a vanishing fraction of it, which is the
+    consistency condition in Lo (2002, App. A). Pass `lags` explicitly when the
+    return process has longer memory than this allows for.
+    """
+    if n_obs < 2:
+        raise ValueError("n_obs must be at least 2")
+    return int(np.floor(4.0 * (n_obs / 100.0) ** (2.0 / 9.0)))
+
+
+def sharpe_variance(returns: pd.Series, method: str = "hac", lags: int | None = None) -> float:
+    """Asymptotic variance V of the per-period Sharpe: sqrt(T)(SR^ - SR) -> N(0, V).
+
+    Three methods, each dropping an assumption the one before makes:
+
+    - "normal": IID normal returns, V = 1 + SR^2 / 2 (Lo 2002, Eq. 8).
+    - "nonnormal": IID returns of any distribution, which adds skew and
+      kurtosis, V = 1 - skew SR + (kurtosis - 1)/4 SR^2 (Mertens 2002). This is
+      the variance inside the probabilistic and deflated Sharpe ratios.
+    - "hac": stationary returns, which adds autocorrelation and volatility
+      clustering. Lo's GMM estimator (2002, App. A, Eqs. A8-A15): the moment
+      conditions (R - mu, (R - mu)^2 - sigma^2) with a Newey-West (Bartlett)
+      long-run covariance, mapped through the delta method. With `lags=0` it
+      equals "nonnormal" exactly.
+
+    Use "hac" unless you know returns are serially uncorrelated. Mertens'
+    expression is sometimes said to hold for any stationary returns (Bailey &
+    Lopez de Prado 2012, citing Opdyke 2007); it has no autocorrelation term and
+    does not: on AR(1) nulls with coefficient 0.3 it rejects about 15% of the
+    time at a nominal 5% (`tests/test_evaluate.py`). "hac" is much closer but
+    still somewhat liberal in finite samples, as Ledoit & Wolf (2008) also find.
+
+    Args:
+        returns: per-period returns; NaNs are dropped.
+        method: "normal", "nonnormal" or "hac".
+        lags: truncation lag for "hac"; default `newey_west_lags(T)`.
+
+    Returns:
+        V, in per-period Sharpe units; the standard error of the per-period
+        Sharpe is sqrt(V / T). NaN when returns have zero variance.
+    """
+    if method not in ("normal", "nonnormal", "hac"):
+        raise ValueError(f"unknown method {method!r}; options: normal, nonnormal, hac")
+    x = returns.dropna().to_numpy(dtype=float)
+    n = len(x)
+    if n < 2:
+        raise ValueError("need at least 2 non-NaN returns")
+    if np.ptp(x) == 0:
         return float("nan")
+    mu = x.mean()
+    centred = x - mu
+    var = float(np.mean(centred**2))
+    sr = mu / np.sqrt(var)
 
-    return float(stats.norm.cdf((sr - sr0) / np.sqrt(variance)))
+    if method == "normal":
+        return float(1.0 + 0.5 * sr**2)
+    if method == "nonnormal":
+        lags = 0
+    elif lags is None:
+        lags = newey_west_lags(n)
+    elif lags < 0:
+        raise ValueError("lags cannot be negative")
+
+    moments = np.column_stack([centred, centred**2 - var])
+    omega = moments.T @ moments / n
+    for j in range(1, min(lags, n - 1) + 1):
+        gamma = moments[j:].T @ moments[:-j] / n
+        omega += (1.0 - j / (lags + 1.0)) * (gamma + gamma.T)
+    gradient = np.array([1.0 / np.sqrt(var), -mu / (2.0 * var**1.5)])
+    return float(gradient @ omega @ gradient)
+
+
+def probabilistic_sharpe_ratio(
+    sharpe: float,
+    n_obs: int,
+    *,
+    benchmark: float = 0.0,
+    skew: float = 0.0,
+    kurtosis: float = 3.0,
+    variance: float | None = None,
+    periods_per_year: int = 252,
+) -> float:
+    """Probability that the true Sharpe exceeds `benchmark`.
+
+    Bailey & Lopez de Prado (2012), Eq. 11.
+
+    Args:
+        sharpe: observed annualised Sharpe ratio.
+        n_obs: number of periods in the track record.
+        benchmark: annualised Sharpe to beat; 0 asks "is there any skill?".
+        skew, kurtosis: of the returns (kurtosis 3.0 = normal). Ignored when
+            `variance` is given.
+        variance: asymptotic variance from `sharpe_variance`, to use in place of
+            the skew/kurtosis expression, e.g. the "hac" one for autocorrelated
+            returns.
+        periods_per_year: annualisation factor used for `sharpe` and `benchmark`.
+
+    Returns:
+        Probability in [0, 1]; NaN if `sharpe` is NaN.
+    """
+    if not np.isfinite(sharpe):
+        return float("nan")
+    if n_obs < 2:
+        raise ValueError("n_obs must be at least 2")
+    sr = sharpe / np.sqrt(periods_per_year)
+    sr_star = benchmark / np.sqrt(periods_per_year)
+    if variance is None:
+        variance = _nonnormal_variance(sr, skew, kurtosis)
+    if not variance > 0:
+        return float("nan")
+    return float(stats.norm.cdf((sr - sr_star) * np.sqrt(n_obs - 1) / np.sqrt(variance)))
+
+
+def min_track_record_length(
+    sharpe: float,
+    *,
+    benchmark: float = 0.0,
+    skew: float = 0.0,
+    kurtosis: float = 3.0,
+    variance: float | None = None,
+    alpha: float = 0.05,
+    periods_per_year: int = 252,
+) -> float:
+    """Observations needed before `sharpe` is significantly above `benchmark`.
+
+    Bailey & Lopez de Prado (2012), Eq. 13. Arguments as for
+    `probabilistic_sharpe_ratio`; `alpha` is the one-sided significance level.
+    Returns a count of periods, not years. Infinite when `sharpe` does not
+    exceed `benchmark`: no track record is long enough.
+
+    The formula is asymptotic; the paper warns that the moments going into it
+    should come from a longer series than a short MinTRL suggests.
+    """
+    if not 0 < alpha < 1:
+        raise ValueError("alpha must be in (0, 1)")
+    sr = sharpe / np.sqrt(periods_per_year)
+    sr_star = benchmark / np.sqrt(periods_per_year)
+    if not sr > sr_star:
+        return float("inf")
+    if variance is None:
+        variance = _nonnormal_variance(sr, skew, kurtosis)
+    z = stats.norm.ppf(1.0 - alpha)
+    return float(1.0 + variance * (z / (sr - sr_star)) ** 2)
+
+
+@dataclass(frozen=True)
+class SharpeTest:
+    """Result of `sharpe_test`. `sharpe` and `se` are annualised."""
+
+    sharpe: float
+    n_obs: int
+    skew: float
+    kurtosis: float
+    method: str
+    variance: float
+    se: float
+    pvalue: float
+    psr: float
+
+
+def sharpe_test(
+    returns: pd.Series,
+    *,
+    method: str = "hac",
+    benchmark: float = 0.0,
+    lags: int | None = None,
+    periods_per_year: int = 252,
+) -> SharpeTest:
+    """Test H0: SR = `benchmark` on a return series, with a variance that fits the data.
+
+    Measures skew and kurtosis instead of assuming them and, with the default
+    "hac" method, allows for autocorrelation. `pvalue` is two-sided, like
+    `sharpe_pvalue`; `psr` is the one-sided probability that SR > `benchmark`.
+    """
+    clean = returns.dropna()
+    variance = sharpe_variance(clean, method=method, lags=lags)
+    x = clean.to_numpy(dtype=float)
+    n = len(x)
+    centred = x - x.mean()
+    m2, m3, m4 = (float(np.mean(centred**k)) for k in (2, 3, 4))
+    if m2 > 0:
+        sharpe = float(x.mean() / np.sqrt(m2) * np.sqrt(periods_per_year))
+        skew, kurtosis = m3 / m2**1.5, m4 / m2**2
+    else:
+        sharpe = skew = kurtosis = float("nan")
+    se = float(np.sqrt(variance / n * periods_per_year))
+    z = (sharpe - benchmark) / se
+    return SharpeTest(
+        sharpe=sharpe,
+        n_obs=n,
+        skew=skew,
+        kurtosis=kurtosis,
+        method=method,
+        variance=variance,
+        se=se,
+        pvalue=float(2.0 * stats.norm.sf(abs(z))) if np.isfinite(z) else float("nan"),
+        psr=probabilistic_sharpe_ratio(
+            sharpe, n, benchmark=benchmark, variance=variance, periods_per_year=periods_per_year
+        ),
+    )
+
+
+def average_correlation(returns: pd.DataFrame) -> float:
+    """Equal-weighted average off-diagonal correlation of the trials.
+
+    Bailey & Lopez de Prado (2014), Eq. 8.
+    """
+    m = returns.shape[1]
+    if m < 2:
+        raise ValueError("need at least 2 trials")
+    corr = returns.corr().to_numpy()
+    return float((np.nansum(corr) - np.trace(corr)) / (m * (m - 1)))
+
+
+def implied_independent_trials(n_trials: int, avg_correlation: float) -> float:
+    """Independent trials implied by `n_trials` correlated ones.
+
+    Bailey & Lopez de Prado (2014), Eq. 9: N = rho + (1 - rho) M, interpolating
+    between one trial (all perfectly correlated) and M (uncorrelated). A rough
+    correction, as the paper says. Use it for `expected_max_sharpe`, never to
+    shrink the trial count a multiple-testing correction on p-values uses.
+    """
+    if n_trials < 1:
+        raise ValueError("n_trials must be at least 1")
+    if not -1.0 <= avg_correlation <= 1.0:
+        raise ValueError("avg_correlation must be in [-1, 1]")
+    rho = max(avg_correlation, 0.0)
+    return float(rho + (1.0 - rho) * n_trials)
 
 
 def benjamini_hochberg(pvalues: pd.Series, alpha: float = 0.05) -> pd.Series:
