@@ -534,8 +534,13 @@ def estimate_pi0(
     mean-squared error of the pFDR estimate at rejection region [0, `gamma`]
     (Algorithm 3).
 
-    The paper assumes independent p-values throughout. Correlated candidates
-    violate that; do not rely on the estimate for them.
+    The paper assumes independent p-values throughout, and correlation breaks
+    the estimate, not just its precision: when a shared factor moves every
+    candidate the same way, few p-values land above lambda and pi0 collapses.
+    On all-null sets of 100 candidates with pairwise correlation 0.5 it
+    averaged 0.73 rather than 1, fell below 0.8 in 41% of sets and reached 0
+    (`tests/test_evaluate.py`). Treat it as a description of independent
+    candidates only.
 
     NaN p-values are dropped.
     """
@@ -583,8 +588,7 @@ def storey_qvalues(
     estimate pi0 * p * m / #{p_j <= p}. That is BH's adjusted p-value times the
     estimated share of nulls pi0, so it is never weaker than BH and gains when
     many candidates are real, because BH implicitly assumes pi0 = 1. At
-    `lambda_=0`, pi0 = 1 and q <= alpha selects exactly what
-    `benjamini_hochberg(pvalues, alpha)` rejects.
+    `lambda_=0`, pi0 = 1 and the q-values are exactly `bh_adjusted`.
 
     `pfdr=True` uses Storey's positive-FDR estimate instead, as in the paper.
     It divides by the chance of making any rejection, so as p goes to 0 it
@@ -593,8 +597,11 @@ def storey_qvalues(
     the signal. That is the paper's intent, but it makes pFDR q-values a poor
     score when real candidates are rare, which is the usual case here.
 
-    Built on independent p-values (Storey 2002): for correlated candidates,
-    decide with `benjamini_hochberg` or `benjamini_yekutieli` instead.
+    Only for independent candidates. Because pi0 collapses under correlation
+    (see `estimate_pi0`), q-values of correlated candidates are too small: on
+    all-null sets with pairwise correlation 0.5, some q fell below 0.05 in 12%
+    of sets, against 4.5% for BH. Never screen or decide on them there; use
+    `bh_adjusted` (positive dependence) or `by_adjusted` (any dependence).
 
     NaN p-values get NaN q-values and do not count toward m.
     """
@@ -619,6 +626,82 @@ def storey_qvalues(
     raw = np.minimum(raw, 1.0)
     q.loc[ordered.index] = np.minimum.accumulate(raw[::-1])[::-1]
     return q
+
+
+def _adjusted(pvalues: pd.Series, family_size: int, scale, *, step_up: bool) -> pd.Series:
+    # Adjusted p-value of the i-th smallest p: the smallest level at which the
+    # procedure would reject it. Step-down procedures take a running maximum
+    # from the smallest p upward, step-up ones a running minimum from the top.
+    adjusted = pd.Series(np.nan, index=pvalues.index)
+    ordered = pvalues.dropna().sort_values()
+    if ordered.empty:
+        return adjusted
+    ranks = np.arange(1, len(ordered) + 1)
+    raw = np.minimum(scale(ordered.to_numpy(dtype=float), ranks, family_size), 1.0)
+    if step_up:
+        values = np.minimum.accumulate(raw[::-1])[::-1]
+    else:
+        values = np.maximum.accumulate(raw)
+    adjusted.loc[ordered.index] = values
+    return adjusted
+
+
+def holm_adjusted(pvalues: pd.Series) -> pd.Series:
+    """Holm-adjusted p-values: `holm(pvalues, alpha)` rejects exactly those <= alpha.
+
+    A graded score in place of a yes/no: the family-wise error rate at which
+    this candidate would first be called real. NaN stays NaN and counts toward m.
+    """
+    return _adjusted(pvalues, len(pvalues), lambda p, i, m: (m - i + 1) * p, step_up=False)
+
+
+def bh_adjusted(pvalues: pd.Series) -> pd.Series:
+    """BH-adjusted p-values: `benjamini_hochberg(pvalues, alpha)` rejects those <= alpha.
+
+    The false-discovery rate at which this candidate would first be selected.
+    NaN stays NaN and, as in `benjamini_hochberg`, does not count toward m.
+    Equal to `storey_qvalues(pvalues, lambda_=0, pfdr=False)`.
+    """
+    usable = int(pvalues.notna().sum())
+    return _adjusted(pvalues, usable, lambda p, i, m: m * p / i, step_up=True)
+
+
+def by_adjusted(pvalues: pd.Series) -> pd.Series:
+    """BY-adjusted p-values: `benjamini_yekutieli(pvalues, alpha)` rejects those <= alpha.
+
+    BH-adjusted p-values scaled by sum(1/i), m counting NaN, as in
+    `benjamini_yekutieli`: the FDR level valid under any dependence.
+    """
+    m = len(pvalues)
+    harmonic = float(np.sum(1.0 / np.arange(1, m + 1))) if m else 1.0
+    return _adjusted(pvalues, m, lambda p, i, n: harmonic * n * p / i, step_up=True)
+
+
+def evidence_profile(pvalues: pd.Series, *, lambda_: float | str = 0.5) -> pd.DataFrame:
+    """Every correction's graded score for each candidate, side by side.
+
+    One row per candidate, sorted by p-value, with the raw p-value and the level
+    at which each procedure would first call it real: `holm` (family-wise
+    error, any dependence), `by` (FDR, any dependence), `bh` (FDR, positive
+    dependence), and Storey's `q` (estimated pFDR, independence). Lower is
+    stronger in every column; a candidate that is strong only in the right-hand
+    columns is plausible, not established.
+
+    Describing a candidate set is what this is for. A decision still takes one
+    column and one threshold, fixed before the data is scored; choosing the
+    column afterwards is itself a multiple-testing problem. Never decide on
+    `q` for correlated candidates; see `storey_qvalues`.
+    """
+    profile = pd.DataFrame(
+        {
+            "p": pvalues,
+            "holm": holm_adjusted(pvalues),
+            "by": by_adjusted(pvalues),
+            "bh": bh_adjusted(pvalues),
+            "q": storey_qvalues(pvalues, lambda_=lambda_),
+        }
+    )
+    return profile.sort_values("p", na_position="last")
 
 
 def false_discovery_rate(rejected: pd.Series, truth: pd.Series) -> float:
