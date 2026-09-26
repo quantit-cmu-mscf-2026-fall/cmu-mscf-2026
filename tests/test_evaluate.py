@@ -15,12 +15,16 @@ from capstone.evaluate import (
     average_correlation,
     benjamini_hochberg,
     benjamini_yekutieli,
+    bh_adjusted,
     bonferroni,
+    by_adjusted,
     deflated_sharpe_ratio,
     estimate_pi0,
+    evidence_profile,
     expected_max_sharpe,
     false_discovery_rate,
     holm,
+    holm_adjusted,
     implied_independent_trials,
     min_track_record_length,
     newey_west_lags,
@@ -558,3 +562,121 @@ class TestOneSidedScreening:
                 fdps[name].append(0.0 if np.isnan(fdr) else fdr)
         assert np.mean(fdps["bh"]) <= 0.08
         assert np.mean(fdps["by"]) <= 0.05
+
+
+class TestAdjustedPValues:
+    """Graded scores: each adjusted p-value is the level at which its procedure rejects."""
+
+    @pytest.mark.parametrize("alpha", [0.01, 0.05, 0.1, 0.2])
+    def test_thresholding_reproduces_every_decision(self, alpha):
+        # Two independent implementations must agree: the decision rules and
+        # their adjusted p-values. NaNs included, since the rules count them
+        # differently (Holm and BY in m, BH not).
+        for seed in range(25):
+            pvalues, _ = _correlated_pvalues(150, 30, 0.3, seed)
+            pvalues.iloc[[5, 60]] = np.nan
+            for adjusted, rule in [
+                (holm_adjusted, holm),
+                (bh_adjusted, benjamini_hochberg),
+                (by_adjusted, benjamini_yekutieli),
+            ]:
+                pd.testing.assert_series_equal(
+                    (adjusted(pvalues) <= alpha), rule(pvalues, alpha), check_names=False
+                )
+
+    def test_hand_computed_values(self):
+        pvalues = pd.Series([0.01, 0.04, 0.03, 0.2], index=list("abcd"))
+        # Holm: running max of (m - i + 1) p over the sorted p-values.
+        assert holm_adjusted(pvalues).to_dict() == pytest.approx(
+            {"a": 0.04, "c": 0.09, "b": 0.09, "d": 0.2}
+        )
+        # BH: running min from the top of m p / i.
+        assert bh_adjusted(pvalues).to_dict() == pytest.approx(
+            {"a": 0.04, "c": 0.0533333, "b": 0.0533333, "d": 0.2}
+        )
+        assert by_adjusted(pvalues).to_dict() == pytest.approx(
+            (bh_adjusted(pvalues) * 25 / 12).clip(upper=1).to_dict()
+        )
+
+    def test_ordering_between_procedures(self):
+        pvalues, _ = _correlated_pvalues(300, 40, 0.3, seed=1)
+        holm_p, by_p, bh_p = holm_adjusted(pvalues), by_adjusted(pvalues), bh_adjusted(pvalues)
+        assert (pvalues <= bh_p + 1e-15).all()
+        assert (bh_p <= by_p + 1e-15).all()
+        assert (bh_p <= holm_p + 1e-15).all()
+        assert ((holm_p <= 1) & (by_p <= 1)).all()
+
+    def test_bh_adjusted_is_the_q_value_at_lambda_zero(self):
+        pvalues, _ = _correlated_pvalues(200, 20, 0.0, seed=2)
+        pd.testing.assert_series_equal(
+            bh_adjusted(pvalues), storey_qvalues(pvalues, lambda_=0.0), check_names=False
+        )
+
+    def test_empty_and_nan(self):
+        empty = pd.Series(dtype=float)
+        assert holm_adjusted(empty).empty and bh_adjusted(empty).empty and by_adjusted(empty).empty
+        adjusted = holm_adjusted(pd.Series([0.01, np.nan], index=["a", "b"]))
+        assert adjusted["a"] == pytest.approx(0.02) and np.isnan(adjusted["b"])
+
+
+class TestEvidenceProfile:
+    def test_columns_order_and_monotone_strength(self):
+        pvalues, truth = _correlated_pvalues(200, 20, 0.2, seed=0)
+        profile = evidence_profile(pvalues)
+        assert list(profile.columns) == ["p", "holm", "by", "bh", "q"]
+        assert profile["p"].is_monotonic_increasing
+        # Planted candidates are the strongest on every graded score.
+        assert profile.index[:10].isin(truth[truth].index).all()
+
+    def test_every_procedure_on_real_sharpe_pvalues(self):
+        # The values the pipeline will actually pass: one-sided HAC p-values
+        # of correlated strategy returns. The planted candidates lead every column.
+        planted = make_return_matrix(
+            n_obs=750, n_candidates=200, n_real=10, sharpe_real=3.0, rho=0.5, seed=0
+        )
+        pvalues = pd.Series(
+            {c: sharpe_test(planted.returns[c]).pvalue_greater for c in planted.returns.columns}
+        )
+        profile = evidence_profile(pvalues)
+        real = planted.truth[planted.truth].index
+        for column in ["holm", "by", "bh", "q"]:
+            strongest = profile[column].sort_values(kind="stable").index[:5]
+            assert strongest.isin(real).all(), column
+
+
+class TestCorrelationBreaksStorey:
+    """Storey's estimates assume independence; correlated candidates break them, BH holds.
+
+    Global-null families of 100 one-sided tests with pairwise correlation 0.5,
+    400 of them: how often does each column call anything at 5%?
+    """
+
+    @staticmethod
+    def _any_discovery_rate(column: str, rho: float) -> float:
+        score = {"holm": holm_adjusted, "bh": bh_adjusted, "by": by_adjusted}.get(
+            column, storey_qvalues
+        )
+        hits = [
+            bool((score(_correlated_pvalues(100, 0, rho, seed)[0]) <= 0.05).any())
+            for seed in range(400)
+        ]
+        return float(np.mean(hits))
+
+    def test_bh_holm_and_by_keep_their_level(self):
+        for column in ["holm", "bh", "by"]:
+            assert self._any_discovery_rate(column, rho=0.5) <= 0.07, column
+
+    def test_q_values_are_too_permissive_under_correlation(self):
+        # Measured over four seed ranges: q 0.095-0.14 against BH 0.025-0.043
+        # under correlation, and 0.035-0.063 for q when candidates are independent.
+        assert self._any_discovery_rate("q", rho=0.0) <= 0.08
+        correlated_q = self._any_discovery_rate("q", rho=0.5)
+        assert correlated_q > 0.075
+        assert correlated_q > 2 * self._any_discovery_rate("bh", rho=0.5)
+
+    def test_pi0_collapses_under_correlation(self):
+        pi0 = np.array(
+            [estimate_pi0(_correlated_pvalues(100, 0, 0.5, seed)[0]) for seed in range(400)]
+        )
+        assert pi0.mean() < 0.85
+        assert (pi0 < 0.8).mean() > 0.25
