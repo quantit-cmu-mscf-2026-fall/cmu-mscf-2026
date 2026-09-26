@@ -12,7 +12,12 @@ import pandas as pd
 import pytest
 
 from capstone.backtest import run_backtest, summarize
-from capstone.synth import bootstrap_from_real, candidate_frames, make_panel
+from capstone.synth import (
+    bootstrap_from_real,
+    candidate_frames,
+    make_panel,
+    make_return_matrix,
+)
 
 
 class TestPanelShape:
@@ -143,3 +148,106 @@ class TestBootstrap:
     def test_rejects_empty_returns(self):
         with pytest.raises(ValueError):
             bootstrap_from_real(pd.DataFrame(), n_candidates=5)
+
+
+def _annual_sharpe(returns: pd.DataFrame) -> pd.Series:
+    return returns.mean() / returns.std() * np.sqrt(252)
+
+
+def _mean_pairwise_corr(returns: pd.DataFrame) -> float:
+    corr = returns.corr().to_numpy()
+    return float(corr[np.triu_indices_from(corr, k=1)].mean())
+
+
+class TestReturnMatrix:
+    def test_shape_truth_and_params(self):
+        matrix = make_return_matrix(n_obs=300, n_candidates=40, n_real=7, seed=0)
+        assert matrix.returns.shape == (300, 40)
+        assert list(matrix.returns.columns) == list(matrix.truth.index)
+        assert (matrix.n_true, matrix.n_null, matrix.n_candidates) == (7, 33, 40)
+        assert matrix.params["n_real"] == 7 and matrix.params["seed"] == 0
+
+    def test_same_seed_reproduces_and_different_seeds_differ(self):
+        kwargs = dict(n_obs=200, n_candidates=10, n_real=2, rho=0.3, ar1=0.2, garch=(0.1, 0.8))
+        first = make_return_matrix(**kwargs, seed=5)
+        pd.testing.assert_frame_equal(first.returns, make_return_matrix(**kwargs, seed=5).returns)
+        assert not first.returns.equals(make_return_matrix(**kwargs, seed=6).returns)
+
+    def test_planted_sharpe_is_hit_and_nulls_are_centred_on_zero(self):
+        # 500 candidates x 10 years: each Sharpe has standard error ~0.32, so the
+        # group means are pinned to within a few hundredths.
+        matrix = make_return_matrix(n_candidates=500, n_real=50, sharpe_real=1.0, seed=0)
+        sharpe = _annual_sharpe(matrix.returns)
+        assert sharpe[matrix.truth].mean() == pytest.approx(1.0, abs=0.15)
+        assert sharpe[~matrix.truth].mean() == pytest.approx(0.0, abs=0.06)
+        # The spread of null Sharpes is what the multiple-testing bar is built on.
+        assert sharpe[~matrix.truth].std() == pytest.approx(np.sqrt(252 / 2520), rel=0.1)
+
+    @pytest.mark.parametrize(
+        "options",
+        [{}, {"rho": 0.5}, {"ar1": 0.4}, {"t_df": 5}, {"garch": (0.1, 0.85)}],
+        ids=["plain", "rho", "ar1", "t", "garch"],
+    )
+    def test_every_option_keeps_the_target_volatility(self, options):
+        matrix = make_return_matrix(n_candidates=50, vol=0.02, seed=1, **options)
+        assert matrix.returns.std().mean() == pytest.approx(0.02, rel=0.05)
+
+    def test_rho_sets_the_pairwise_correlation(self):
+        assert _mean_pairwise_corr(make_return_matrix(n_candidates=50, seed=0).returns) < 0.02
+        correlated = make_return_matrix(n_candidates=50, rho=0.4, seed=0).returns
+        assert _mean_pairwise_corr(correlated) == pytest.approx(0.4, abs=0.05)
+
+    def test_ar1_sets_the_lag_one_autocorrelation(self):
+        def mean_autocorr(options):
+            returns = make_return_matrix(n_candidates=50, seed=0, **options).returns
+            return float(returns.apply(lambda col: col.autocorr()).mean())
+
+        assert abs(mean_autocorr({})) < 0.02
+        assert mean_autocorr({"ar1": 0.3}) == pytest.approx(0.3, abs=0.03)
+        assert mean_autocorr({"ar1": -0.3}) == pytest.approx(-0.3, abs=0.03)
+
+    def test_t_df_fattens_the_tails(self):
+        plain = make_return_matrix(n_candidates=50, seed=0).returns
+        fat = make_return_matrix(n_candidates=50, t_df=5, seed=0).returns
+        assert abs(float(plain.kurt().mean())) < 0.2
+        assert float(fat.kurt().mean()) > 2.0
+
+    def test_garch_clusters_volatility(self):
+        # Squared returns are autocorrelated under GARCH (theory: ~0.18 at lag 1
+        # for alpha=0.1, beta=0.85) and not otherwise.
+        def squared_autocorr(options):
+            returns = make_return_matrix(n_candidates=50, seed=0, **options).returns
+            return float((returns**2).apply(lambda col: col.autocorr()).mean())
+
+        assert abs(squared_autocorr({})) < 0.02
+        assert squared_autocorr({"garch": (0.1, 0.85)}) > 0.1
+
+    def test_options_do_not_move_null_means(self):
+        # A property that shifted the mean would plant signal in the nulls. rho is
+        # left out: a shared zero-mean factor cannot shift the mean, but it moves
+        # every candidate's realised Sharpe together, so the cross-candidate
+        # average stops being a precise check. Here each Sharpe has standard
+        # error ~0.43 (ar1 inflates it), so the average of 300 has ~0.025.
+        matrix = make_return_matrix(n_candidates=300, ar1=0.3, t_df=5, garch=(0.1, 0.85), seed=0)
+        assert _annual_sharpe(matrix.returns).mean() == pytest.approx(0.0, abs=0.1)
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"n_obs": 1},
+            {"n_candidates": 0},
+            {"n_real": 5, "n_candidates": 4},
+            {"n_real": -1},
+            {"vol": 0.0},
+            {"rho": 1.0},
+            {"rho": -0.1},
+            {"ar1": 1.0},
+            {"t_df": 2.0},
+            {"garch": (0.5, 0.5)},
+            {"garch": (-0.1, 0.5)},
+            {"periods_per_year": 0},
+        ],
+    )
+    def test_rejects_invalid_arguments(self, kwargs):
+        with pytest.raises(ValueError):
+            make_return_matrix(**kwargs)
