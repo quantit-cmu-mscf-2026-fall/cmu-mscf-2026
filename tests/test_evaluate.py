@@ -725,13 +725,13 @@ class TestEmpiricalNull:
 
 class TestLocalFdr:
     @staticmethod
-    def _any_flag_rate(rho: float, *, degree: int = 3, reps: int = 300) -> float:
+    def _any_flag_rate(rho: float, *, degree: int | None = None, reps: int = 300) -> float:
+        # degree=None exercises local_fdr's own default, which is what is under test.
+        options = {} if degree is None else {"degree": degree}
         return float(
             np.mean(
                 [
-                    (
-                        local_fdr(_correlated_pvalues(200, 0, rho, seed)[0], degree=degree) <= 0.2
-                    ).any()
+                    (local_fdr(_correlated_pvalues(200, 0, rho, seed)[0], **options) <= 0.2).any()
                     for seed in range(reps)
                 ]
             )
