@@ -14,6 +14,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+import pytest
+
 from capstone import runlog
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -87,3 +89,37 @@ def test_stats_cli(tmp_path, monkeypatch):
         check=True,
     )
     assert "total runs: 3" in result.stdout
+
+
+def test_read_entries_returns_what_was_logged(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    assert runlog.read_entries() == []
+
+    runlog.log_run("alpha", seed=1)
+    runlog.log_run("beta", seed=2)
+    entries = runlog.read_entries()
+    assert [entry["name"] for entry in entries] == ["alpha", "beta"]
+    assert [entry["seed"] for entry in entries] == [1, 2]
+
+
+def test_trial_count_counts_all_or_one_name(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    for seed in range(3):
+        runlog.log_run("alpha", seed=seed)
+    runlog.log_run("beta")
+
+    assert runlog.trial_count() == 4
+    assert runlog.trial_count("alpha") == 3
+    assert runlog.trial_count("beta") == 1
+
+
+def test_trial_count_refuses_zero(tmp_path, monkeypatch):
+    # A correction against zero trials is no correction; the usual cause is a
+    # wrong ledger directory or a misspelled name, so it must fail loudly.
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    with pytest.raises(LookupError, match="no trials"):
+        runlog.trial_count()
+
+    runlog.log_run("alpha")
+    with pytest.raises(LookupError, match="'alhpa'"):
+        runlog.trial_count("alhpa")
