@@ -74,6 +74,7 @@ candidate real, and `evaluate.evidence_profile` puts them side by side:
 | `by` | false-discovery rate | any dependence |
 | `bh` | false-discovery rate | positive dependence: one-sided p-values of positively correlated candidates |
 | `q` (Storey) | estimated false-discovery rate | independent candidates only |
+| `lfdr` (Efron) | probability this candidate is null; 0.2 is the usual line | correlated candidates, 200 or more; answers "stands out from the rest" |
 
 Lower is stronger in every column. Feed it one-sided p-values
 (`sharpe_test(...).pvalue_greater`): only positive Sharpe ratios are
@@ -81,6 +82,18 @@ discoveries, and one-sided tests are the case BH's guarantee covers. Never
 decide on `q` for correlated candidates; the share-of-nulls estimate behind it
 collapses when candidates move together, and it calls false discoveries more
 than twice as often as BH does (`tests/test_evaluate.py`).
+
+`lfdr` is the fix for that problem, with a change of question. It estimates the
+null from the bulk of the candidates (`evaluate.empirical_null`), so a shared
+factor moves the null along with them: all-null sets flag something as often at
+pairwise correlation 0.5 as at 0 (2-5% of sets at 200 candidates), and with
+planted signals under correlation it finds more of them than BH at 10% while
+keeping the false-discovery proportion under about 7%. But against an estimated
+null, "real" means **better than the other candidates**: an edge every candidate
+shares becomes part of the null. Use `bh` or `by` for "is the Sharpe above zero
+at all". On independent candidates `lfdr` is the more conservative of the two
+(for example, 0.19 against BH's 0.49 of signals found when 10% were real at
+shift 2.5). It is NaN below 200 candidates, where the null can't be estimated.
 
 ## A staged funnel
 
@@ -109,7 +122,7 @@ defaults.
 | `synth`, `backtest` | `make_return_matrix`, `candidate_returns` | done |
 | `evaluate` | `sharpe_variance` / `sharpe_test` (normal, non-normal, autocorrelation-robust), PSR, MinTRL, implied independent trials | done |
 | `evaluate` | `holm`, `benjamini_yekutieli`, `estimate_pi0`, `storey_qvalues`; adjusted p-values and `evidence_profile`; one-sided `pvalue_greater` | done |
-| `evaluate` | local false-discovery rate and empirical null (Efron): a per-candidate probability of being real that allows for correlation | planned |
+| `evaluate` | `empirical_null`, `local_fdr` (Efron): a per-candidate probability of being null, against a null estimated from the candidates, so it allows for correlation; the `lfdr` column of `evidence_profile` | done |
 | `bootstrap` | stationary bootstrap, block-length selection | planned |
 | `snooping` | White's Reality Check, Romano–Wolf step-down | planned |
 | `cv` | purged k-fold with embargo (from the Alpha-GPT work), walk-forward | planned |

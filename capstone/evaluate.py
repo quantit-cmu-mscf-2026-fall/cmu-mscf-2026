@@ -683,15 +683,22 @@ def evidence_profile(pvalues: pd.Series, *, lambda_: float | str = 0.5) -> pd.Da
     One row per candidate, sorted by p-value, with the raw p-value and the level
     at which each procedure would first call it real: `holm` (family-wise
     error, any dependence), `by` (FDR, any dependence), `bh` (FDR, positive
-    dependence), and Storey's `q` (estimated pFDR, independence). Lower is
-    stronger in every column; a candidate that is strong only in the right-hand
-    columns is plausible, not established.
+    dependence), Storey's `q` (estimated pFDR, independence), and `lfdr`
+    (the probability the candidate is null, against an empirical null; see
+    `local_fdr`). Lower is stronger in every column; a candidate that is strong
+    only in the right-hand columns is plausible, not established. `lfdr` is NaN
+    below `MIN_LOCAL_FDR_CANDIDATES` usable p-values, where the null can't be
+    estimated.
 
     Describing a candidate set is what this is for. A decision still takes one
     column and one threshold, fixed before the data is scored; choosing the
     column afterwards is itself a multiple-testing problem. Never decide on
     `q` for correlated candidates; see `storey_qvalues`.
     """
+    if pvalues.notna().sum() >= MIN_LOCAL_FDR_CANDIDATES:
+        lfdr = local_fdr(pvalues)
+    else:
+        lfdr = pd.Series(np.nan, index=pvalues.index)
     profile = pd.DataFrame(
         {
             "p": pvalues,
@@ -699,6 +706,7 @@ def evidence_profile(pvalues: pd.Series, *, lambda_: float | str = 0.5) -> pd.Da
             "by": by_adjusted(pvalues),
             "bh": bh_adjusted(pvalues),
             "q": storey_qvalues(pvalues, lambda_=lambda_),
+            "lfdr": lfdr,
         }
     )
     return profile.sort_values("p", na_position="last")
@@ -743,3 +751,157 @@ def power(rejected: pd.Series, truth: pd.Series) -> float:
     if n_true == 0:
         return float("nan")
     return int((rejected & aligned_truth).sum()) / n_true
+
+
+# ---------------------------------------------------------------------------
+# Local false-discovery rate against an empirical null (Efron 2004, 2007)
+# ---------------------------------------------------------------------------
+
+MIN_LOCAL_FDR_CANDIDATES = 200
+
+
+@dataclass(frozen=True)
+class EmpiricalNull:
+    """The null distribution estimated from the candidates themselves, on the z scale.
+
+    `z = Phi^{-1}(1 - p)` for one-sided p-values, so a null candidate is N(0, 1)
+    in theory. `delta` and `sigma` are where the bulk of the candidates actually
+    sits; `pi0` is the estimated share of nulls.
+    """
+
+    delta: float
+    sigma: float
+    pi0: float
+
+
+def _z_scores(pvalues: pd.Series) -> pd.Series:
+    clipped = pvalues.clip(lower=1e-300, upper=1.0 - 1e-16)
+    return pd.Series(stats.norm.isf(clipped), index=pvalues.index)
+
+
+def _fit_mixture(z: np.ndarray, degree: int) -> tuple[np.ndarray, np.ndarray, float]:
+    # Lindsey's method: a Poisson regression of histogram counts on a polynomial
+    # in z estimates the density of all candidates, null and real together.
+    import statsmodels.api as sm
+
+    n = len(z)
+    lo, hi = float(z.min()), float(z.max())
+    pad = 0.1 * (hi - lo)
+    edges = np.linspace(lo - pad, hi + pad, max(20, min(120, n // 5)) + 1)
+    mids = (edges[:-1] + edges[1:]) / 2
+    counts, _ = np.histogram(z, edges)
+    x = (mids - mids.mean()) / mids.std()
+    design = np.column_stack([x**k for k in range(degree + 1)])
+    fit = sm.GLM(counts, design, family=sm.families.Poisson()).fit()
+    return mids, design @ fit.params, float(edges[1] - edges[0])
+
+
+def empirical_null(pvalues: pd.Series, *, degree: int = 3, central: float = 0.5) -> EmpiricalNull:
+    """Estimate the null from the middle of the candidates' z-scores (central matching).
+
+    Efron (2004): if most candidates are null, the centre of their histogram is
+    the null's shape. Fit the log density of all z-scores (`_fit_mixture`),
+    then a parabola to it over the central `central` share of candidates; a
+    normal density is a parabola on the log scale, so its vertex and curvature
+    give the null's centre and width, and its height the share of nulls.
+
+    This is what correlation does to a candidate set: a shared factor moves
+    every candidate's z-score together, so within one set the nulls sit at
+    delta = sqrt(rho) W (W the factor's realisation) with width sqrt(1 - rho),
+    not at N(0, 1). On all-null sets of 1,000 candidates the fitted width
+    averaged 0.996 when independent and 0.705 at pairwise correlation 0.5
+    (theory: 1 and 0.707), and the fitted centre tracked the shared shift with
+    correlation 0.999.
+
+    `degree` is the polynomial degree of the density fit. Efron's default of 7
+    needs thousands of candidates: with 200, all-null sets flagged something
+    at `local_fdr` <= 0.2 in 30-35% of sets, against 10-12% at degree 5 and
+    2-5% at degree 3 (0.3-2% with 1,000 candidates), over four seed ranges.
+    Hence degree 3 as the default.
+
+    Below 200 candidates the centre of the histogram is too ragged to fit: at
+    100 with 10 planted signals, 4% of fits failed. Hence
+    `MIN_LOCAL_FDR_CANDIDATES`.
+
+    Raises:
+        ValueError: with fewer than `MIN_LOCAL_FDR_CANDIDATES` usable
+            p-values, or if the centre of the histogram isn't concave (no null
+            to find; not seen at 200 or more candidates in 1,200 sets each).
+    """
+    z = _z_scores(pvalues.dropna()).to_numpy(dtype=float)
+    if len(z) < MIN_LOCAL_FDR_CANDIDATES:
+        raise ValueError(
+            f"need at least {MIN_LOCAL_FDR_CANDIDATES} usable p-values to estimate a null, "
+            f"got {len(z)}"
+        )
+    null, _, _, _ = _central_matching(z, degree, central)
+    return null
+
+
+def _central_matching(z: np.ndarray, degree: int, central: float):
+    mids, log_counts, width = _fit_mixture(z, degree)
+    lo, hi = np.quantile(z, [(1 - central) / 2, (1 + central) / 2])
+    middle = (mids >= lo) & (mids <= hi)
+    c2, c1, c0 = np.polyfit(mids[middle], log_counts[middle], 2)
+    if c2 >= 0:
+        raise ValueError("the centre of the z-score histogram isn't concave; no null to fit")
+    sigma = float(np.sqrt(-1.0 / (2.0 * c2)))
+    delta = float(-c1 / (2.0 * c2))
+    # The fitted parabola is pi0 * n * width * N(delta, sigma^2) on the count scale.
+    peak = c0 - c1**2 / (4.0 * c2)
+    pi0 = float(min(1.0, np.exp(peak) * np.sqrt(2.0 * np.pi) * sigma / (len(z) * width)))
+    return EmpiricalNull(delta, sigma, pi0), mids, log_counts, width
+
+
+def local_fdr(
+    pvalues: pd.Series,
+    *,
+    degree: int = 3,
+    central: float = 0.5,
+) -> pd.Series:
+    """Probability that each candidate is null, given where it sits among the rest.
+
+    lfdr(z) = pi0 f0(z) / f(z) (Efron 2007): the null density over the density
+    of all candidates at that candidate's z-score, capped at 1, with f0 and pi0
+    from `empirical_null`. Unlike a p-value it is a statement about this
+    candidate, not a tail area; 0.2 is the conventional threshold.
+
+    What it is for: correlated candidates. A shared factor shifts and rescales
+    every z-score together, and the estimated null moves with it, so all-null
+    sets flagged something as often at pairwise correlation 0.5 as at 0
+    (2-5% of sets at 200 candidates). With planted signals at correlation 0.5
+    it kept the false-discovery proportion at 0.4-6.8% while finding more of
+    them than BH at 10%: 0.96 against 0.62-0.76 of strong signals, 0.54
+    against 0.40-0.50 when 10% were real at shift 2.5.
+
+    What it changes about the question: against an empirical null a candidate
+    is real if it **stands out from the other candidates**, not if its Sharpe
+    ratio is above zero. An edge every candidate shares becomes part of the
+    null. For "is the Sharpe above zero at all", use `bh_adjusted` or
+    `by_adjusted`.
+
+    What it costs: on independent candidates it is more conservative than BH
+    at 10%, finding 0.60 against 0.72 of strong signals and 0.19 against 0.49
+    when 10% were real at shift 2.5, because it estimates the null instead of
+    knowing it.
+
+    Only candidates above the null's centre can be called real: below it,
+    lfdr is 1. Low z-scores are the wrong direction for one-sided p-values.
+
+    Pass one-sided p-values (`sharpe_test(...).pvalue_greater`). NaN stays NaN.
+    Needs at least `MIN_LOCAL_FDR_CANDIDATES` usable p-values.
+    """
+    usable = pvalues.dropna()
+    if len(usable) < MIN_LOCAL_FDR_CANDIDATES:
+        raise ValueError(
+            f"need at least {MIN_LOCAL_FDR_CANDIDATES} usable p-values, got {len(usable)}"
+        )
+    z = _z_scores(usable).to_numpy(dtype=float)
+    fitted, mids, log_counts, width = _central_matching(z, degree, central)
+    density = np.interp(z, mids, np.exp(log_counts)) / (len(z) * width)
+    null_density = fitted.pi0 * stats.norm.pdf(z, fitted.delta, fitted.sigma)
+    values = np.minimum(1.0, null_density / density)
+    values[z <= fitted.delta] = 1.0
+    out = pd.Series(np.nan, index=pvalues.index)
+    out.loc[usable.index] = values
+    return out
