@@ -104,7 +104,8 @@ def log_run(
     return entry
 
 
-def _read_entries() -> list[dict]:
+def read_entries() -> list[dict]:
+    """Every ledger entry, oldest first; an empty list when nothing is logged yet."""
     path = _ledger_dir() / LEDGER_FILENAME
     if not path.exists():
         return []
@@ -117,9 +118,32 @@ def _read_entries() -> list[dict]:
     return entries
 
 
+def trial_count(name: str | None = None) -> int:
+    """The trial count a multiple-testing correction should use.
+
+    Counts ledger entries, optionally only those logged under one experiment
+    `name` (a sweep reuses one name). Corrections call this instead of taking a
+    number typed into the call.
+
+    Raises:
+        LookupError: if no matching trial is logged. A correction run against
+            zero trials applies no correction at all, and the usual cause is a
+            wrong `CAPSTONE_LEDGER_DIR` or a misspelled name, so it fails
+            loudly instead of returning 0.
+    """
+    entries = read_entries()
+    if name is not None:
+        entries = [entry for entry in entries if entry.get("name") == name]
+    if not entries:
+        where = _ledger_dir() / LEDGER_FILENAME
+        scope = f"named {name!r} " if name is not None else ""
+        raise LookupError(f"no trials {scope}in the ledger at {where}")
+    return len(entries)
+
+
 def _cmd_stats() -> None:
     """Print the numbers a correction needs: how many trials, by whom, of what."""
-    entries = _read_entries()
+    entries = read_entries()
     names = Counter(entry.get("name", "?") for entry in entries)
     users = {entry.get("user", "unknown") for entry in entries}
     print(f"total runs: {len(entries)}")
@@ -131,7 +155,7 @@ def _cmd_stats() -> None:
 
 def _cmd_list(last: int) -> None:
     """Print the most recent entries, one compact line each."""
-    for entry in _read_entries()[-last:]:
+    for entry in read_entries()[-last:]:
         metrics = json.dumps(entry.get("metrics") or {}, separators=(",", ":"))
         ts = entry.get("ts_utc", "?")
         user = entry.get("user", "?")
