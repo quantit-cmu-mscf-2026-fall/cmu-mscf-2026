@@ -48,8 +48,10 @@ Stooq, and most aggregators) are freely *accessible* but do not grant us the
 right to republish a prepared dataset — the underlying exchange data is
 separately licensed regardless of what the aggregator's own terms say. So:
 
-**Preferred: CRSP via WRDS.** CMU subscribes; you register with your CMU email
-and connect through full VPN off campus. CRSP is the academic standard for US
+**Preferred: CRSP via WRDS.** CMU subscribes; you register with your CMU email.
+No VPN is needed — a connection from a residential ISP with no CMU VPN active
+succeeded on 2026-09-21, because WRDS authenticates by credentials rather than
+by network path. CRSP is the academic standard for US
 equity prices — properly adjusted, delisting returns included, and PERMNO
 identifiers that survive ticker changes. It is better than anything free, it is
 already yours, and it is explicitly allowed by the agreement. We supply loader
@@ -107,8 +109,9 @@ instrument.
 ## Summary
 
 - Fundamentals: **SEC EDGAR**, prepared by us, point-in-time, redistributable.
-- Prices: **CRSP via WRDS** with your own credentials (preferred), or any public
-  API you pull yourself.
+- Prices: **CRSP via WRDS**, preferably the team's shared pull
+  (`capstone.shared_data`, `docs/shared_data.md`), or your own credentials, or
+  any public API you pull yourself.
 - Factors/industries: **Ken French**, already in the kit.
 - Ground truth: **synthetic**, already in the kit.
 - Never: vendor-licensed data. We will not provide it and you do not need it.
