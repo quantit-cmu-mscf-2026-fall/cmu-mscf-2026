@@ -62,6 +62,14 @@ Every correction depends on how many candidates were tried. That number comes
 from the run ledger (`capstone.runlog`), not from an argument someone typed:
 log every trial before looking at its result.
 
+**What counts as a trial:** every candidate whose performance anyone, or any
+agent, has seen. That includes parameter variants, candidates that were
+discarded, and every iteration inside an agent's search. An idea that never
+produced a performance number is not a trial. Counts accumulate across rounds
+of a search, because each round is chosen knowing the earlier results. The
+deflated Sharpe ratio needs this full count and the spread of Sharpe ratios
+across all of it (Bailey & López de Prado 2014).
+
 ## Graded evidence, not one yes/no
 
 A candidate is not "real" because one procedure said so. Every correction here
@@ -101,6 +109,51 @@ Choosing the procedure or threshold after seeing results is multiple testing
 of its own. Thresholds are tuned on simulated candidate sets to a chosen ratio
 of missed discoveries to false ones (Harvey & Liu 2020), not left at textbook
 defaults.
+
+## Decisions the stages depend on
+
+Proposed 2026-09-29. These are fixed before any agent generates candidates;
+changing one later means re-running every candidate scored under the old one.
+
+**Holdout period.** Language models can reproduce market history from before
+their training cutoff, even when told not to (Glasserman & Lin 2023; Sarkar &
+Vafa 2024). A holdout before the cutoff guards against search overfitting but
+not against the model's memory, so there are two:
+
+- *Pre-cutoff holdout:* the last 3 to 5 years before the agents' model cutoff,
+  kept out of every agent run and every stage before the final one.
+- *Post-cutoff holdout:* all data after the cutoff, which grows with each new
+  month. This is the final test.
+
+The exact dates depend on which model and version the agents run on; record
+them here once that is fixed.
+
+**Trading costs.** Candidates are scored net of costs from stage 1, with gross
+returns reported alongside. Most published anomalies earn close to nothing
+after bid-ask costs (Chen & Velikov 2023), so screening gross returns spends
+the later stages on candidates that were never tradable. The cost model is an
+estimated effective spread from CRSP times turnover, fixed before scoring.
+
+**Stage 3 comparison set.**
+
+- *Known factors:* Fama–French five factors plus momentum, from Ken French's
+  library (`load_french`; the momentum file still needs adding).
+- *Known signals:* the Chen & Zimmermann open-source anomaly portfolios (over
+  200 published signals), plus any signal we already hold. An agent that has
+  read the literature tends to rediscover published anomalies, and those earn
+  about half as much after publication (McLean & Pontiff 2016). Adding value
+  beyond this set is the test of novelty.
+
+The anomaly portfolios are monthly, so stage 3 runs on monthly returns.
+
+**Calibration range for the share of real candidates.** Start at 0 to 5% for
+agent-generated candidates. Harvey & Liu (2020) use up to 20% for a curated
+database of strategies already known to have worked, which is not our setting.
+Update the range as planted signals and the ledger's history give base rates.
+
+**Data.** Index membership as of each date, not today's members, and returns
+that include delisting returns (Shumway 1997). Either mistake biases every
+backtest upward, and no method in this document can correct it.
 
 ## What exists
 
