@@ -7,3 +7,14 @@ __pycache__/
 *.egg-info/
 .sessions/
 experiments/runs.jsonl
+# macOS Finder metadata
+.DS_Store
+
+# Session scaffolding — not a deliverable
+SESSION_HANDOFF.md
+
+# Paper-validation outputs: regenerable from the seed, and CLAUDE.md keeps
+# result binaries out of the public repo. Results go in the PR description.
+paper_validation/**/results.json
+paper_validation/**/*.png
+paper_validation/**/fig*_data.csv
