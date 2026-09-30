@@ -68,7 +68,7 @@ log every trial before looking at its result.
 |---|---|---|
 | `synth`, `backtest` | `make_return_matrix`, `candidate_returns` | done |
 | `evaluate` | `sharpe_variance` / `sharpe_test` (normal, non-normal, autocorrelation-robust), PSR, MinTRL, implied independent trials | done |
-| `evaluate` | Holm, Benjamini–Yekutieli, Storey q-values | planned |
+| `evaluate` | `holm`, `benjamini_yekutieli`, `estimate_pi0`, `storey_qvalues`; one-sided `pvalue_greater` for screening | done |
 | `bootstrap` | stationary bootstrap, block-length selection | planned |
 | `snooping` | White's Reality Check, Romano–Wolf step-down | planned |
 | `cv` | purged k-fold with embargo (from the Alpha-GPT work), walk-forward | planned |
