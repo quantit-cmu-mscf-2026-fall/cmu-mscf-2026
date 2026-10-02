@@ -1,0 +1,30 @@
+# Parameters for the paper -> hypothesis -> factor pipeline (capstone.factors).
+# Changing a value changes what gets stored, so bump prompt_version with any
+# prompt or threshold change; every stored row records the version it used.
+
+model = "claude-opus-5"
+max_tokens = 16000  # Opus 5 thinks by default; thinking counts against this
+prompt_version = "v4"  # v4: windows up to 1260; v3: returns, shares, cap; v2: kinds, node limit
+
+# How much to ask for per call.
+hypotheses_per_paper = 3
+factors_per_hypothesis = 4
+
+# Rounds of "this did not parse, here is the error, fix it" per call.
+max_repairs = 2
+
+# Originality, as the share of a candidate's nodes inside its largest
+# subtree shared with the reference (AlphaAgent Eq. 6). Rejected at or above:
+#   max_zoo_share: against Alpha101. 0.75 leaves room for a published
+#     building block inside a new idea, not a published alpha retuned.
+#   max_store_share: against factors already stored. 1.0 rejects only a
+#     candidate whose whole shape is already stored, i.e. a window or
+#     constant variant of an existing factor.
+max_zoo_share = 0.75
+max_store_share = 1.0
+
+# Complexity (AlphaAgent's third mechanism): a formula with more tree nodes
+# than this is rejected as over-engineered. Every Alpha101 member in the zoo
+# has at most 26 nodes; the first real run's rejected-in-hindsight formulas
+# had 31-45.
+max_nodes = 30
