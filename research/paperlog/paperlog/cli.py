@@ -37,40 +37,63 @@ def anchors_for_run(con, cfg, log=print):
     """Config anchors plus every adopted paper: the search grows toward whatever
     is actually producing hypotheses."""
     out, needs_refs = [], []
-    wanted = [(t, "config") for t in cfg["semantic_scholar"].get("anchors", [])]
+    wanted = [(t, "config", None) for t in cfg["semantic_scholar"].get("anchors", [])]
     if cfg["semantic_scholar"].get("adopted_as_anchors", True):
         cap = cfg["semantic_scholar"].get("max_adopted_anchors", 25)
         for r in con.execute(
-            "SELECT title, s2_id FROM papers WHERE status='adopted' "
+            "SELECT title, s2_id, doi FROM papers WHERE status='adopted' "
             "ORDER BY reviewed_at DESC LIMIT ?",
             (cap,),
         ):
-            wanted.append((r["title"], "adopted"))
+            wanted.append((r["title"], "adopted", r["doi"]))
 
-    for title, source in wanted:
+    for title, source, doi in wanted:
         row = con.execute("SELECT * FROM anchors WHERE title=?", (title,)).fetchone()
         pid = row["s2_id"] if row else None
+        refs_wanted = source == "adopted" and not (row and row["refs_done"])
         if not pid:
             try:
                 pid = s2.resolve(title)
+                if not pid:
+                    log(f"  s2: no match for anchor '{title[:50]}'")
             except Exception as e:
                 log(f"  s2: could not resolve anchor '{title[:50]}': {e}")
-                continue
             if not pid:
-                log(f"  s2: no match for anchor '{title[:50]}'")
+                if refs_wanted:  # its references can still come from OpenAlex
+                    needs_refs.append((title, None, doi))
                 continue
             con.execute(
                 "INSERT OR REPLACE INTO anchors (title, s2_id, source) VALUES (?,?,?)",
                 (title, pid, source),
             )
         out.append((title, pid))
-        if source == "adopted" and not (row and row["refs_done"]):
-            needs_refs.append((title, pid))
+        if refs_wanted:
+            needs_refs.append((title, pid, doi))
     con.commit()
     return out, needs_refs
 
 
-def collect_papers(cfg, plan, anchors, ref_anchors, log=print):
+def backfill_references(ref_anchors, cfg, log=print):
+    """What newly adopted papers cite: foundational work keyword search never finds.
+
+    Semantic Scholar first, OpenAlex when it has nothing, which happens when the
+    publisher elides the reference list. Returns (papers, labels done); a paper
+    counts as done only if references came back, so an empty answer is retried
+    on the next run instead of being marked done.
+    """
+    cap = cfg["semantic_scholar"].get("max_references", 200)
+    out, done = [], []
+    for label, pid, doi in ref_anchors:
+        refs = s2.fetch_references([(label, pid)], cap, log) if pid else []
+        if not refs and cfg["openalex"].get("enabled", True):
+            refs = openalex.references_of(label, doi, cap, log)
+        if refs:
+            done.append(label)
+        out += refs
+    return out, done
+
+
+def collect_papers(cfg, plan, anchors, log=print):
     raw = []
     expl = plan.exploration
     if cfg["arxiv"].get("enabled", True):
@@ -86,10 +109,6 @@ def collect_papers(cfg, plan, anchors, ref_anchors, log=print):
     if cfg["semantic_scholar"].get("enabled", True) and anchors:
         cap = cfg["semantic_scholar"].get("max_citations_per_anchor", 2000) * plan.depth
         raw += s2.fetch_citations(anchors, plan.since, cap, log)
-        if ref_anchors:
-            raw += s2.fetch_references(
-                ref_anchors, cfg["semantic_scholar"].get("max_references", 200), log
-            )
     return raw
 
 
@@ -257,12 +276,16 @@ def cmd_run(args, cfg):
     fresh, fetched, level, loosen = [], 0, 0, False
     for plan in plans:
         print(f"Level {plan.level}: {plan.describe()} (target {target}, have {len(fresh)})")
-        raw = collect_papers(cfg, plan, anchors, ref_anchors if plan.level == 0 else [], print)
+        raw = collect_papers(cfg, plan, anchors, print)
+        refs_done = []
+        if plan.level == 0 and ref_anchors:
+            refs, refs_done = backfill_references(ref_anchors, cfg, print)
+            raw += refs
         fetched += len(raw)
         keys, _ = store_batch(con, raw, run_id)
         fresh += keys
         level, loosen = plan.level, plan.loosen_prefilter
-        for label, _pid in ref_anchors:
+        for label in refs_done:
             con.execute("UPDATE anchors SET refs_done=? WHERE title=?", (dbm.now(), label))
         con.commit()
         if len(fresh) >= target:
@@ -623,7 +646,16 @@ def cmd_export(args, cfg):
 
 
 # ---------------------------------------------------------------- entry point
+def utf8_console():
+    """Print UTF-8 whatever the console's default: on Windows (cp1252) the Chinese
+    queries and titles this tool logs would otherwise crash it mid-run."""
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+
 def main(argv=None):
+    utf8_console()
     ap = argparse.ArgumentParser(prog="paperlog")
     ap.add_argument(
         "--config", default=None, help="default: $PAPERLOG_CONFIG or the bundled config.yaml"

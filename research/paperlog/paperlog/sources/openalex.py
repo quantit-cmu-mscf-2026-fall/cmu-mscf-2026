@@ -8,7 +8,7 @@ Paginates with a cursor so a query is never truncated by relevance ranking.
 import os
 
 from ..http import get
-from ..models import Paper
+from ..models import Paper, normalize_title
 
 API = "https://api.openalex.org"
 SELECT = (
@@ -131,6 +131,48 @@ def search_one(title: str) -> Paper | None:
         .get("results", [])
     )
     return to_paper(res[0], "manual") if res else None
+
+
+def _with_references(**params) -> list[dict]:
+    params = {"select": "id,display_name,referenced_works", "per_page": 10, **params}
+    return get(f"{API}/works", params=_params(params)).json().get("results", [])
+
+
+def references_of(title: str, doi: str | None, cap: int, log=print) -> list[Paper]:
+    """What a paper cites, according to OpenAlex.
+
+    The fallback for when Semantic Scholar has no reference list, which happens
+    when the publisher elides it. One paper can have several OpenAlex records (the
+    journal version, a working paper, an editorial duplicate that shares the DOI),
+    so every record with this DOI or exactly this title is a candidate, and the one
+    citing the most works is used.
+    """
+    try:
+        candidates = []
+        if doi:
+            candidates += _with_references(filter=f"doi:{doi.split('doi.org/')[-1]}")
+        want = normalize_title(title)
+        candidates += [
+            w
+            for w in _with_references(search=title)
+            if normalize_title(w.get("display_name") or "") == want
+        ]
+    except Exception as e:
+        log(f"  openalex: could not look up references of '{title[:55]}': {e}")
+        return []
+    best = max(candidates, key=lambda w: len(w.get("referenced_works") or []), default={})
+    ids = [u.rsplit("/", 1)[-1] for u in best.get("referenced_works") or []][:cap]
+    out = []
+    for chunk in _chunks(ids, 50):
+        params = {"filter": "openalex_id:" + "|".join(chunk), "per_page": 50, "select": SELECT}
+        try:
+            works = get(f"{API}/works", params=_params(params)).json().get("results", [])
+        except Exception as e:
+            log(f"  openalex: reference page failed: {e}")
+            break
+        out += [to_paper(w, f"cited-by:{title[:60]}") for w in works if w.get("display_name")]
+    log(f"  openalex: {len(out):>4} references of '{title[:55]}'")
+    return out
 
 
 def fetch(

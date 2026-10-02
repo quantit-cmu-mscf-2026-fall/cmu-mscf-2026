@@ -535,6 +535,122 @@ def test_arxiv_id_falls_back_to_arxiv_when_semantic_scholar_fails(monkeypatch):
     assert paper.key == "arxiv:2308.00016"
 
 
+# ---------------------------------------------------------------- reference backfill
+
+
+def _fake_openalex(monkeypatch, by_filter):
+    """openalex.get answering from a dict: filter/search string -> list of works."""
+
+    def fake_get(url, params=None, **_):
+        key = params.get("filter") or f"search:{params.get('search')}"
+        if key.startswith("openalex_id:"):
+            ids = key.split(":", 1)[1].split("|")
+            results = [w for w in by_filter.get("works", []) if w["id"].rsplit("/", 1)[-1] in ids]
+        else:
+            results = by_filter.get(key, [])
+        return types.SimpleNamespace(json=lambda: {"results": results})
+
+    monkeypatch.setattr(openalex, "get", fake_get)
+
+
+def test_openalex_references_use_the_record_that_cites_the_most(monkeypatch):
+    work = lambda i: {"id": f"https://openalex.org/W{i}", "display_name": f"Paper {i}"}  # noqa: E731
+    _fake_openalex(
+        monkeypatch,
+        {
+            # an editorial duplicate shares the DOI but lists no references
+            "doi:10.1093/rfs/hhv059": [
+                {
+                    "id": "W1",
+                    "display_name": "Editor's Choice … and the Cross-Section",
+                    "referenced_works": [],
+                },
+                {
+                    "id": "W2",
+                    "display_name": "… and the Cross-Section",
+                    "referenced_works": ["https://openalex.org/W10", "https://openalex.org/W11"],
+                },
+            ],
+            "search:… and the Cross-Section": [],
+            "works": [work(10), work(11)],
+        },
+    )
+    refs = openalex.references_of(
+        "… and the Cross-Section", "https://doi.org/10.1093/rfs/hhv059", 200
+    )
+    assert [p.title for p in refs] == ["Paper 10", "Paper 11"]
+    assert refs[0].found_via == ["cited-by:… and the Cross-Section"]
+
+
+def test_openalex_references_find_a_working_paper_version_by_exact_title(monkeypatch):
+    _fake_openalex(
+        monkeypatch,
+        {
+            "doi:10.1561/104.00000112": [
+                {"id": "W1", "display_name": "Open Source", "referenced_works": []}
+            ],
+            "search:Open Source": [
+                {
+                    "id": "W3",
+                    "display_name": "Open Source",
+                    "referenced_works": ["https://openalex.org/W20"],
+                },
+                {
+                    "id": "W4",
+                    "display_name": "Open Source Something Else",
+                    "referenced_works": ["x"] * 9,
+                },
+            ],
+            "works": [{"id": "https://openalex.org/W20", "display_name": "Cited"}],
+        },
+    )
+    assert [
+        p.title for p in openalex.references_of("Open Source", "10.1561/104.00000112", 200)
+    ] == ["Cited"]
+
+
+def test_backfill_falls_back_to_openalex_and_marks_done_only_with_results(monkeypatch):
+    monkeypatch.setattr(cli.s2, "fetch_references", lambda *a, **k: [])
+    found = {"Has refs": [Paper(title="A cited paper")], "Has none": []}
+    monkeypatch.setattr(
+        cli.openalex, "references_of", lambda title, doi, cap, log=print: found[title]
+    )
+
+    refs, done = cli.backfill_references(
+        [("Has refs", "s2id", "10.1/a"), ("Has none", None, None)], CFG, lambda *_: None
+    )
+    assert [p.title for p in refs] == ["A cited paper"]
+    assert done == ["Has refs"]
+
+
+def test_an_adopted_paper_s2_cannot_resolve_still_gets_references(tmp_path, monkeypatch):
+    con = dbm.connect(str(tmp_path / "p.db"))
+    p = Paper(title="Replicating Anomalies", doi="10.1093/rfs/hhy131")
+    dbm.insert(con, p, run_id=None)
+    con.execute("UPDATE papers SET status='adopted' WHERE key=?", (p.key,))
+    con.commit()
+
+    def unresolvable(title):
+        raise RuntimeError("429")
+
+    monkeypatch.setattr(cli.s2, "resolve", unresolvable)
+    cfg = {**CFG, "semantic_scholar": {**CFG["semantic_scholar"], "anchors": []}}
+    anchors, needs_refs = cli.anchors_for_run(con, cfg, log=lambda *_: None)
+    assert anchors == []
+    assert needs_refs == [("Replicating Anomalies", None, "10.1093/rfs/hhy131")]
+
+
+def test_console_output_survives_a_non_utf8_default(monkeypatch):
+    import io
+    import sys
+
+    raw = io.BytesIO()
+    monkeypatch.setattr(sys, "stdout", io.TextIOWrapper(raw, encoding="cp1252"))
+    cli.utf8_console()
+    print("大模型 因子挖掘")
+    sys.stdout.flush()
+    assert "大模型".encode() in raw.getvalue()
+
 
 def test_shipped_prefilter_keeps_classic_finance_papers():
     cfg = CFG["prefilter"]
