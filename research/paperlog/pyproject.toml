@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "paperlog"
+version = "0.2.0"
+description = "Automated academic paper log for agentic alpha discovery and its validation"
+requires-python = ">=3.10"
+dependencies = [
+  "requests>=2.31",
+  "feedparser>=6.0",
+  "pyyaml>=6.0",
+  "rapidfuzz>=3.0",
+  "anthropic>=1.0",  # 1.x is built on httpx2; tests construct its errors with it
+]
+
+[project.optional-dependencies]
+embeddings = ["sentence-transformers>=3.0", "numpy>=1.24"]
+dataframe = ["pandas>=2.0"]
+dev = ["pytest>=7"]
+
+[project.scripts]
+paperlog = "paperlog.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["paperlog*"]
+
+# Own pytest config, so running pytest here doesn't pick up the repo root's testpaths.
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,49 @@
+# Copy to <your-repo>/.github/workflows/paperlog.yml
+# Assumes paperlog lives at research/paperlog; change PAPERLOG_DIR if not.
+# The log is stored on a separate `paperlog-data` branch so weekly database
+# commits never touch your main branch history. Create that branch once first
+# (see README "Using inside a larger project").
+name: paperlog
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"   # Mondays 06:00 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+env:
+  PAPERLOG_DIR: research/paperlog
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          ref: paperlog-data
+          path: .paperlog-data
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install "./${{ env.PAPERLOG_DIR }}"
+      - name: Update paper log
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENALEX_API_KEY: ${{ secrets.OPENALEX_API_KEY }}
+          S2_API_KEY: ${{ secrets.S2_API_KEY }}
+          PAPERLOG_CONFIG: ${{ env.PAPERLOG_DIR }}/config.yaml
+          PAPERLOG_DB: .paperlog-data/papers.db
+        run: paperlog run --digest-dir .paperlog-data/digests --csv .paperlog-data/papers.csv
+      - name: Commit to data branch
+        working-directory: .paperlog-data
+        run: |
+          git config user.name "paperlog-bot"
+          git config user.email "paperlog-bot@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet || git commit -m "paper log: $(date -u +%F)"
+          git push origin HEAD:paperlog-data
