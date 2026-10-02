@@ -478,7 +478,8 @@ def test_filtered_papers_revisited_when_prefilter_loosens(tmp_path):
     dbp = str(tmp_path / "k.db")
     con = dbm.connect(dbp)
     k = dbm.insert(con, Paper(title="Multi-agent planning with memory", abstract="agents only"), 1)
-    cfg = yaml.safe_load(CONFIG.read_text(encoding="utf-8"))["prefilter"]
+    # The strict rule (a method term AND a finance term), whatever the shipped config uses.
+    cfg = {**yaml.safe_load(CONFIG.read_text(encoding="utf-8"))["prefilter"], "mode": "both"}
     assert cli.classify(con, [k], cfg, loosen=False) == []  # no finance term -> filtered
     assert con.execute("SELECT status FROM papers WHERE key=?", (k,)).fetchone()[0] == "filtered"
     revived = cli.revisit_filtered(con, cfg, loosen=True)  # exploration level
@@ -532,3 +533,19 @@ def test_arxiv_id_falls_back_to_arxiv_when_semantic_scholar_fails(monkeypatch):
     assert how == "arxiv id (via arXiv)"
     assert paper.title.startswith("Alpha-GPT") and paper.published == "2023-07-31"
     assert paper.key == "arxiv:2308.00016"
+
+
+
+def test_shipped_prefilter_keeps_classic_finance_papers():
+    cfg = CFG["prefilter"]
+    assert prefilter.passes(
+        "Returns to Buying Winners and Selling Losers",
+        "Strategies which buy past winners and sell past losers earn positive returns.",
+        cfg,
+    )
+    assert prefilter.passes(
+        "Common risk factors in the returns on stocks and bonds",
+        "Three stock-market factors: market, size and book-to-market equity.",
+        cfg,
+    )
+    assert not prefilter.passes("Protein folding with diffusion", "biology", cfg)
