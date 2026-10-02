@@ -146,20 +146,25 @@ def references_of(title: str, doi: str | None, cap: int, log=print) -> list[Pape
     journal version, a working paper, an editorial duplicate that shares the DOI),
     so every record with this DOI or exactly this title is a candidate, and the one
     citing the most works is used.
+
+    Returns [] unless the whole list arrived: a partial list would be marked done
+    and its missing references never retried.
     """
-    try:
-        candidates = []
-        if doi:
+    candidates = []
+    if doi:  # each lookup on its own, so a failed DOI lookup still leaves the title search
+        try:
             candidates += _with_references(filter=f"doi:{doi.split('doi.org/')[-1]}")
-        want = normalize_title(title)
+        except Exception as e:
+            log(f"  openalex: DOI lookup failed for '{title[:55]}': {e}")
+    want = normalize_title(title)
+    try:
         candidates += [
             w
             for w in _with_references(search=title)
             if normalize_title(w.get("display_name") or "") == want
         ]
     except Exception as e:
-        log(f"  openalex: could not look up references of '{title[:55]}': {e}")
-        return []
+        log(f"  openalex: title search failed for '{title[:55]}': {e}")
     best = max(candidates, key=lambda w: len(w.get("referenced_works") or []), default={})
     ids = [u.rsplit("/", 1)[-1] for u in best.get("referenced_works") or []][:cap]
     out = []
@@ -168,8 +173,8 @@ def references_of(title: str, doi: str | None, cap: int, log=print) -> list[Pape
         try:
             works = get(f"{API}/works", params=_params(params)).json().get("results", [])
         except Exception as e:
-            log(f"  openalex: reference page failed: {e}")
-            break
+            log(f"  openalex: reference page failed for '{title[:55]}', will retry next run: {e}")
+            return []
         out += [to_paper(w, f"cited-by:{title[:60]}") for w in works if w.get("display_name")]
     log(f"  openalex: {len(out):>4} references of '{title[:55]}'")
     return out

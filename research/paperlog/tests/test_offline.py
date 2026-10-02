@@ -665,3 +665,62 @@ def test_shipped_prefilter_keeps_classic_finance_papers():
         cfg,
     )
     assert not prefilter.passes("Protein folding with diffusion", "biology", cfg)
+
+
+def test_an_unresolved_adopted_paper_is_not_backfilled_twice(tmp_path, monkeypatch):
+    con = dbm.connect(str(tmp_path / "p.db"))
+    p = Paper(title="Replicating Anomalies", doi="10.1093/rfs/hhy131")
+    dbm.insert(con, p, run_id=None)
+    con.execute("UPDATE papers SET status='adopted' WHERE key=?", (p.key,))
+    con.commit()
+    monkeypatch.setattr(cli.s2, "resolve", lambda title: None)
+    cfg = {**CFG, "semantic_scholar": {**CFG["semantic_scholar"], "anchors": []}}
+
+    _, first = cli.anchors_for_run(con, cfg, log=lambda *_: None)
+    assert [t for t, _, _ in first] == ["Replicating Anomalies"]
+    updated = con.execute(
+        "UPDATE anchors SET refs_done=? WHERE title=?", (dbm.now(), "Replicating Anomalies")
+    ).rowcount
+    assert updated == 1  # cmd_run's mark-done finds the row
+    _, second = cli.anchors_for_run(con, cfg, log=lambda *_: None)
+    assert second == []
+
+
+def test_a_failed_doi_lookup_still_tries_the_title(monkeypatch):
+    def fake_get(url, params=None, **_):
+        if params.get("filter", "").startswith("doi:"):
+            raise RuntimeError("400 bad DOI")
+        if params.get("filter", "").startswith("openalex_id:"):
+            return types.SimpleNamespace(
+                json=lambda: {"results": [{"id": "W9", "display_name": "Cited"}]}
+            )
+        results = [
+            {"id": "W1", "display_name": "Paper", "referenced_works": ["https://openalex.org/W9"]}
+        ]
+        return types.SimpleNamespace(json=lambda: {"results": results})
+
+    monkeypatch.setattr(openalex, "get", fake_get)
+    assert [
+        p.title for p in openalex.references_of("Paper", "doi:weird", 200, lambda *_: None)
+    ] == ["Cited"]
+
+
+def test_a_partial_reference_list_is_not_returned(monkeypatch):
+    calls = {"pages": 0}
+
+    def fake_get(url, params=None, **_):
+        if params.get("filter", "").startswith("openalex_id:"):
+            calls["pages"] += 1
+            if calls["pages"] == 2:
+                raise RuntimeError("429")
+            ids = params["filter"].split(":", 1)[1].split("|")
+            return types.SimpleNamespace(
+                json=lambda: {"results": [{"id": i, "display_name": i} for i in ids]}
+            )
+        refs = [f"https://openalex.org/W{i}" for i in range(120)]
+        return types.SimpleNamespace(
+            json=lambda: {"results": [{"id": "W1", "display_name": "P", "referenced_works": refs}]}
+        )
+
+    monkeypatch.setattr(openalex, "get", fake_get)
+    assert openalex.references_of("P", None, 200, lambda *_: None) == []

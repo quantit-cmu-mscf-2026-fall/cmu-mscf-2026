@@ -60,6 +60,11 @@ def anchors_for_run(con, cfg, log=print):
                 log(f"  s2: could not resolve anchor '{title[:50]}': {e}")
             if not pid:
                 if refs_wanted:  # its references can still come from OpenAlex
+                    # an anchors row, so refs_done can be recorded once they arrive
+                    con.execute(
+                        "INSERT OR IGNORE INTO anchors (title, s2_id, source) VALUES (?, NULL, ?)",
+                        (title, source),
+                    )
                     needs_refs.append((title, None, doi))
                 continue
             con.execute(
