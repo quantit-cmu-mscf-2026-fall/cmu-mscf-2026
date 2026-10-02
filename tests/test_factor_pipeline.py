@@ -258,3 +258,26 @@ def test_methods_prints_method_hypotheses_as_markdown(tmp_path, capsys):
     assert "## Methods Paper (X, 2025)" in out
     assert out.count("- **Claim:**") == 1
     assert cli.main(["--db", db, "methods", "--paper", "arxiv:other"]) == 1
+
+
+def test_a_failed_hand_off_fails_that_paper_and_the_run_goes_on(tmp_path):
+    class LockedLog(ListSource):
+        def done(self, keys):
+            if "arxiv:1" in keys:
+                raise RuntimeError("database is locked")
+            super().done(keys)
+
+    con = store.connect(tmp_path / "factors.db")
+    source = LockedLog([{"key": "arxiv:1", "title": "A"}, {"key": "arxiv:2", "title": "B"}])
+    summary = run(con, source, ScriptedClient(), CONFIG)
+
+    assert "database is locked" in summary.papers_failed["arxiv:1"]
+    assert summary.papers_done == ["arxiv:2"]
+    assert source.marked == ["arxiv:2"]
+
+
+def test_cli_without_paperlog_exits_cleanly(tmp_path, monkeypatch, capsys):
+    monkeypatch.setitem(sys.modules, "paperlog", None)
+    db = str(tmp_path / "factors.db")
+    assert cli.main(["--db", db, "run", "--source", "paperlog"]) == 2
+    assert "file source" in capsys.readouterr().err

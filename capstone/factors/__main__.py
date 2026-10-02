@@ -35,9 +35,9 @@ def _run(args, con) -> int:
             print("--source file needs a path to a papers .toml file", file=sys.stderr)
             return 2
         source = FileSource(args.path, keys=args.key)
-    else:
-        source = PaperlogSource(args.paperlog_db, args.min_relevance, args.limit, keys=args.key)
     try:
+        if args.source == "paperlog":
+            source = PaperlogSource(args.paperlog_db, args.min_relevance, args.limit, keys=args.key)
         client = make_client()
     except (RuntimeError, ImportError) as exc:
         print(exc, file=sys.stderr)

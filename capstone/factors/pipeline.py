@@ -79,12 +79,13 @@ def run(con: sqlite3.Connection, source, client, config: FactorConfig) -> RunSum
                     continue
                 for outcome in propose(con, hid, client, config, zoo=zoo, usage=usage):
                     summary.outcomes[outcome.status] += 1
-        except Exception as exc:  # noqa: BLE001 - one paper's failure must not stop the run
-            summary.papers_failed[key] = f"{type(exc).__name__}: {exc}"
-            continue
-        else:
+            # Inside the try: if the source cannot record the hand-off (paperlog's
+            # database locked, say), this paper is reported as failed and stays
+            # pending, and the rest of the run goes on.
             source.done([key])
             summary.papers_done.append(key)
+        except Exception as exc:  # noqa: BLE001 - one paper's failure must not stop the run
+            summary.papers_failed[key] = f"{type(exc).__name__}: {exc}"
         finally:
             summary.usage.update(usage)
             if usage["calls"]:
