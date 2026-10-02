@@ -180,3 +180,56 @@ def test_nested_shifts_are_the_same_factor_as_one_shift():
     assert factor_id(nested) == factor_id(single)
     assert structural_key(nested) == structural_key(single)
     assert factor_id(single) != factor_id(parse("shift(close, 252) / shift(close, 504)"))
+
+
+# ---------------------------------------------------------------------------
+# Regressions found in review
+
+
+def test_a_constant_that_overflows_is_rejected_not_stored_as_inf():
+    with pytest.raises(ParseError, match="finite"):
+        parse("ts_rank(volume, 20) * 1e999")
+    with pytest.raises(ParseError, match="finite"):
+        parse("signed_power(close, 1e999)")
+
+
+def test_deep_nesting_is_a_parse_error_not_a_crash():
+    with pytest.raises(ParseError):
+        parse("-" * 3000 + "close")
+    with pytest.raises(ParseError):
+        parse("(" * 600 + "close" + ")" * 600)
+
+
+def test_sums_and_products_of_three_terms_are_one_factor_in_any_order():
+    assert factor_id(parse("close + volume + open")) == factor_id(parse("open + volume + close"))
+    assert factor_id(parse("close * (volume * open)")) == factor_id(
+        parse("(open * close) * volume")
+    )
+    assert factor_id(parse("close - volume - open")) != factor_id(parse("open - volume - close"))
+
+
+def test_correlation_and_covariance_are_symmetric():
+    assert factor_id(parse("ts_corr(close, volume, 10)")) == factor_id(
+        parse("ts_corr(volume, close, 10)")
+    )
+    assert factor_id(parse("ts_cov(high, low, 5)")) == factor_id(parse("ts_cov(low, high, 5)"))
+
+
+def test_a_folded_shift_is_entirely_similar_to_its_single_shift():
+    nested, single = parse("shift(shift(close, 1), 1)"), parse("shift(close, 2)")
+    assert subtree_similarity(nested, single) == node_count(nested)
+
+
+def test_every_capstone_subpackage_is_listed_for_installation():
+    import tomllib
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    listed = set(
+        tomllib.loads((root / "pyproject.toml").read_text())["tool"]["setuptools"]["packages"]
+    )
+    found = {
+        ".".join(init.parent.relative_to(root).parts)
+        for init in (root / "capstone").rglob("__init__.py")
+    }
+    assert found <= listed, f"add to [tool.setuptools] packages: {sorted(found - listed)}"

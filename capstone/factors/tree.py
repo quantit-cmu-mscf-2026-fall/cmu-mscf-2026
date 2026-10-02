@@ -19,6 +19,7 @@ Two canonical keys, for two different questions:
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
@@ -178,6 +179,13 @@ def _tokenize(text: str) -> list[tuple[str, str]]:
     return tokens
 
 
+def _finite(text: str) -> float:
+    value = float(text)
+    if not math.isfinite(value):  # 1e999 would be stored as "inf", which does not parse back
+        raise ParseError(f"constant {text!r} is not a finite number")
+    return value
+
+
 class _Parser:
     def __init__(self, tokens: list[tuple[str, str]]):
         self.tokens = tokens
@@ -221,7 +229,7 @@ class _Parser:
     def atom(self) -> Node:
         kind, value = self.take()
         if kind == "num":
-            return Const(float(value))
+            return Const(_finite(value))
         if kind == "op" and value == "(":
             node = self.expr()
             self.expect(")")
@@ -258,7 +266,7 @@ class _Parser:
             kind, value = self.take()
             if kind != "num":
                 raise ParseError(f"{func} exponent must be a numeric literal, got {value!r}")
-            arg2 = Const(float(value))
+            arg2 = Const(_finite(value))
         elif FUNCS[func]:
             self.expect(",")
             window = self.window(func)
@@ -278,7 +286,10 @@ def parse(expression: str) -> Node:
     if not tokens:
         raise ParseError("empty expression")
     parser = _Parser(tokens)
-    node = parser.expr()
+    try:
+        node = parser.expr()
+    except RecursionError:
+        raise ParseError("expression is nested too deeply") from None
     if parser.peek() is not None:
         raise ParseError(f"trailing input from token {parser.peek()[1]!r}")
     if node_count(node) > MAX_EXPRESSION_NODES:
@@ -320,6 +331,13 @@ def _fold_shifts(node: Call) -> Call:
     return node
 
 
+def _chain(node: Node, op: str) -> list[Node]:
+    """The operands of a run of one associative operator, however it is grouped."""
+    if isinstance(node, BinOp) and node.op == op:
+        return _chain(node.left, op) + _chain(node.right, op)
+    return [node]
+
+
 def _key(node: Node, keep_parameters: bool) -> str:
     if isinstance(node, Call) and node.func == "shift":
         node = _fold_shifts(node)
@@ -330,19 +348,26 @@ def _key(node: Node, keep_parameters: bool) -> str:
     if isinstance(node, Unary):
         return f"(neg {_key(node.operand, keep_parameters)})"
     if isinstance(node, BinOp):
+        if node.op in "+*":  # a + b + c in any order and grouping is one factor
+            terms = sorted(_key(t, keep_parameters) for t in _chain(node, node.op))
+            return f"({node.op} {' '.join(terms)})"
         left, right = _key(node.left, keep_parameters), _key(node.right, keep_parameters)
-        if node.op in "+*":
-            left, right = sorted((left, right))
         return f"({node.op} {left} {right})"
     if isinstance(node, Call):
         window = f" w={node.window}" if keep_parameters and node.window is not None else ""
-        second = "" if node.arg2 is None else f" {_key(node.arg2, keep_parameters)}"
-        return f"({node.func}{window} {_key(node.arg, keep_parameters)}{second})"
+        args = [_key(node.arg, keep_parameters)]
+        if node.arg2 is not None:
+            args.append(_key(node.arg2, keep_parameters))
+        if node.func in BINARY_WINDOW_FUNCS:  # ts_corr(x, y) is ts_corr(y, x)
+            args.sort()
+        return f"({node.func}{window} {' '.join(args)})"
     raise TypeError(f"not a Node: {node!r}")
 
 
 def identity_key(node: Node) -> str:
-    """Same factor, same key: windows and constants kept, `+`/`*` order ignored."""
+    """Same factor, same key: windows and constants kept; the order and grouping of
+    `+` and `*` operands, the argument order of ts_corr and ts_cov, and nested shifts
+    are ignored."""
     return _key(node, keep_parameters=True)
 
 
@@ -361,7 +386,11 @@ def factor_id(node: Node) -> str:
 
 
 def _subtree_sizes(node: Node) -> dict[str, int]:
-    return {structural_key(sub): node_count(sub) for sub in walk(node)}
+    sizes: dict[str, int] = {}
+    for sub in walk(node):
+        key = structural_key(sub)
+        sizes[key] = max(sizes.get(key, 0), node_count(sub))
+    return sizes
 
 
 def subtree_similarity(a: Node, b: Node) -> int:
