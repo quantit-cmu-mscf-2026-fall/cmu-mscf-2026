@@ -1,0 +1,12 @@
+{
+  "n_families": 1000,
+  "share_real": 0.2,
+  "sharpe_real": 1.0,
+  "n_obs": 2520,
+  "periods_per_year": 252,
+  "alpha": 0.05,
+  "dsr_cutoff": 0.95,
+  "k_grid": [1, 5, 10, 20],
+  "within_rho_grid": [0.0, 0.5],
+  "seeds": [0, 50]
+}
