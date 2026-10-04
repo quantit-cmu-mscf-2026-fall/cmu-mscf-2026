@@ -104,8 +104,12 @@ false-discovery rate **cannot be identified** from reported statistics when
 those statistics are the winners of a search over many specifications. Very
 different mixes of real candidates, effect sizes and search intensity produce
 nearly the same profile of reported significance and imply very different FDRs.
-Under their search-adjusted model, the fitted FDR of published finance factors
-exceeds 80%. (Only the abstract has been read so far; the full text is next.)
+In their illustration (Section 4.4), a world where each report is the best of
+10 variants and 95% of variants are null, and a world with no search and 15%
+nulls, report almost the same upper tail; their FDRs are 0.575 and 0.083.
+Fitting their best-of-K model to 212 published predictors gives an FDR of 0.83
+at the best-fitting K = 5, which the authors stress is conditional on the
+assumed search model, not a measurement of it.
 
 Our position differs from the published literature in one useful way: **we can
 see the whole search.** The ledger records every trial, and the factor store
@@ -118,6 +122,10 @@ see the whole search.** The ledger records every trial, and the factor store
   *replaces* BH across every individual variant; it is not added on top.
 - **The deflated Sharpe's trial count is everything searched**, not only what
   was reported.
+- **Methods that estimate the share of nulls from the candidates' own
+  statistics** (local FDR, empirical Bayes, Storey's π₀) have the same problem
+  if they are fed only winners; the paper's Theorem 1 names them. Feed them
+  every trial, or the family-adjusted p-values.
 - **The search-adjusted FDR estimate is a batch diagnostic.** A high estimate
   for a batch says the generator is searching hard for little, and stage 1
   should be tightened for that generator, not loosened.
