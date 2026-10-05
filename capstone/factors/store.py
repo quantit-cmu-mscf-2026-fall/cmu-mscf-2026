@@ -28,6 +28,11 @@ from capstone.factors.tree import structural_key as _structural_key
 from capstone.factors.tree import unparse as _unparse
 
 DB_FILENAME = "factors.db"
+ALIGNMENT_COLUMNS = (
+    ("alignment", "REAL"),
+    ("alignment_reason", "TEXT"),
+    ("alignment_model", "TEXT"),
+)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS papers (
@@ -75,6 +80,9 @@ CREATE TABLE IF NOT EXISTS proposals (
   rationale TEXT,
   model TEXT,
   prompt_version TEXT,
+  alignment REAL,
+  alignment_reason TEXT,
+  alignment_model TEXT,
   created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS usage (
@@ -122,6 +130,10 @@ def connect(path: str | Path | None = None) -> sqlite3.Connection:
     columns = {row[1] for row in con.execute("PRAGMA table_info(hypotheses)")}
     if "kind" not in columns:  # a store created before hypotheses had a kind
         con.execute("ALTER TABLE hypotheses ADD COLUMN kind TEXT NOT NULL DEFAULT 'market'")
+    columns = {row[1] for row in con.execute("PRAGMA table_info(proposals)")}
+    for name, kind in ALIGNMENT_COLUMNS:  # a store created before the alignment check
+        if name not in columns:
+            con.execute(f"ALTER TABLE proposals ADD COLUMN {name} {kind}")
     return con
 
 
@@ -246,6 +258,9 @@ def add_factor(
     nearest_zoo: str = "",
     store_similarity: float | None = None,
     nearest_factor: str = "",
+    alignment: float | None = None,
+    alignment_reason: str = "",
+    alignment_model: str = "",
 ) -> tuple[str, bool]:
     """Store a factor and the proposal that produced it.
 
@@ -285,6 +300,9 @@ def add_factor(
             rationale=rationale,
             model=model,
             prompt_version=prompt_version,
+            alignment=alignment,
+            alignment_reason=alignment_reason,
+            alignment_model=alignment_model,
         )
     return fid, is_new
 
@@ -305,8 +323,12 @@ def reject(
     nearest_zoo: str = "",
     store_similarity: float | None = None,
     nearest_factor: str = "",
+    alignment: float | None = None,
+    alignment_reason: str = "",
+    alignment_model: str = "",
 ) -> int:
-    """Record a proposal that was not stored: it failed to parse or was not original.
+    """Record a proposal that was not stored: it failed to parse, was not original, or
+    did not implement its hypothesis.
 
     The factor itself is not added to `factors`. Pass `node` when the
     expression parsed, so the proposal's row still names which factor it was.
@@ -328,6 +350,9 @@ def reject(
             rationale=rationale,
             model=model,
             prompt_version=prompt_version,
+            alignment=alignment,
+            alignment_reason=alignment_reason,
+            alignment_model=alignment_model,
         )
 
 

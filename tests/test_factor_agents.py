@@ -266,3 +266,84 @@ def test_grammar_help_explains_the_market_field():
     help_text = grammar_help()
     assert "mkt_return" in help_text and "value-weighted market return" in help_text
     assert "per-stock field" in help_text
+
+
+# ---------------------------------------------------------------------------
+# Hypothesis-formula alignment (QUANTIT-83)
+
+
+def _verdict(variables=True, direction=True, horizon=True, reason="ok"):
+    return {"variables": variables, "direction": direction, "horizon": horizon, "reason": reason}
+
+
+def test_alignment_score_is_the_share_of_checks_passed_and_uses_the_judge_model():
+    from capstone.factors.alignment import judge
+
+    config = FactorConfig(model="proposer-model", alignment_model="judge-model")
+    hypothesis = {**HYPOTHESIS, "id": "h1"}
+    client = FakeClient(_verdict(), _verdict(direction=False, reason="sign flipped"))
+    assert judge(client, config, hypothesis, "-ts_sum(returns, 5)").score == 1.0
+    half = judge(client, config, hypothesis, "ts_sum(returns, 5)")
+    assert half.score == pytest.approx(2 / 3)
+    assert half.reason == "fails direction: sign flipped"
+    assert {call["model"] for call in client.calls} == {"judge-model"}
+    assert "Minus the 5-day return." in client.calls[0]["messages"][0]["content"]
+
+
+def test_a_misaligned_formula_is_rejected_and_its_score_kept(con, hid):
+    strict = FactorConfig(model="m", alignment_model="j", min_alignment=1.0, max_repairs=0)
+    answers = _factors("-ts_sum(returns, 5)", "ts_mean(volume / shares, 21) / log(cap)")
+    client = FakeClient(answers, _verdict(), _verdict(direction=False, reason="sign"))
+    kept, dropped = propose(con, hid, client, strict)
+    assert kept.status == "stored" and dropped.status == "rejected"
+    assert dropped.reason.startswith("misaligned: 0.67 < 1.0; fails direction")
+    rows = con.execute("SELECT status, alignment, alignment_model FROM proposals").fetchall()
+    assert {(r["status"], round(r["alignment"], 2), r["alignment_model"]) for r in rows} == {
+        ("stored", 1.0, "j"),
+        ("rejected", 0.67, "j"),
+    }
+
+
+def test_without_a_judge_model_no_alignment_call_is_made(con, hid):
+    client = FakeClient(_factors("-ts_sum(returns, 5)"))
+    (outcome,) = propose(con, hid, client, CONFIG)
+    assert outcome.status == "stored" and len(client.calls) == 1
+
+
+def test_shipped_config_records_alignment_but_rejects_nothing_until_calibrated():
+    config = load_config()
+    assert config.alignment_model == "claude-haiku-4-5"
+    assert config.min_alignment == 0.0
+
+
+def test_a_store_from_before_alignment_gains_the_columns(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path)
+    lines = store.SCHEMA.splitlines()
+    old.executescript("\n".join(line for line in lines if "alignment" not in line))
+    assert "alignment" not in {row[1] for row in old.execute("PRAGMA table_info(proposals)")}
+    old.commit()
+    old.close()
+    con = store.connect(path)
+    columns = {row[1] for row in con.execute("PRAGMA table_info(proposals)")}
+    assert {"alignment", "alignment_reason", "alignment_model"} <= columns
+
+
+def test_judge_tokens_are_counted_apart_from_the_proposer():
+    from collections import Counter
+
+    from capstone.factors.alignment import judge
+
+    class Metered(FakeClient):
+        def create(self, **kwargs):
+            response = super().create(**kwargs)
+            response.usage = SimpleNamespace(input_tokens=500, output_tokens=40)
+            return response
+
+    usage = Counter()
+    config = FactorConfig(alignment_model="judge-model")
+    judge(Metered(_verdict()), config, {**HYPOTHESIS, "id": "h"}, "-returns", usage=usage)
+    expected = {"alignment_calls": 1, "alignment_input_tokens": 500, "alignment_output_tokens": 40}
+    assert usage == expected
