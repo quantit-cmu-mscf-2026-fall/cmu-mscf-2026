@@ -32,7 +32,19 @@ from dataclasses import dataclass
 # Whatever evaluates factors must split-adjust prices and shares: a ratio of
 # raw closes across a split is not a return.
 OHLCV = ("open", "high", "low", "close", "volume")
-FIELDS = (*OHLCV, "returns", "shares", "cap")
+STOCK_FIELDS = (*OHLCV, "returns", "shares", "cap")
+
+# Market-wide fields: one value per date, the same for every stock.
+#   mkt_return: the value-weighted return of that day's universe, each stock's
+#     `returns` weighted by its previous day's `cap` (the market factor's
+#     building block). Market volatility is ts_std(mkt_return, n); a stock's
+#     market beta is ts_cov(returns, mkt_return, n) / ts_cov(mkt_return,
+#     mkt_return, n), and its residual return follows from that, so neither
+#     needs its own field or operator (Ang et al. 2006 used both).
+# A factor must still read at least one stock field: one built from market
+# fields alone ranks every stock the same on every date.
+MARKET_FIELDS = ("mkt_return",)
+FIELDS = (*STOCK_FIELDS, *MARKET_FIELDS)
 
 # func name -> takes a window argument. Windows must be integer literals.
 FUNCS = {
@@ -279,7 +291,7 @@ def parse(expression: str) -> Node:
 
     Raises `ParseError` for anything outside the grammar: unknown identifiers
     or functions, quotes, attribute access, subscripts, non-literal windows,
-    expressions that reference no market field, or expressions above the node
+    expressions that reference no stock field, or expressions above the node
     cap.
     """
     tokens = _tokenize(expression)
@@ -294,8 +306,8 @@ def parse(expression: str) -> Node:
         raise ParseError(f"trailing input from token {parser.peek()[1]!r}")
     if node_count(node) > MAX_EXPRESSION_NODES:
         raise ParseError(f"expression exceeds {MAX_EXPRESSION_NODES} nodes")
-    if not features_used(node):
-        raise ParseError("expression references no market field")
+    if not features_used(node) & set(STOCK_FIELDS):
+        raise ParseError("expression references no stock field")
     return node
 
 
