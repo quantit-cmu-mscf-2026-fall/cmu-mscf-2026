@@ -105,39 +105,91 @@ def log_run(
 
 
 def read_entries() -> list[dict]:
-    """Every ledger entry, oldest first; an empty list when nothing is logged yet."""
+    """Every ledger entry, oldest first; an empty list when nothing is logged yet.
+
+    Blank lines are skipped. A line that is not valid JSON raises `ValueError`
+    naming the file and line number, rather than being skipped: a skipped entry
+    is a trial that silently vanishes from the count, which under-corrects every
+    downstream test and invents discoveries. Losing the SHA is survivable;
+    losing a trial is not.
+    """
     path = _ledger_dir() / LEDGER_FILENAME
     if not path.exists():
         return []
     entries = []
     with path.open(encoding="utf-8") as fh:
-        for raw in fh:
+        for number, raw in enumerate(fh, start=1):
             line = raw.strip()
-            if line:
+            if not line:
+                continue
+            try:
                 entries.append(json.loads(line))
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"{path}:{number} is not valid JSON ({exc.msg}). The ledger is "
+                    "append-only, so the usual cause is a run interrupted mid-write; "
+                    "fix or delete that one line. It is not skipped, because a "
+                    "dropped entry silently lowers every trial count."
+                ) from exc
     return entries
 
 
-def trial_count(name: str | None = None) -> int:
-    """The trial count a multiple-testing correction should use.
+def trial_count(
+    name: str | None = None,
+    *,
+    include_tags: list[str] | None = None,
+    exclude_tags: list[str] | None = None,
+) -> int:
+    """How many trials the ledger has logged, for a multiple-testing correction.
 
-    Counts ledger entries, optionally only those logged under one experiment
-    `name` (a sweep reuses one name). Corrections call this instead of taking a
-    number typed into the call.
+    **Scope this to the family you are correcting.** Bare `trial_count()` counts
+    every entry in the ledger: every contributor's searches, and the
+    methodology runs -- null calibrations, threshold sweeps, simulation studies
+    -- that are not hypothesis tests on a strategy at all. Those belong in the
+    ledger (`CLAUDE.md` requires it) but not in the family size of somebody
+    else's correction, where they only inflate `m` and throw away power. A
+    correction wants the trials that competed for the result being judged, which
+    in practice means one experiment `name`, or a tag filter, or both.
+
+    Args:
+        name: count only entries logged under this experiment name (a sweep
+            reuses one name). None counts every name.
+        include_tags: count only entries carrying at least one of these tags.
+        exclude_tags: drop entries carrying any of these tags. Use it to keep
+            methodology runs out of a strategy's family size; the convention in
+            `scripts/` is to tag those "synthetic".
+
+    Returns:
+        The number of matching entries. Entries written without a `name` are
+        counted by `trial_count()` but match no `name` filter, so the per-name
+        counts need not sum to the total.
 
     Raises:
-        LookupError: if no matching trial is logged. A correction run against
-            zero trials applies no correction at all, and the usual cause is a
-            wrong `CAPSTONE_LEDGER_DIR` or a misspelled name, so it fails
-            loudly instead of returning 0.
+        LookupError: if nothing matches. A correction run against zero trials
+            applies no correction at all, and the usual cause is a wrong
+            `CAPSTONE_LEDGER_DIR`, a misspelled name or a tag filter that
+            excluded everything, so it fails loudly instead of returning 0.
+        ValueError: from `read_entries`, if a ledger line is malformed.
     """
     entries = read_entries()
     if name is not None:
         entries = [entry for entry in entries if entry.get("name") == name]
+    if include_tags is not None:
+        wanted = set(include_tags)
+        entries = [e for e in entries if wanted & set(e.get("tags") or ())]
+    if exclude_tags is not None:
+        unwanted = set(exclude_tags)
+        entries = [e for e in entries if not unwanted & set(e.get("tags") or ())]
     if not entries:
         where = _ledger_dir() / LEDGER_FILENAME
         scope = f"named {name!r} " if name is not None else ""
-        raise LookupError(f"no trials {scope}in the ledger at {where}")
+        filters = []
+        if include_tags is not None:
+            filters.append(f"including tags {sorted(include_tags)}")
+        if exclude_tags is not None:
+            filters.append(f"excluding tags {sorted(exclude_tags)}")
+        suffix = f" ({', '.join(filters)})" if filters else ""
+        raise LookupError(f"no trials {scope}in the ledger at {where}{suffix}")
     return len(entries)
 
 

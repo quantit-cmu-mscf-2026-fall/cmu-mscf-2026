@@ -123,3 +123,63 @@ def test_trial_count_refuses_zero(tmp_path, monkeypatch):
     runlog.log_run("alpha")
     with pytest.raises(LookupError, match="'alhpa'"):
         runlog.trial_count("alhpa")
+
+
+def test_read_entries_names_a_malformed_line_instead_of_skipping_it(tmp_path, monkeypatch):
+    # A run interrupted mid-write leaves a truncated line. Skipping it would
+    # drop a trial from every downstream count, which under-corrects and
+    # invents discoveries, so it has to fail and say which line.
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    runlog.log_run("alpha", seed=0)
+    with (tmp_path / runlog.LEDGER_FILENAME).open("a", encoding="utf-8") as fh:
+        fh.write('{"name": "beta", "seed": 1\n')
+    runlog.log_run("gamma", seed=2)
+
+    with pytest.raises(ValueError, match=r"runs\.jsonl:2 is not valid JSON"):
+        runlog.read_entries()
+    with pytest.raises(ValueError, match=r"runs\.jsonl:2 is not valid JSON"):
+        runlog.trial_count()
+
+
+def test_blank_lines_are_not_trials(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    runlog.log_run("alpha")
+    with (tmp_path / runlog.LEDGER_FILENAME).open("a", encoding="utf-8") as fh:
+        fh.write("\n   \n")
+
+    assert runlog.trial_count() == 1
+
+
+def test_tags_keep_methodology_runs_out_of_a_strategy_family(tmp_path, monkeypatch):
+    # The case this exists for: the ledger holds real strategy trials next to
+    # calibration and simulation runs, which `CLAUDE.md` requires us to log but
+    # which never competed for any strategy's result. Counting them only
+    # inflates m. Without a tag filter there is no way to leave them out.
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    for lookback in (20, 60, 120):
+        runlog.log_run("mom-sweep", params={"lookback": lookback})
+    runlog.log_run("carry-sweep")
+    for seed in range(7):
+        runlog.log_run("pbo-calibration", tags=["synthetic", "calibration"], seed=seed)
+
+    assert runlog.trial_count() == 11  # everything, methodology included
+    assert runlog.trial_count(exclude_tags=["synthetic"]) == 4  # the real trials
+    assert runlog.trial_count(include_tags=["synthetic"]) == 7
+    assert runlog.trial_count("mom-sweep") == 3
+
+    # Name and tag filters compose, and an empty intersection still refuses to
+    # answer 0 rather than letting a correction run against no trials.
+    with pytest.raises(LookupError, match="excluding tags"):
+        runlog.trial_count("pbo-calibration", exclude_tags=["synthetic"])
+
+
+def test_an_entry_without_a_name_is_counted_but_matches_no_name(tmp_path, monkeypatch):
+    # So the per-name counts need not sum to the total. Documented, and pinned
+    # here because a reader will otherwise assume they do.
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    runlog.log_run("alpha")
+    with (tmp_path / runlog.LEDGER_FILENAME).open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"seed": 9, "params": {}}) + "\n")
+
+    assert runlog.trial_count() == 2
+    assert runlog.trial_count("alpha") == 1
