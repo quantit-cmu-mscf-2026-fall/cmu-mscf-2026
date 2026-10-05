@@ -16,7 +16,7 @@ so scores are recorded and nothing is rejected (QUANTIT-83).
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 from capstone.factors.hypotheses import _FIELDS
 from capstone.factors.llm import FactorConfig, call_tool, grammar_help
@@ -55,6 +55,7 @@ class Alignment:
     score: float
     reason: str
     model: str
+    checks: dict[str, bool] = field(default_factory=dict)
 
 
 def judge(
@@ -76,9 +77,9 @@ def judge(
     answer = call_tool(client, judge_config, system=SYSTEM, user=user, tool=TOOL, usage=spent)
     if usage is not None:  # kept apart from the proposer's tokens: another model's price
         usage.update({f"alignment_{name}": count for name, count in spent.items()})
-    yes = sum(bool(answer.get(check)) for check in CHECKS)
-    failed = [check for check in CHECKS if not answer.get(check)]
+    checks = {check: bool(answer.get(check)) for check in CHECKS}
+    failed = [check for check, passed in checks.items() if not passed]
     reason = str(answer.get("reason", ""))
     if failed:
         reason = f"fails {', '.join(failed)}: {reason}"
-    return Alignment(yes / len(CHECKS), reason, config.alignment_model)
+    return Alignment(sum(checks.values()) / len(CHECKS), reason, config.alignment_model, checks)
