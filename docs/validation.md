@@ -115,21 +115,31 @@ Which method is the gate at each stage, and which only inform it:
 
 ## Decisions the stages depend on
 
-Proposed 2026-09-29. These are fixed before any agent generates candidates;
-changing one later means re-running every candidate scored under the old one.
+Proposed 2026-09-29; holdout dates fixed 2026-10-05. These are fixed before any
+agent generates candidates; changing one later means re-running every candidate
+scored under the old one.
 
 **Holdout period.** Language models can reproduce market history from before
 their training cutoff, even when told not to (Glasserman & Lin 2023; Sarkar &
-Vafa 2024). A holdout before the cutoff guards against search overfitting but
-not against the model's memory, so there are two:
+Vafa 2024). A holdout guards against search overfitting but not against the
+model's memory of the period it covers.
 
-- *Pre-cutoff holdout:* the last 3 to 5 years before the agents' model cutoff,
-  kept out of every agent run and every stage before the final one.
-- *Post-cutoff holdout:* all data after the cutoff, which grows with each new
-  month. This is the final test.
+The agents run on Claude Opus 5 (`claude-opus-5`, a pinned snapshot; training
+cutoff May 2026; set in `config/factors.toml`). The data is CRSP from
+1990-01-02 to 2025-12-31, and no new data is coming while this is built, so
+all of it predates the cutoff. The split (decided 2026-10-05):
 
-The exact dates depend on which model and version the agents run on; record
-them here once that is fixed.
+| Period | Dates | Who sees it |
+|---|---|---|
+| Search | 1990-01-02 to 2020-12-31 | Agents and stages 1-3 |
+| Holdout | 2021-01-01 to 2025-12-31 | The final stage only, looked at once |
+
+Five years rather than three because at 95% confidence (normal returns) an
+annual Sharpe of 1.0 needs about 2.7 years to tell from zero, 0.75 about 4.8
+and 0.5 about 11: five years can confirm 0.75 and up, three only about 1 and
+up. Since the holdout predates the cutoff, the model may remember it: a
+candidate that passes is not established against memorisation, and results
+should say so. Changing the agents' model means deciding these dates again.
 
 **Trading costs.** Candidates are scored net of costs from stage 1, with gross
 returns reported alongside. Most published anomalies earn close to nothing
