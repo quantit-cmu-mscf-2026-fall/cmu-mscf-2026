@@ -24,7 +24,14 @@ hypothesis is a count, not a guess, and this module uses it three ways:
 The false discovery throughout is family-level, as in the paper: a reported
 hypothesis is false when *none* of its variants is real (its Eq. 10). That is
 the conservative definition; counting a null winner of a family that also
-holds a real variant as false would only raise the FDR.
+holds a real variant as false would only raise the FDR. One consequence: the
+family-level FDR need not rise with the per-variant threshold alpha, because a
+looser threshold also lets more real families through.
+
+`fdr_by_search_intensity` is a sensitivity table, not a gate. On data with no
+real hypotheses it can still report a low FDR (#51 review: 0.000 to 0.999
+across seeds), because the paper's identification problem doesn't go away by
+assuming a K. Decisions use `search_adjusted_pvalue` and BH.
 
 `tests/test_search_fdr.py` reproduces the paper's printed numbers and checks
 null calibration and power on data with known truth.
@@ -44,31 +51,90 @@ from scipy import optimize, special, stats
 # ---------------------------------------------------------------------------
 
 
-def search_adjusted_pvalue(pvalues: pd.Series, k: int | pd.Series) -> pd.Series:
-    """p-value of the best of `k` independent variants: 1 - (1 - p)^k.
+def _aligned(name: str, value, index: pd.Index) -> pd.Series:
+    """A scalar broadcast to `index`, or a Series that must cover all of it."""
+    if np.isscalar(value):
+        return pd.Series(float(value), index=index)
+    if not isinstance(value, pd.Series):
+        raise TypeError(f"{name} must be a scalar or a pandas Series indexed by hypothesis")
+    missing = index.difference(value.dropna().index)
+    if len(missing):
+        # A missing value would turn the hypothesis's p-value into NaN, which BH
+        # drops from the family: the hypothesis could never be selected, and
+        # the family would shrink, making BH too lenient for the rest.
+        raise ValueError(f"{name} is missing for {len(missing)} hypotheses, e.g. {missing[0]!r}")
+    return value.reindex(index).astype(float)
+
+
+# Grid over the shared factor U ~ N(0, 1) for the equicorrelated adjustment.
+_U = np.linspace(-9.0, 9.0, 3601)
+_U_WEIGHTS = stats.norm.pdf(_U) * (_U[1] - _U[0])
+
+
+def search_adjusted_pvalue(
+    pvalues: pd.Series, k: int | pd.Series, *, rho: float | pd.Series = 0.0
+) -> pd.Series:
+    """p-value of a hypothesis's best variant, adjusted for its `k` variants.
 
     `pvalues` holds, per hypothesis, the smallest one-sided p-value among its
     variants; `k` is how many variants were tried (a scalar, or a Series
-    aligned with `pvalues`). The result is uniform under the null that no
+    covering every hypothesis). The result is uniform under the null that no
     variant is real, so it can go straight into `benjamini_hochberg`,
-    `bh_adjusted` or `evidence_profile` across hypotheses. This is the paper's
-    familywise Type I error, Eq. 17, applied to a p-value (Šidák's correction).
+    `bh_adjusted` or `evidence_profile` across hypotheses.
 
-    Variants of one idea are usually positively correlated, and then this is
-    conservative: K correlated variants search less than K independent ones.
-    The paper's K is an *effective* number of independent trials for that
-    reason (its footnote 7). For a sharper adjustment that keeps the
-    correlation, bootstrap the maximum across the family's return series.
+    `rho` is the correlation between a hypothesis's variants (scalar or
+    Series). At `rho=0`, the default, this is the paper's Eq. 17 applied to a
+    p-value, 1 - (1 - p)^k (Šidák): exact for **independent** variants. An
+    agent's variants of one idea are usually near-copies, and then the
+    independent formula over-corrects badly: at k = 20 and rho = 0.9 a null
+    family's chance of being called real is about 0.011, not 0.05, and power
+    falls with it (#51 review). With `rho` > 0 the adjustment is exact for
+    equicorrelated normal statistics: the chance that the best of `k`
+    variants sharing correlation `rho` reaches this p-value. Estimate `rho`
+    from the family's own return series with `evaluate.average_correlation`.
+    When the correlation is far from even across variants, bootstrap the
+    family's maximum instead.
 
-    NaN stays NaN. Raises on k < 1.
+    Use the **actual** number of variants tried for `k`. Don't pass an
+    "effective" count such as `evaluate.implied_independent_trials`: it is
+    anti-conservative here (a null family's rejection rate is 0.058-0.071 at a
+    nominal 0.05), for the same reason the ledger count must not be shrunk.
+    Allow for correlation through `rho` instead.
+
+    NaN p-values stay NaN. Raises on p outside [0, 1], on a missing,
+    non-finite or < 1 `k`, and on `rho` outside [0, 1].
     """
-    k = pd.Series(k, index=pvalues.index) if np.isscalar(k) else k.reindex(pvalues.index)
-    if (k.dropna() < 1).any():
-        raise ValueError("k must be at least 1")
-    p = pvalues.astype(float).clip(0.0, 1.0)
-    # -expm1(k * log1p(-p)) is 1 - (1 - p)^k without cancellation for small p.
+    if not isinstance(pvalues, pd.Series):
+        raise TypeError("pvalues must be a pandas Series indexed by hypothesis")
+    p = pvalues.astype(float)
+    if ((p < 0) | (p > 1)).any():
+        raise ValueError("p-values must be in [0, 1]")
+    k = _aligned("k", k, p.index)
+    if not np.isfinite(k).all() or (k < 1).any():
+        raise ValueError("k must be finite and at least 1")
+    rho = _aligned("rho", rho, p.index)
+    if ((rho < 0) | (rho > 1)).any():
+        raise ValueError("rho must be in [0, 1]")
+
+    # Independent variants: -expm1(k * log1p(-p)) is 1 - (1 - p)^k without
+    # cancellation for small p.
     with np.errstate(divide="ignore"):
-        adjusted = -np.expm1(k.astype(float) * np.log1p(-p))
+        adjusted = -np.expm1(k * np.log1p(-p))
+
+    # Equicorrelated variants: z_j = sqrt(rho) U + sqrt(1 - rho) e_j. Given U,
+    # the variants are independent, so P(max >= z) = E_U[1 - Phi(a(U))^k] with
+    # a(u) = (z - sqrt(rho) u) / sqrt(1 - rho). Each term is computed as
+    # -expm1(k log Phi(a)), positive and free of cancellation, then averaged
+    # over a fine grid of U.
+    corr = (rho > 0) & (rho < 1) & p.notna()
+    if corr.any():
+        z = stats.norm.isf(p[corr].to_numpy())[:, None]
+        r = rho[corr].to_numpy()[:, None]
+        a = (z - np.sqrt(r) * _U) / np.sqrt(1.0 - r)
+        tail = -np.expm1(k[corr].to_numpy()[:, None] * special.log_ndtr(a))
+        adjusted[corr] = np.clip(tail @ _U_WEIGHTS, p[corr].to_numpy(), 1.0)
+    # Perfectly correlated variants are one variant searched k times.
+    adjusted = adjusted.where(rho < 1, p)
     return adjusted.where(p.notna())
 
 
@@ -210,6 +276,7 @@ class MaxMixtureFit:
     sigma0: float
     sigma1: float
     loglik: float
+    at_bound: bool = False  # an estimate sits on a fitting bound: read with care
 
 
 def _unpack(theta: np.ndarray) -> tuple[float, float, float, float]:
@@ -284,8 +351,20 @@ def fit_max_of_mixture(
         best = res
 
     pi0, delta1, sigma0, sigma1 = _unpack(best.x)
+    # A misspecified K often parks delta1 on its floor; say so rather than
+    # report the floor as an estimate.
+    at_bound = any(
+        np.isclose(t, lo, atol=1e-4) or np.isclose(t, hi, atol=1e-4)
+        for t, (lo, hi) in zip(best.x, bounds, strict=True)
+    )
     return MaxMixtureFit(
-        k=k, pi0=pi0, delta1=delta1, sigma0=sigma0, sigma1=sigma1, loglik=-float(best.fun)
+        k=k,
+        pi0=pi0,
+        delta1=delta1,
+        sigma0=sigma0,
+        sigma1=sigma1,
+        loglik=-float(best.fun),
+        at_bound=bool(at_bound),
     )
 
 
@@ -299,6 +378,10 @@ def fdr_by_search_intensity(
     units of `x`), compute its single-trial errors from the fitted components
     (Eq. 38) and their best-of-K versions (Eq. 39), average across
     observations, and combine them into the FDR (Eq. 40).
+
+    A sensitivity table, not a gate: it can report a low FDR on data with no
+    real hypotheses. `at_bound` marks rows whose fit sits on a bound, usually
+    a sign that the assumed `k` doesn't fit.
 
     The FDR column is conditional on each assumed `k`; it is not an estimate
     of `k`. Read the whole column, not its likelihood-maximising row alone.
@@ -329,6 +412,7 @@ def fdr_by_search_intensity(
                 "beta_k": float(beta_k.mean()),
                 "loglik": f.loglik,
                 "fdr": fdr(float(alpha_k.mean()), float(beta_k.mean()), pi0_k),
+                "at_bound": f.at_bound,
             }
         )
     return pd.DataFrame(rows).set_index("k")

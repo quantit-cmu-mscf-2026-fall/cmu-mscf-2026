@@ -15,7 +15,13 @@ import pandas as pd
 import pytest
 from scipy.stats import norm
 
-from capstone.evaluate import benjamini_hochberg, false_discovery_rate, power, sharpe_test
+from capstone.evaluate import (
+    average_correlation,
+    benjamini_hochberg,
+    false_discovery_rate,
+    power,
+    sharpe_test,
+)
 from capstone.search_fdr import (
     familywise_errors,
     fdr,
@@ -141,8 +147,26 @@ class TestSearchAdjustedPvalue:
 
     def test_nan_stays_nan_and_bad_k_raises(self):
         assert np.isnan(search_adjusted_pvalue(pd.Series([np.nan]), 3).iloc[0])
+        for bad in (0, np.inf):
+            with pytest.raises(ValueError):
+                search_adjusted_pvalue(pd.Series([0.1]), bad)
+
+    def test_missing_k_raises_rather_than_dropping_the_hypothesis(self):
+        # A NaN here would make BH drop "b" from the family: never selectable,
+        # and the family too small.
+        p = pd.Series({"a": 0.01, "b": 0.01})
+        with pytest.raises(ValueError, match="missing"):
+            search_adjusted_pvalue(p, pd.Series({"a": 3}))
+        with pytest.raises(ValueError, match="missing"):
+            search_adjusted_pvalue(p, pd.Series({"a": 3, "b": np.nan}))
+
+    def test_rejects_bad_inputs(self):
         with pytest.raises(ValueError):
-            search_adjusted_pvalue(pd.Series([0.1]), 0)
+            search_adjusted_pvalue(pd.Series([1.2]), 3)
+        with pytest.raises(TypeError):
+            search_adjusted_pvalue([0.1, 0.2], 3)
+        with pytest.raises(ValueError):
+            search_adjusted_pvalue(pd.Series([0.1]), 3, rho=-0.1)
 
     def test_is_uniform_under_the_null(self):
         # The best of 20 null variants: raw p piles up near 0, adjusted p is flat.
@@ -153,7 +177,60 @@ class TestSearchAdjustedPvalue:
             assert (adjusted < level).mean() == pytest.approx(level, abs=0.01)
 
 
-def _hidden_search(k, *, share_real=0.2, within_rho=0.0, seeds=None):
+class TestCorrelatedVariants:
+    """`rho`: the exact adjustment for k equicorrelated variants."""
+
+    def test_endpoints(self):
+        p = pd.Series([0.05, 0.001])
+        pd.testing.assert_series_equal(
+            search_adjusted_pvalue(p, 20, rho=0.0), search_adjusted_pvalue(p, 20)
+        )
+        pd.testing.assert_series_equal(search_adjusted_pvalue(p, 20, rho=1.0), p)
+
+    def test_falls_as_correlation_rises(self):
+        p = pd.Series([0.01])
+        values = [search_adjusted_pvalue(p, 20, rho=r).iloc[0] for r in (0, 0.5, 0.9, 0.99)]
+        assert values == sorted(values, reverse=True)
+        assert values[-1] > 0.01
+
+    def test_matches_monte_carlo(self):
+        # P(best of 20 variants with correlation 0.9 reaches p), simulated.
+        rng = np.random.default_rng(0)
+        k, r, n = 20, 0.9, 200_000
+        z = np.sqrt(r) * rng.standard_normal((n, 1)) + np.sqrt(1 - r) * rng.standard_normal((n, k))
+        best = z.max(axis=1)
+        for p in (0.05, 0.01):
+            simulated = (best >= norm.isf(p)).mean()
+            exact = search_adjusted_pvalue(pd.Series([p]), k, rho=r).iloc[0]
+            assert exact == pytest.approx(simulated, abs=3 * np.sqrt(simulated / n) + 1e-4)
+
+    def test_keeps_small_values_accurate(self):
+        adjusted = search_adjusted_pvalue(pd.Series([1e-12]), 20, rho=0.9).iloc[0]
+        assert 1e-12 <= adjusted < 2e-11
+
+    @pytest.mark.parametrize("r", [0.5, 0.9, 0.99])
+    def test_is_calibrated_where_the_independent_formula_is_not(self, r):
+        # Measured over 50 seeds of 1,000 null families, k = 20: the share
+        # called real at 0.05 is 0.033 / 0.011 / 0.004 with the independent
+        # formula and 0.048-0.049 with rho.
+        d = simulate_family_winners(5_000, 20, 0.0, 1.0, 2520, within_rho=r, seed=1)
+        assert (search_adjusted_pvalue(d["pvalue"], 20, rho=r) < 0.05).mean() == pytest.approx(
+            0.05, abs=0.01
+        )
+        assert (search_adjusted_pvalue(d["pvalue"], 20) < 0.05).mean() < 0.04
+
+    def test_recovers_the_power_the_independent_formula_loses(self):
+        # Near-copies (rho 0.9), k = 20. Measured over 50 seeds: power 0.64
+        # with the independent formula, 0.81 with rho, FDR 0.042.
+        # Over 10 seeds at three ranges: 0.82 vs 0.64-0.66.
+        seeds = range(10)
+        r = _hidden_search(20, within_rho=0.9, rho=0.9, seeds=seeds)
+        independent = _hidden_search(20, within_rho=0.9, seeds=seeds)
+        assert r["adjusted_fdr"] <= 0.05
+        assert r["adjusted_power"] > independent["adjusted_power"] + 0.1
+
+
+def _hidden_search(k, *, share_real=0.2, within_rho=0.0, rho=0.0, seeds=None):
     """Issue #41: report each family's best variant, then run BH with and without
     the search adjustment. Returns mean realised FDR and power of each."""
     rows = []
@@ -162,7 +239,7 @@ def _hidden_search(k, *, share_real=0.2, within_rho=0.0, seeds=None):
             1000, k, share_real, 1.0, 2520, within_rho=within_rho, seed=seed
         )
         naive = benjamini_hochberg(d["pvalue"], 0.05)
-        adjusted = benjamini_hochberg(search_adjusted_pvalue(d["pvalue"], k), 0.05)
+        adjusted = benjamini_hochberg(search_adjusted_pvalue(d["pvalue"], k, rho=rho), 0.05)
         rows.append(
             {
                 "naive_fdr": false_discovery_rate(naive, d["truth"]),
@@ -202,7 +279,7 @@ class TestHiddenSearch:
         # Five variants with correlation 0.5 search less than five independent
         # ones, so 1 - (1 - p)^5 over-corrects: FDR falls further below 0.04
         # (measured 0.033-0.038) and power drops (0.99 -> 0.90). This is the
-        # case for a bootstrap of the family maximum.
+        # case for passing `rho` (TestCorrelatedVariants).
         independent = _hidden_search(5)
         correlated = _hidden_search(5, within_rho=0.5)
         assert correlated["adjusted_fdr"] <= 0.05
@@ -229,14 +306,21 @@ class TestHiddenSearch:
 
 def _family_winners_from_returns(n_families, k, n_real_families, seed, **kwargs):
     """Group a `make_return_matrix` matrix into families of k columns, real
-    columns together, and return each family's best one-sided HAC p-value."""
+    columns together. Returns each family's best one-sided HAC p-value, its
+    truth, and the correlation between its variants estimated from returns."""
     m = make_return_matrix(
         n_candidates=n_families * k, n_real=n_real_families * k, seed=seed, **kwargs
     )
     columns = list(m.truth[m.truth].index) + list(m.truth[~m.truth].index)
     family = pd.Series(np.repeat([f"hyp_{i:03d}" for i in range(n_families)], k), index=columns)
     p = pd.Series({c: sharpe_test(m.returns[c]).pvalue_greater for c in columns})
-    return p.groupby(family).min(), m.truth.reindex(columns).groupby(family).any()
+    rho = pd.Series(
+        {
+            h: max(average_correlation(m.returns[cols.index]), 0.0)
+            for h, cols in family.groupby(family)
+        }
+    )
+    return p.groupby(family).min(), m.truth.reindex(columns).groupby(family).any(), rho
 
 
 class TestOnReturnSeries:
@@ -259,12 +343,18 @@ class TestOnReturnSeries:
         # over 0.05 is the HAC p-value's, not the adjustment's: with fat tails
         # and GARCH, HAC rejects 1.3-1.6x its nominal rate at p < 0.01 per
         # variant, and the best of five lives in that tail.
-        naive, adjusted = [], []
+        # With `rho` estimated from each family's returns, the rate stays in
+        # the same band.
+        naive, adjusted, with_rho = [], [], []
         for seed in range(40):
-            best, _ = _family_winners_from_returns(20, 5, 0, seed, n_obs=1000, **kwargs)
+            best, _, rho = _family_winners_from_returns(20, 5, 0, seed, n_obs=1000, **kwargs)
             naive.append(benjamini_hochberg(best, 0.05).any())
             adjusted.append(benjamini_hochberg(search_adjusted_pvalue(best, 5), 0.05).any())
+            with_rho.append(
+                benjamini_hochberg(search_adjusted_pvalue(best, 5, rho=rho), 0.05).any()
+            )
         assert np.mean(adjusted) <= 0.2
+        assert np.mean(with_rho) <= 0.2
         assert np.mean(adjusted) < np.mean(naive)
 
     def test_power(self):
@@ -272,7 +362,7 @@ class TestOnReturnSeries:
         # mean power 0.93 over 30 seeds, 0.85-1.0 over 10 seeds at four ranges.
         powers = []
         for seed in range(10):
-            best, truth = _family_winners_from_returns(
+            best, truth, _ = _family_winners_from_returns(
                 20, 5, 2, seed, n_obs=2520, rho=0.3, ar1=0.3, sharpe_real=1.5
             )
             rejected = benjamini_hochberg(search_adjusted_pvalue(best, 5), 0.05)
@@ -299,6 +389,16 @@ class TestMaxOfMixtureFit:
         assert 0.03 < table.loc[5, "fdr"] < 0.3
         assert table.loc[1, "fdr"] < 0.01
         assert table.loc[5, "loglik"] > table.loc[1, "loglik"]
+
+    def test_cannot_say_nothing_here_but_flags_it(self):
+        # All-null best-of-5 statistics, fitted at the true K. Over seeds 0-9
+        # the implied FDR ranged 0.20-0.999: seed 9 gives 0.20, which reads as
+        # "mostly real". That is why this is a sensitivity table and not a
+        # gate. Every one of those null fits sat on a bound, and says so.
+        x = np.random.default_rng(9).normal(0, 0.1, (400, 5)).max(axis=1)
+        row = fdr_by_search_intensity(x, 0.25, [5]).loc[5]
+        assert row["fdr"] < 0.5
+        assert row["at_bound"]
 
     def test_rejects_bad_arguments(self):
         with pytest.raises(ValueError):

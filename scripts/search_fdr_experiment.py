@@ -5,7 +5,10 @@ A share of the hypotheses are real. The validator sees one winner per
 hypothesis, and selects with:
 
 - naive BH on the winners' p-values, as if each were a single trial;
-- BH on search-adjusted p-values, 1 - (1 - p)^K (`search_fdr`);
+- BH on search-adjusted p-values, 1 - (1 - p)^K (`search_fdr`), which
+  treats the variants as independent;
+- the same, told the within-family correlation (`rho=`; the simulation's
+  true value, which in practice is estimated from the family's returns);
 - the deflated Sharpe at `dsr_cutoff`, counting trials as reported
   (n_families) and as searched (n_families x K).
 
@@ -72,6 +75,9 @@ def run_cell(p: dict, k: int, within_rho: float, seed: int) -> dict:
         "bh_naive": benjamini_hochberg(d["pvalue"], p["alpha"]),
         "bh_search_adjusted": benjamini_hochberg(
             search_adjusted_pvalue(d["pvalue"], k), p["alpha"]
+        ),
+        "bh_search_adjusted_rho": benjamini_hochberg(
+            search_adjusted_pvalue(d["pvalue"], k, rho=within_rho), p["alpha"]
         ),
         "dsr_reported_trials": dsr_selected(p["n_families"]),
         "dsr_searched_trials": dsr_selected(p["n_families"] * k),

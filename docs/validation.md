@@ -172,7 +172,7 @@ backtest upward, and no method in this document can correct it.
 | `pbo` | CSCV / probability of backtest overfitting | planned |
 | `spanning` | incremental value over known factors and accepted signals | planned |
 | `evaluate` | Harvey–Liu haircut Sharpe | planned |
-| `search_fdr` | search-adjusted p-value for a hypothesis's best of K variants; search-adjusted FDR (López de Prado & Fabozzi 2026); max-of-mixture fit over assumed K | done |
+| `search_fdr` | search-adjusted p-value for a hypothesis's best of K variants, independent or equicorrelated (`rho=`); search-adjusted FDR (López de Prado & Fabozzi 2026); max-of-mixture fit over assumed K, a sensitivity table, not a gate | done |
 | `gate` | staged, pre-registered scorecard; trial count from the ledger; holdout looked at once | planned |
 
 Already in `evaluate`: `benjamini_hochberg`, `bonferroni`,
