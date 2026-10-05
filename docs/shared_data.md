@@ -34,7 +34,9 @@ copy (`data_cache/wrds/`).
 
 That is all. The folder is found automatically on Windows (any drive letter) and
 macOS (`~/Library/CloudStorage/GoogleDrive-*`). If it is somewhere else, set
-`CAPSTONE_DATA_DIR` to its path.
+`CAPSTONE_DATA_DIR` to its path. Set it on Windows too if you have mapped network
+drives: the search checks every drive letter, and a disconnected network drive
+can make that check hang.
 
 ## Using it
 
@@ -97,7 +99,10 @@ cross-sectional fill, so treat pre-2000 cost results with care.
 **Fundamentals: `sd.available_from(fund, trading_days)`.** A quarter may be used
 from the first trading day **after** its report date (`rdq`), since reports
 often land after the close. With no `rdq` (0.5% of quarters feeding the
-universe), use the quarter end + 90 days, later than 99% of actual reports. Link
+universe), use the quarter end + 90 days, later than 99% of actual reports.
+Annual data (`comp_funda`) has no `rdq`: pass `report_col=None`, and every year
+uses the fiscal year end + 90 days (98.7% of S&P 500 members' annual earnings
+announcements are out by then; the median is 33 days). Link
 with `sd.primary_links(link)` and require the date to fall within
 `[linkdt, linkenddt]`. Don't fill missing fundamentals: leave that stock out of
 signals that need them.

@@ -34,7 +34,8 @@ capstone. The humans steer; you build. These rules are not optional.
 ## Data
 
 - Load CRSP/Compustat only through `capstone.shared_data` (`sd.load(...)`), never
-  by reading files or querying WRDS directly. Select the columns you need.
+  by reading files or querying WRDS directly. Select the columns you need. The
+  one exception is the data maintainer refreshing the shared files from WRDS.
 - Pick holdings with `in_universe`; take returns from every row via
   `sd.daily_returns` (never compound `delret` onto `dlyret`), costs via
   `sd.quoted_spread`, fundamentals only from `sd.available_from`. Key on
