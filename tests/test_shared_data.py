@@ -292,6 +292,25 @@ def test_quoted_spread_fills_without_look_ahead():
     assert spread.notna().all()
 
 
+@pytest.mark.parametrize("dtype", ["float64", "boolean"])
+def test_quoted_spread_takes_in_universe_with_gaps(dtype):
+    # load() hands back in_universe as float64 once it has a missing value
+    # (Carl's #26 review); unknown membership counts as out of the universe.
+    day = pd.Timestamp("2020-01-02")
+    frame = pd.DataFrame(
+        {
+            "permno": [1, 2, 3],
+            "date": [day] * 3,
+            "dlybid": [99.9, 50.0, np.nan],
+            "dlyask": [100.1, 51.0, np.nan],
+            "in_universe": pd.array([1.0, np.nan, 1.0]).astype(dtype),
+        }
+    )
+    spread = sd.quoted_spread(frame)
+    # Stock 3 has no quote: filled with the day's median over stock 1 only.
+    assert spread.iloc[2] == pytest.approx(0.002)
+
+
 def test_available_from_is_strictly_after_report_and_falls_back():
     days = pd.bdate_range("2020-01-01", "2020-12-31")
     fund = pd.DataFrame(

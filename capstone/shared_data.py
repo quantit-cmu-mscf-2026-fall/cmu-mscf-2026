@@ -367,7 +367,10 @@ def quoted_spread(daily: pd.DataFrame) -> pd.Series:
     trailing = spread.groupby(frame["permno"]).transform(
         lambda s: s.shift(1).rolling(SPREAD_WINDOW, min_periods=5).median()
     )
-    daily_median = spread.where(frame["in_universe"]).groupby(frame["date"]).transform("median")
+    # load() turns in_universe into float64 when it has gaps, and .where() needs
+    # real booleans; unknown membership counts as out of the universe.
+    universe = frame["in_universe"].astype("float64").fillna(0).astype(bool)
+    daily_median = spread.where(universe).groupby(frame["date"]).transform("median")
     return spread.fillna(trailing).fillna(daily_median).reindex(daily.index).rename("spread")
 
 
