@@ -888,8 +888,16 @@ def local_fdr(
     Only candidates above the null's centre can be called real: below it,
     lfdr is 1. Low z-scores are the wrong direction for one-sided p-values.
 
+    Its role is a graded score, reported next to the gate, not a gate: the
+    stage-1 gate stays BH-based unless calibration shows lfdr finds more real
+    signals at our base rate. Feed it every candidate a search produced (or
+    one search-adjusted p-value per hypothesis family), never only the
+    winners: a null estimated from selected winners is shifted up, and real
+    candidates then look ordinary.
+
     Pass one-sided p-values (`sharpe_test(...).pvalue_greater`). NaN stays NaN.
-    Needs at least `MIN_LOCAL_FDR_CANDIDATES` usable p-values.
+    Needs at least `MIN_LOCAL_FDR_CANDIDATES` usable p-values, which most single
+    batches of 50-200 candidates won't reach; it's NaN for those.
     """
     usable = pvalues.dropna()
     if len(usable) < MIN_LOCAL_FDR_CANDIDATES:

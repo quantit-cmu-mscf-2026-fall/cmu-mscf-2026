@@ -93,7 +93,15 @@ null, "real" means **better than the other candidates**: an edge every candidate
 shares becomes part of the null. Use `bh` or `by` for "is the Sharpe above zero
 at all". On independent candidates `lfdr` is the more conservative of the two
 (for example, 0.19 against BH's 0.49 of signals found when 10% were real at
-shift 2.5). It is NaN below 200 candidates, where the null can't be estimated.
+shift 2.5). It is NaN below 200 candidates, where the null can't be estimated,
+which covers most single batches of 50-200.
+
+Its role is a **graded score**, reported next to the gate, not a gate: the
+stage-1 gate stays BH-based unless calibration shows `lfdr` finds more real
+signals at our base rate. Feed it every candidate a search produced, or one
+search-adjusted p-value per hypothesis family, never only the winners: a null
+estimated from selected winners is shifted up, and real candidates then look
+ordinary.
 
 ## A staged funnel
 
