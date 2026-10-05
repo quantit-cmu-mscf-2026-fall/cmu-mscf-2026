@@ -27,6 +27,7 @@ from capstone.factors.tree import (
     WINDOW_MIN,
 )
 
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
 DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "config" / "factors.toml"
 
 
@@ -34,7 +35,8 @@ DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "config" / "factors.toml"
 class FactorConfig:
     """The pipeline's parameters; see config/factors.toml for what each one does."""
 
-    model: str = "claude-opus-5"
+    model: str = "claude-opus-5-5"
+    effort: str = "high"
     max_tokens: int = 16000
     prompt_version: str = "v4"
     hypotheses_per_paper: int = 3
@@ -49,6 +51,8 @@ class FactorConfig:
             raise ValueError("max_nodes must be at least 3")
         if self.hypotheses_per_paper < 1 or self.factors_per_hypothesis < 1:
             raise ValueError("hypotheses_per_paper and factors_per_hypothesis must be >= 1")
+        if self.effort not in EFFORTS:
+            raise ValueError(f"effort must be one of {EFFORTS}")
         if self.max_repairs < 0:
             raise ValueError("max_repairs cannot be negative")
         for name in ("max_zoo_share", "max_store_share"):
@@ -92,6 +96,7 @@ def call_tool(
     """One model call that must answer through `tool`; returns the tool's input.
 
     With `usage`, adds this call's count and input and output tokens to it.
+    Raises on a refusal or an answer from a model other than `config.model`.
     """
     response = client.messages.create(
         model=config.model,
@@ -99,8 +104,18 @@ def call_tool(
         system=f"{system}\n\nAnswer only by calling the {tool['name']} tool, exactly once.",
         tools=[{**tool, "strict": True}],
         tool_choice={"type": "auto"},
+        output_config={"effort": config.effort},
         messages=[{"role": "user", "content": user}],
     )
+    # Every stored row records config.model, and the holdout dates depend on
+    # that model's training cutoff, so an answer from any other model (or a
+    # refusal) must stop the run rather than be stored under the wrong name.
+    if getattr(response, "stop_reason", None) == "refusal":
+        details = getattr(response, "stop_details", None)
+        raise ValueError(f"the model declined ({getattr(details, 'category', None)})")
+    served = getattr(response, "model", None)
+    if served is not None and served != config.model:
+        raise ValueError(f"answered by {served}, not the configured {config.model}")
     if usage is not None:
         tokens = getattr(response, "usage", None)
         usage["calls"] += 1

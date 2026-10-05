@@ -260,3 +260,49 @@ def test_call_tool_counts_calls_and_tokens():
     for _ in range(2):
         call_tool(client, CONFIG, system="s", user="u", tool={"name": "t"}, usage=usage)
     assert usage == {"calls": 2, "input_tokens": 2400, "output_tokens": 600}
+
+
+# ---------------------------------------------------------------------------
+# Model
+
+
+def test_shipped_config_runs_opus_5_5_at_high_effort():
+    config = load_config()
+    assert (config.model, config.effort) == ("claude-opus-5-5", "high")
+    assert FactorConfig().model == config.model
+
+
+def test_call_tool_sends_the_configured_effort():
+    from capstone.factors.llm import call_tool
+
+    client = FakeClient({"hypotheses": []})
+    call_tool(client, CONFIG, system="s", user="u", tool={"name": "t"})
+    assert client.calls[0]["output_config"] == {"effort": CONFIG.effort}
+
+
+def test_unknown_effort_is_rejected():
+    with pytest.raises(ValueError, match="effort"):
+        FactorConfig(effort="extreme")
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        ({"stop_reason": "refusal", "stop_details": SimpleNamespace(category="cyber")}, "declined"),
+        ({"model": "some-other-model"}, "not the configured"),
+    ],
+)
+def test_a_refusal_or_another_model_stops_the_run(extra, message):
+    # Rows are stored under config.model and the holdout depends on its
+    # cutoff, so neither may be stored as if the configured model answered.
+    from capstone.factors.llm import call_tool
+
+    class Answers(FakeClient):
+        def create(self, **kwargs):
+            response = super().create(**kwargs)
+            for key, value in extra.items():
+                setattr(response, key, value)
+            return response
+
+    with pytest.raises(ValueError, match=message):
+        call_tool(Answers({"hypotheses": []}), CONFIG, system="s", user="u", tool={"name": "t"})

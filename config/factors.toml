@@ -2,8 +2,13 @@
 # Changing a value changes what gets stored, so bump prompt_version with any
 # prompt or threshold change; every stored row records the version it used.
 
-model = "claude-opus-5"
-max_tokens = 16000  # Opus 5 thinks by default; thinking counts against this
+# Opus 5.5: knowledge cutoff June 2026, which sets the holdout dates in
+# docs/validation.md. Changing the model means re-deciding those dates.
+model = "claude-opus-5-5"
+# Opus 5.5 always thinks and defaults to "medium"; "high" matches what Opus 5
+# ran at by default.
+effort = "high"
+max_tokens = 16000  # thinking counts against this
 prompt_version = "v4"  # v4: windows up to 1260; v3: returns, shares, cap; v2: kinds, node limit
 
 # How much to ask for per call.
