@@ -142,6 +142,21 @@ def add_universe_flag(daily: pd.DataFrame) -> pd.DataFrame:
     return daily.assign(in_universe=daily["in_sp500"] & common)
 
 
+def attach_delistings(daily: pd.DataFrame, delists: pd.DataFrame) -> pd.DataFrame:
+    """Put each stock's stkdelists fields on its CIZ delisting row only.
+
+    The delisting row is the one with `dlydelflg == 'Y'`. Attaching to each
+    stock's last row in the sample instead would mark a stock still trading at
+    the sample end, or delisted after it, as if it had delisted on its last
+    sampled day (Lauren's #27 review); `delret.notna()` would then misfire as a
+    delisting indicator.
+    """
+    out = daily.merge(delists, on="permno", how="left", validate="many_to_one")
+    cols = [c for c in delists.columns if c != "permno"]
+    out.loc[out["dlydelflg"].ne("Y").to_numpy(), cols] = None
+    return out
+
+
 def pull_sp500(db, start: int, end: int) -> None:
     """Daily rows for every permno that was ever an S&P 500 member in [start, end].
 
@@ -184,10 +199,7 @@ def pull_sp500(db, start: int, end: int) -> None:
         params={"permnos": permnos},
         date_cols=["delistingdt"],
     )
-    last = daily.groupby("permno")["date"].transform("max") == daily["date"]
-    daily = daily.merge(delists, on="permno", how="left")
-    delist_cols = [c for c in delists.columns if c != "permno"]
-    daily.loc[~last.to_numpy(), delist_cols] = None
+    daily = attach_delistings(daily, delists)
     daily = add_universe_flag(daily)
 
     _save(daily.sort_values(["date", "permno"]), f"sp500_daily_{start}_{end}")

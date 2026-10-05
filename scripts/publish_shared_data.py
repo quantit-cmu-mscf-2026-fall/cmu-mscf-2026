@@ -7,8 +7,9 @@ Usage::
 
 Each FILE is copied into the synced `mscf-capstone-data` folder under its own
 name, replacing any file of that name, and SHA256SUMS is rewritten to match.
-Every copy is re-hashed after writing, so a bad copy fails here rather than on
-a teammate's machine. Teammates' next `shared_data.sync()` picks the change up.
+Every copy is re-hashed before it replaces anything, and a failure publishes
+nothing, so Drive never holds a half-updated set. Teammates' next
+`shared_data.sync()` picks the change up.
 
 Without --apply nothing is written: it prints what would be added, replaced or
 left alone, and the dataset version before and after.
@@ -17,6 +18,7 @@ left alone, and the dataset version before and after.
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import tempfile
 from pathlib import Path
@@ -61,11 +63,24 @@ def main() -> None:
         print("preview only; re-run with --apply to publish")
         return
 
-    for name, (path, digest, _) in changed.items():
-        shutil.copyfile(path, drive / name)
-        if sd._sha256(drive / name) != digest:
-            raise SystemExit(f"copy of {name} did not verify; SHA256SUMS left unchanged")
-    sd.write_manifest(manifest, new_entries)
+    # All or nothing: copy everything to temporary names and verify it first, so
+    # a failure leaves every published file and SHA256SUMS exactly as they were.
+    # Only then swap each into place, and rewrite the manifest last.
+    staged = {name: drive / f".{name}.publishing" for name in changed}
+    try:
+        for name, (path, digest, _) in changed.items():
+            shutil.copyfile(path, staged[name])
+            if sd._sha256(staged[name]) != digest:
+                raise SystemExit(f"copy of {name} did not verify; nothing was published")
+    except BaseException:
+        for temp in staged.values():
+            temp.unlink(missing_ok=True)
+        raise
+    for name, temp in staged.items():
+        os.replace(temp, drive / name)
+    temp_manifest = drive / f".{sd.MANIFEST}.publishing"
+    sd.write_manifest(temp_manifest, new_entries)
+    os.replace(temp_manifest, manifest)
     print(f"published {len(changed)} file(s); version is now {sd.manifest_version(manifest)}")
 
 

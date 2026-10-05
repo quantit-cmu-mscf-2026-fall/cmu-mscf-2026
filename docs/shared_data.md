@@ -149,4 +149,6 @@ files by hand, so every change is reproducible.
    It copies each file into the Drive folder, re-verifies it, and rewrites
    `SHA256SUMS`. Teammates' next `load()` picks the change up, and
    `data_version()` changes, so runs on old and new data stay distinguishable in
-   the ledger. Tell the team when you publish.
+   the ledger. Tell the team when you publish, and publish one at a time: two
+   people publishing at once would each rewrite `SHA256SUMS` and one set of
+   entries would be lost.
