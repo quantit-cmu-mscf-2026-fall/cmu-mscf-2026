@@ -87,6 +87,27 @@ def test_universe_flag_leaves_other_rows_descriptors_alone():
     assert list(flagged.in_universe) == [True, False]
 
 
+def test_delisting_fields_land_only_on_the_delisting_row():
+    daily = pd.DataFrame(
+        {
+            "permno": [1, 1, 1, 2, 2],
+            "date": pd.to_datetime(
+                ["2025-06-02", "2025-06-03", "2025-06-04"] * 1 + ["2025-12-30", "2025-12-31"]
+            ),
+            "dlydelflg": ["N", "N", "Y", "N", "N"],
+        }
+    )
+    delists = pd.DataFrame(
+        {
+            "permno": [1, 2],  # 2 delists after the sample ends
+            "delistingdt": pd.to_datetime(["2025-06-03", "2026-02-15"]),
+            "delret": [-0.2, 0.01],
+        }
+    )
+    out = pull.attach_delistings(daily, delists)
+    assert out["delret"].notna().tolist() == [False, False, True, False, False]
+
+
 # --- publish_shared_data --------------------------------------------------
 
 
@@ -128,6 +149,29 @@ def test_publish_apply_replaces_adds_and_rewrites_manifest(drive, tmp_path, monk
     assert set(entries) == {"a.parquet", "b.csv"}
     for name, digest in entries.items():
         assert sd._sha256(drive / name) == digest
+
+
+def test_publish_failure_partway_publishes_nothing(drive, tmp_path, monkeypatch, capsys):
+    # Lauren's #27 review: a copy that fails verification after another file
+    # was already replaced left Drive half-updated with a stale SHA256SUMS.
+    changed, broken = tmp_path / "a.parquet", tmp_path / "b.csv"
+    changed.write_bytes(b"updated")
+    broken.write_bytes(b"will not verify")
+    manifest_before = (drive / sd.MANIFEST).read_bytes()
+    real_sha = sd._sha256
+
+    def corrupt_b(path):
+        return "0" * 64 if path.name.startswith(".b.csv") else real_sha(path)
+
+    monkeypatch.setattr(sd, "_sha256", corrupt_b)
+    monkeypatch.setattr(
+        sys, "argv", ["publish_shared_data.py", str(changed), str(broken), "--apply"]
+    )
+    with pytest.raises(SystemExit, match="b.csv did not verify"):
+        publish.main()
+    assert (drive / "a.parquet").read_bytes() == b"original"
+    assert (drive / sd.MANIFEST).read_bytes() == manifest_before
+    assert sorted(p.name for p in drive.iterdir()) == ["SHA256SUMS", "a.parquet"]
 
 
 def test_publish_unchanged_file_is_a_no_op(drive, monkeypatch, capsys):
