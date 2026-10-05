@@ -88,13 +88,15 @@ def run(con: sqlite3.Connection, source, client, config: FactorConfig) -> RunSum
             summary.papers_failed[key] = f"{type(exc).__name__}: {exc}"
         finally:
             summary.usage.update(usage)
-            if usage["calls"]:
-                store.record_usage(
-                    con,
-                    key,
-                    config.model,
-                    calls=usage["calls"],
-                    input_tokens=usage["input_tokens"],
-                    output_tokens=usage["output_tokens"],
-                )
+            # The alignment judge runs on its own model, priced separately.
+            for model, prefix in ((config.model, ""), (config.alignment_model, "alignment_")):
+                if usage[f"{prefix}calls"]:
+                    store.record_usage(
+                        con,
+                        key,
+                        model,
+                        calls=usage[f"{prefix}calls"],
+                        input_tokens=usage[f"{prefix}input_tokens"],
+                        output_tokens=usage[f"{prefix}output_tokens"],
+                    )
     return summary

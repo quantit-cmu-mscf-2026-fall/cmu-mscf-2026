@@ -37,13 +37,15 @@ class FactorConfig:
 
     model: str = "claude-opus-5"
     max_tokens: int = 16000
-    prompt_version: str = "v5"
+    prompt_version: str = "v6"
     hypotheses_per_paper: int = 3
     factors_per_hypothesis: int = 4
     max_repairs: int = 2
     max_zoo_share: float = 0.75
     max_store_share: float = 1.0
     max_nodes: int = 30
+    alignment_model: str = ""
+    min_alignment: float = 0.0
 
     def __post_init__(self) -> None:
         if self.max_nodes < 3:
@@ -52,6 +54,8 @@ class FactorConfig:
             raise ValueError("hypotheses_per_paper and factors_per_hypothesis must be >= 1")
         if self.max_repairs < 0:
             raise ValueError("max_repairs cannot be negative")
+        if not 0 <= self.min_alignment <= 1:
+            raise ValueError("min_alignment must be in [0, 1]")
         for name in ("max_zoo_share", "max_store_share"):
             if not 0 < getattr(self, name) <= 1:
                 raise ValueError(f"{name} must be in (0, 1]")
