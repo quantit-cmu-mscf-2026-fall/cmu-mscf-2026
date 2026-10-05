@@ -46,6 +46,9 @@ class FactorConfig:
     max_nodes: int = 30
     alignment_model: str = ""
     min_alignment: float = 0.0
+    max_bond_leaves: int = 4
+    max_member_share: float = 0.75
+    max_bond_overlap: float = 0.75
 
     def __post_init__(self) -> None:
         if self.max_nodes < 3:
@@ -56,7 +59,9 @@ class FactorConfig:
             raise ValueError("max_repairs cannot be negative")
         if not 0 <= self.min_alignment <= 1:
             raise ValueError("min_alignment must be in [0, 1]")
-        for name in ("max_zoo_share", "max_store_share"):
+        if self.max_bond_leaves < 2:
+            raise ValueError("max_bond_leaves must be at least 2")
+        for name in ("max_zoo_share", "max_store_share", "max_member_share", "max_bond_overlap"):
             if not 0 < getattr(self, name) <= 1:
                 raise ValueError(f"{name} must be in (0, 1]")
 

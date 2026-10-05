@@ -37,3 +37,13 @@ max_nodes = 30
 #     calibrated on hand-labelled proposals; never tune it on performance.
 alignment_model = "claude-haiku-4-5"
 min_alignment = 0.0
+
+# Strategy graph (capstone.factors.graph): a bond joins strategies, and is
+# checked for uniqueness before it is stored. Rejected at or above:
+#   max_member_share: the largest share of one of its factors that is a
+#     subtree of another; 0.75 matches max_zoo_share.
+#   max_bond_overlap: Jaccard overlap of its factors with a stored bond's.
+#   max_bond_leaves: the most factors one bond may tie together.
+max_bond_leaves = 4
+max_member_share = 0.75
+max_bond_overlap = 0.75
