@@ -2,7 +2,10 @@
 
 Usage::
 
-    python scripts/pull_wrds.py --user YOUR_WRDS_ID [--start 1990] [--end 2025]
+    python scripts/pull_wrds.py [--start 1990] [--end 2025]
+
+The WRDS username is read from the pgpass file (or $WRDS_USERNAME), so it never
+has to be typed on the command line; --user overrides it.
 
 Resumable: each CRSP year is its own parquet file and existing files are
 skipped, so an interrupted run picks up where it stopped. Everything lands in
@@ -20,6 +23,8 @@ import time
 from pathlib import Path
 
 import pandas as pd
+
+from capstone.wrds_loader import connect, pgpass_path, wrds_username
 
 OUT = Path(__file__).resolve().parent.parent / "data_cache" / "wrds"
 
@@ -191,16 +196,16 @@ def pull_sp500(db, start: int, end: int) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--user", required=True, help="WRDS username (password comes from pgpass)")
+    parser.add_argument("--user", help="WRDS username; default: $WRDS_USERNAME or the pgpass file")
     parser.add_argument("--start", type=int, default=1990)
     parser.add_argument("--end", type=int, default=2025)
     parser.add_argument("--sp500", action="store_true", help="only build the S&P 500 dataset")
     args = parser.parse_args()
 
-    import wrds
-
+    if not wrds_username(args.user):
+        parser.error(f"no WRDS username found: set WRDS_USERNAME or create {pgpass_path()}")
     OUT.mkdir(parents=True, exist_ok=True)
-    db = wrds.Connection(wrds_username=args.user)
+    db = connect(args.user)
     try:
         if args.sp500:
             print(f"S&P 500 members {args.start}-{args.end}", flush=True)

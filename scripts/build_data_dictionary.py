@@ -2,7 +2,7 @@
 
 Usage::
 
-    python scripts/build_data_dictionary.py [--user YOUR_WRDS_ID] [--refresh-meta]
+    python scripts/build_data_dictionary.py [--refresh-meta]
 
 Descriptions come from WRDS itself: CRSP's metadata tables (`crsp.metaiteminfo`
 for column definitions, `crsp.metaflaginfo` for code meanings) and the WRDS
@@ -26,6 +26,7 @@ from pathlib import Path
 import pandas as pd
 
 from capstone import shared_data as sd
+from capstone.wrds_loader import connect, pgpass_path, wrds_username
 
 ROOT = Path(__file__).resolve().parent.parent
 META = ROOT / "data_cache" / "wrds_meta"
@@ -95,11 +96,9 @@ OBSERVED = {
 FREE_TEXT = {"ticker", "cusip", "hdrcusip"}
 
 
-def fetch_meta(user: str) -> None:
-    import wrds
-
+def fetch_meta(user: str | None = None) -> None:
     META.mkdir(parents=True, exist_ok=True)
-    db = wrds.Connection(wrds_username=user)
+    db = connect(user)
     try:
         labels = []
         for lib, table in LABEL_TABLES:
@@ -260,14 +259,17 @@ def to_markdown(dd: pd.DataFrame) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--user", help="WRDS username; needed only to (re)fetch metadata")
+    parser.add_argument("--user", help="WRDS username; default: $WRDS_USERNAME or the pgpass file")
     parser.add_argument("--refresh-meta", action="store_true")
     args = parser.parse_args()
 
     needed = ["wrds_column_labels.csv", "crsp_metaiteminfo.csv", "crsp_metaflaginfo.csv"]
     if args.refresh_meta or not all((META / f).exists() for f in needed):
-        if not args.user:
-            parser.error(f"metadata missing in {META}; pass --user to fetch it from WRDS")
+        if not wrds_username(args.user):
+            parser.error(
+                f"metadata missing in {META}; fetching it needs WRDS: set WRDS_USERNAME "
+                f"or create {pgpass_path()}"
+            )
         fetch_meta(args.user)
 
     dd = build()

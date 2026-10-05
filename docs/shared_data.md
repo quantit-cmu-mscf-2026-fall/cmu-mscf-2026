@@ -120,9 +120,13 @@ files by hand, so every change is reproducible.
 1. **Pull** (one Duo push; resumable, skips files already present):
 
    ```bash
-   python scripts/pull_wrds.py --user YOUR_WRDS_ID            # Compustat, link, broad CRSP
-   python scripts/pull_wrds.py --user YOUR_WRDS_ID --sp500    # the S&P 500 daily file
+   python scripts/pull_wrds.py            # Compustat, link, broad CRSP
+   python scripts/pull_wrds.py --sp500    # the S&P 500 daily file
    ```
+
+   The WRDS username comes from your pgpass file (or `$WRDS_USERNAME`), so it
+   never goes on the command line, where shell history and session logs would
+   keep it.
 
    Output lands in `data_cache/wrds/`. The S&P 500 file is built from the CIZ
    tables (`crsp.dsf_v2`) because the legacy `crsp.dsf` ends at 2024-12-31. The
@@ -131,8 +135,8 @@ files by hand, so every change is reproducible.
 
 2. **Document**: `python scripts/build_data_dictionary.py` writes
    `DATA_DICTIONARY.md` and `data_dictionary.csv` to `data_cache/wrds_build/`
-   from CRSP's own metadata on WRDS (cached in `data_cache/wrds_meta/`; pass
-   `--user` the first time). It asserts every stated fact against the data and
+   from CRSP's own metadata on WRDS (cached in `data_cache/wrds_meta/`, fetched
+   the first time). It asserts every stated fact against the data and
    fails rather than publish a claim that stopped being true.
 
 3. **Check, then publish**: run `pytest -m data` against the new files, then
