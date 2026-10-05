@@ -94,6 +94,37 @@ CREATE TABLE IF NOT EXISTS usage (
   output_tokens INTEGER NOT NULL,
   created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS bonds (
+  id TEXT PRIMARY KEY,
+  rule TEXT NOT NULL,
+  leaves TEXT NOT NULL,
+  leaf_nodes INTEGER NOT NULL,
+  member_share REAL NOT NULL,
+  nearest_members TEXT,
+  bond_overlap REAL NOT NULL,
+  nearest_bond TEXT,
+  features TEXT NOT NULL,
+  rationale TEXT,
+  model TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS bond_members (
+  bond_id TEXT NOT NULL REFERENCES bonds(id),
+  member_id TEXT NOT NULL,
+  member_kind TEXT NOT NULL,
+  PRIMARY KEY (bond_id, member_id)
+);
+CREATE TABLE IF NOT EXISTS moves (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  action TEXT NOT NULL,
+  from_id TEXT,
+  result_id TEXT,
+  hypothesis_id TEXT,
+  status TEXT NOT NULL,
+  reason TEXT,
+  policy TEXT,
+  created_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS ix_proposals_factor ON proposals(factor_id);
 CREATE INDEX IF NOT EXISTS ix_proposals_hypothesis ON proposals(hypothesis_id);
 CREATE INDEX IF NOT EXISTS ix_hypotheses_paper ON hypotheses(paper_key);
