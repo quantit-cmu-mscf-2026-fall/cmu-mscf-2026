@@ -25,11 +25,14 @@ synthetic six-month panel, so you can build and test the whole pipeline first.
 
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 
 import pandas as pd
 
 CACHE_DIR = Path(__file__).resolve().parent.parent / "data_cache"
+WRDS_HOST = "wrds-pgdata.wharton.upenn.edu"
 
 # CRSP share codes 10 and 11 = ordinary common shares of US-incorporated firms.
 # Without this filter you silently pull in ADRs, REITs, closed-end funds and
@@ -45,11 +48,55 @@ def _cache_path(name: str) -> Path:
     return CACHE_DIR / f"{name}.parquet"
 
 
+def pgpass_path() -> Path:
+    """Where the PostgreSQL driver keeps saved passwords on this machine."""
+    if os.environ.get("PGPASSFILE"):
+        return Path(os.environ["PGPASSFILE"])
+    if sys.platform == "win32":
+        return Path(os.environ.get("APPDATA", "")) / "postgresql" / "pgpass.conf"
+    return Path.home() / ".pgpass"
+
+
+def _pgpass_fields(line: str) -> list[str]:
+    """Split a pgpass line on ':', honouring the format's '\\:' and '\\\\' escapes."""
+    fields, current, chars = [], "", iter(line)
+    for ch in chars:
+        if ch == "\\":
+            current += next(chars, "")
+        elif ch == ":":
+            fields.append(current)
+            current = ""
+        else:
+            current += ch
+    return [*fields, current]
+
+
+def wrds_username(explicit: str | None = None) -> str | None:
+    """The WRDS username: `explicit`, else $WRDS_USERNAME, else the pgpass file.
+
+    The pgpass file's fourth field is the username, so scripts never need it
+    on the command line, where it would land in shell history and session logs.
+    """
+    if explicit:
+        return explicit
+    if os.environ.get("WRDS_USERNAME"):
+        return os.environ["WRDS_USERNAME"]
+    path = pgpass_path()
+    if not path.exists():
+        return None
+    for line in path.read_text().splitlines():
+        fields = _pgpass_fields(line)
+        if len(fields) >= 4 and not line.startswith("#") and fields[0] in (WRDS_HOST, "*"):
+            return fields[3] or None
+    return None
+
+
 def connect(username: str | None = None):
     """Open a WRDS connection, with an actionable error if the package is absent.
 
-    Kept as a thin wrapper so the import of `wrds` stays lazy: the rest of this
-    kit must import cleanly for someone who has no WRDS account at all.
+    The username comes from `wrds_username()` when not given. Kept as a thin
+    wrapper so the import of `wrds` stays lazy: the rest of this kit must
+    import cleanly for someone who has no WRDS account at all.
     """
     try:
         import wrds
@@ -59,6 +106,7 @@ def connect(username: str | None = None):
             "capstone.sample_data.load_sample_prices() to work without WRDS."
         ) from exc
 
+    username = wrds_username(username)
     return wrds.Connection(wrds_username=username) if username else wrds.Connection()
 
 
