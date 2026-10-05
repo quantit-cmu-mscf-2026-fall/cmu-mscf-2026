@@ -14,7 +14,7 @@ from capstone.factors import store
 from capstone.factors.hypotheses import extract
 from capstone.factors.llm import FactorConfig, grammar_help, load_config
 from capstone.factors.proposer import propose
-from capstone.factors.tree import BINARY_PARAMETER_FUNCS, BINARY_WINDOW_FUNCS, FUNCS
+from capstone.factors.tree import BINARY_PARAMETER_FUNCS, BINARY_WINDOW_FUNCS, FUNCS, parse
 from capstone.factors.zoo import ALPHA101_EXPRESSIONS
 
 
@@ -347,3 +347,29 @@ def test_judge_tokens_are_counted_apart_from_the_proposer():
     judge(Metered(_verdict()), config, {**HYPOTHESIS, "id": "h"}, "-returns", usage=usage)
     expected = {"alignment_calls": 1, "alignment_input_tokens": 500, "alignment_output_tokens": 40}
     assert usage == expected
+
+
+# ---------------------------------------------------------------------------
+# Frequent subtree avoidance in the proposer
+
+
+def test_an_overused_structure_is_named_in_the_prompt_and_rejected(con, hid):
+    for expression in ("rank(close / shift(close, 5))", "ts_mean(close / shift(close, 20), 5)"):
+        store.add_factor(con, parse(expression), hid)
+    config = FactorConfig(model="m", avoid_frequent_subtrees=1, max_repairs=0)
+    candidate = "ts_rank(close / shift(close, 10), 21) * log(cap)"
+    client = FakeClient(_factors(candidate, "ts_mean(volume / shares, 21) / log(cap)"))
+    overused, fresh = propose(con, hid, client, config)
+    assert overused.status == "rejected"
+    assert overused.reason == "frequent subtree: (close / shift(close, t))"
+    assert fresh.status == "stored"
+    assert "do not use them: (close / shift(close, t))." in client.calls[0]["system"]
+
+
+def test_avoidance_off_leaves_the_prompt_and_checks_unchanged(con, hid):
+    for expression in ("rank(close / shift(close, 5))", "ts_mean(close / shift(close, 20), 5)"):
+        store.add_factor(con, parse(expression), hid)
+    config = FactorConfig(model="m", avoid_frequent_subtrees=0, max_repairs=0)
+    client = FakeClient(_factors("ts_rank(close / shift(close, 10), 21) * log(cap)"))
+    (outcome,) = propose(con, hid, client, config)
+    assert outcome.status == "stored" and "overused" not in client.calls[0]["system"]
