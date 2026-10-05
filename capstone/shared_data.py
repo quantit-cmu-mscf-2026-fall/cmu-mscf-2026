@@ -111,8 +111,8 @@ def sync(verbose: bool = False) -> dict[str, str]:
 
     Only files whose checksum changed are copied. Each copy is verified before
     it replaces the old one, so a failed or partial copy leaves the last good
-    version in place. With no Drive folder available, the existing local copy
-    is used as-is.
+    version in place. Files no longer on Drive are removed from the local copy.
+    With no Drive folder available, the existing local copy is used as-is.
     """
     local = cache_dir()
     local.mkdir(parents=True, exist_ok=True)
@@ -206,6 +206,19 @@ def _sync_locked(local: Path, verbose: bool, heartbeat=lambda: None) -> dict[str
         except (OSError, SharedDataError) as exc:
             temp.unlink(missing_ok=True)
             status[name] = f"FAILED: {exc}" + ("; kept previous copy" if target.exists() else "")
+        if verbose:
+            print(f"  {name}: {status[name]}", flush=True)
+
+    # A file taken off Drive (renamed or retired) must leave the local copy
+    # too; otherwise it keeps feeding data_version(), and two teammates synced
+    # to the same Drive report different versions.
+    for name in sorted(set(have) - set(want)):
+        try:
+            (local / name).unlink(missing_ok=True)
+            status[name] = "removed"
+        except OSError as exc:  # e.g. still open on Windows; drop it from the manifest anyway
+            status[name] = f"removed from manifest; file left in place: {exc}"
+        del have[name]
         if verbose:
             print(f"  {name}: {status[name]}", flush=True)
 

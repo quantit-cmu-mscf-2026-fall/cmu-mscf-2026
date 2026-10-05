@@ -78,6 +78,24 @@ def test_published_update_is_picked_up_and_changes_version(env):
     assert sd.data_version() != before
 
 
+def test_file_removed_from_drive_is_dropped_so_versions_agree(env, tmp_path, monkeypatch):
+    # The yearly refresh: a new file is published and the old one retired.
+    # A teammate who synced before and one who syncs only after must end up
+    # with the same files and the same data_version() as the Drive.
+    drive, alice = env
+    sd.sync()
+    (drive / "other.parquet").unlink()
+    _publish(drive, {"other_2026": pd.DataFrame({"x": [1, 2, 3]})})
+    status = sd.sync()
+    assert status["other.parquet"] == "removed"
+    assert not (alice / "other.parquet").exists()
+    alice_version = sd.data_version()
+
+    monkeypatch.setenv("CAPSTONE_CACHE_DIR", str(tmp_path / "bob"))
+    sd.sync()
+    assert sd.data_version() == alice_version == sd.manifest_version(drive / sd.MANIFEST)
+
+
 def test_half_synced_file_is_rejected_and_previous_copy_kept(env):
     drive, cache = env
     sd.sync()
