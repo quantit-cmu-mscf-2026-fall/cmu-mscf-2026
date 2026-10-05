@@ -100,6 +100,27 @@ def test_building_the_book_is_charged():
     assert (strategy.iloc[2:] == 0.0).all()
 
 
+def test_days_with_no_position_are_nan_not_flat_days():
+    # #25: a lookback's warm-up holds nothing, so those dates are not periods
+    # with a return; counting them as 0.0 inflated n_obs and the hit-rate base.
+    signal, returns = _constant_book(n_dates=120)
+    signal.iloc[:20] = np.nan  # 20-day warm-up: no signal, no position
+    strategy = run_backtest(signal, returns)
+    assert strategy.iloc[:21].isna().all()  # warm-up plus the one-day lag
+    assert not strategy.iloc[21:].isna().any()
+    assert summarize(strategy).n_obs == len(signal) - 21
+
+
+def test_closing_the_book_keeps_its_cost():
+    # Going flat is a trade: the exit date carries its cost rather than NaN,
+    # and only the dates after it, with nothing held, are NaN.
+    signal, returns = _constant_book()
+    signal.iloc[40:] = np.nan
+    strategy = run_backtest(signal, returns, cost_bps=100.0)
+    assert strategy.iloc[41] == pytest.approx(-0.01)  # unwinding 1.0 of gross
+    assert strategy.iloc[42:].isna().all()
+
+
 def test_summarize_short_series_raises():
     returns = pd.Series(np.random.default_rng(0).standard_normal(30) * 0.01)
     with pytest.raises(ValueError):
