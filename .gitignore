@@ -8,3 +8,4 @@ __pycache__/
 .sessions/
 experiments/runs.jsonl
 experiments/factors.db
+experiments/alignment_labels.csv
