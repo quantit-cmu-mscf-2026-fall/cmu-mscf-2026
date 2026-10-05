@@ -37,7 +37,7 @@ class FactorConfig:
 
     model: str = "claude-opus-5"
     max_tokens: int = 16000
-    prompt_version: str = "v6"
+    prompt_version: str = "v7"
     hypotheses_per_paper: int = 3
     factors_per_hypothesis: int = 4
     max_repairs: int = 2
@@ -46,6 +46,7 @@ class FactorConfig:
     max_nodes: int = 30
     alignment_model: str = ""
     min_alignment: float = 0.0
+    avoid_frequent_subtrees: int = 3
     max_bond_leaves: int = 4
     max_member_share: float = 0.75
     max_bond_overlap: float = 0.75
@@ -59,6 +60,8 @@ class FactorConfig:
             raise ValueError("max_repairs cannot be negative")
         if not 0 <= self.min_alignment <= 1:
             raise ValueError("min_alignment must be in [0, 1]")
+        if self.avoid_frequent_subtrees < 0:
+            raise ValueError("avoid_frequent_subtrees cannot be negative")
         if self.max_bond_leaves < 2:
             raise ValueError("max_bond_leaves must be at least 2")
         for name in ("max_zoo_share", "max_store_share", "max_member_share", "max_bond_overlap"):

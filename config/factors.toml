@@ -4,7 +4,7 @@
 
 model = "claude-opus-5"
 max_tokens = 16000  # Opus 5 thinks by default; thinking counts against this
-prompt_version = "v6"  # v6: alignment judge; v5: mkt_return; v4: windows up to 1260; v3: returns, shares, cap; v2: kinds, node limit
+prompt_version = "v7"  # v7: frequent subtree avoidance; v6: alignment judge; v5: mkt_return; v4: windows up to 1260; v3: returns, shares, cap; v2: kinds, node limit
 
 # How much to ask for per call.
 hypotheses_per_paper = 3
@@ -28,6 +28,12 @@ max_store_share = 1.0
 # has at most 26 nodes; the first real run's rejected-in-hindsight formulas
 # had 31-45.
 max_nodes = 30
+
+# Frequent subtree avoidance (Navigating the Alpha Jungle, #45, Sec. 3): the
+# most frequent closed "root genes" in the store (subtrees whose leaves are
+# all fields, windows abstracted) are named in the prompt as structures to
+# avoid, and a formula containing one is rejected. The paper avoids 3. 0 is off.
+avoid_frequent_subtrees = 3
 
 # Hypothesis-formula alignment (AlphaAgent's second mechanism, QUANTIT-83): a
 # cheaper model checks each formula that passed the size and originality

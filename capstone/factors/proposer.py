@@ -4,7 +4,9 @@ The model proposes formulas for one hypothesis. Each one is parsed; a parse
 error goes back to the model to fix, up to `max_repairs` rounds. A formula
 that parses is checked for size (AlphaAgent's complexity control, at most
 `max_nodes` nodes), for originality against Alpha101 and against the
-factors already stored (AlphaAgent Eq. 6), and, if those pass, for alignment
+factors already stored (AlphaAgent Eq. 6), for the store's most overused
+structures (frequent subtree avoidance, Alpha Jungle Sec. 3; they are also
+named in the prompt), and, if those pass, for alignment
 with its hypothesis (`alignment`), then stored or rejected. Every
 outcome is written to the store's `proposals` table, so failures stay on
 the record. No market data is read and no performance is computed.
@@ -14,16 +16,32 @@ from __future__ import annotations
 
 import sqlite3
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from capstone.factors import alignment, store
 from capstone.factors.hypotheses import _FIELDS
 from capstone.factors.llm import FactorConfig, call_tool, grammar_help
-from capstone.factors.tree import Node, ParseError, factor_id, node_count, parse, zoo_similarity
+from capstone.factors.tree import (
+    Node,
+    ParseError,
+    factor_id,
+    frequent_root_genes,
+    node_count,
+    parse,
+    root_genes,
+    zoo_similarity,
+)
 from capstone.factors.zoo import default_zoo
 
 
-def system_prompt(config: FactorConfig) -> str:
+def system_prompt(config: FactorConfig, avoid: Sequence[str] = ()) -> str:
+    avoided = (
+        "\n\nThese structures are already overused in the stored factors (t is any "
+        "window); do not use them: " + "; ".join(avoid) + "."
+        if avoid
+        else ""
+    )
     return (
         "You write cross-sectional equity factors as formulas in a closed grammar. Each "
         "formula is evaluated per stock per day; a higher value means a stronger buy "
@@ -32,7 +50,7 @@ def system_prompt(config: FactorConfig) -> str:
         "constant, operator and function call counts as one), and no redundant terms such "
         "as rank(x) - rank(-x), which carries the same information as rank(x). Do not "
         "reproduce well-known published alphas (such as Alpha101) or copy one with "
-        "different windows.\n\n" + grammar_help()
+        "different windows.\n\n" + grammar_help() + avoided
     )
 
 
@@ -95,6 +113,7 @@ def _judge(
     zoo: list[tuple[str, Node]],
     client,
     usage: Counter | None,
+    avoid: dict[str, str] | None = None,
 ) -> Outcome:
     hypothesis_id = hypothesis["id"]
     meta = dict(rationale=rationale, model=config.model, prompt_version=config.prompt_version)
@@ -116,6 +135,8 @@ def _judge(
         reason = f"not original: {zoo_share:.0%} of it is in {nearest_zoo}"
     elif store_share >= config.max_store_share:
         reason = f"not original: {store_share:.0%} of it is stored factor {nearest_factor}"
+    elif avoid and (overused := sorted(root_genes(node) & avoid.keys())):
+        reason = "frequent subtree: " + "; ".join(avoid[g] for g in overused)
     else:
         # The judge runs last: it costs a model call, the checks above don't.
         if config.alignment_model:
@@ -151,13 +172,16 @@ def propose(
         raise KeyError(f"no hypothesis {hypothesis_id!r} in the store")
     zoo = default_zoo() if zoo is None else zoo
     meta = dict(model=config.model, prompt_version=config.prompt_version)
+    frequent = frequent_root_genes(
+        [tree for _, tree in store.factor_trees(con)], config.avoid_frequent_subtrees
+    )
+    avoid = {key: text for key, _, text in frequent}
+    system = system_prompt(config, list(avoid.values()))
 
     user = _hypothesis_prompt(dict(row), config.factors_per_hypothesis)
     outcomes: list[Outcome] = []
     for attempt in range(config.max_repairs + 1):
-        answer = call_tool(
-            client, config, system=system_prompt(config), user=user, tool=TOOL, usage=usage
-        )
+        answer = call_tool(client, config, system=system, user=user, tool=TOOL, usage=usage)
         failures: list[tuple[str, str]] = []
         for item in answer.get("factors", [])[: config.factors_per_hypothesis]:
             expression = str(item.get("expression", ""))
@@ -177,7 +201,9 @@ def propose(
                 failures.append((expression, str(exc)))
                 continue
             outcomes.append(
-                _judge(con, node, expression, rationale, dict(row), config, zoo, client, usage)
+                _judge(
+                    con, node, expression, rationale, dict(row), config, zoo, client, usage, avoid
+                )
             )
         if not failures or attempt == config.max_repairs:
             break

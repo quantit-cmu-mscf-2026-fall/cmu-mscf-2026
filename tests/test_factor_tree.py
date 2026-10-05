@@ -250,3 +250,40 @@ def test_every_capstone_subpackage_is_listed_for_installation():
         for init in (root / "capstone").rglob("__init__.py")
     }
     assert found <= listed, f"add to [tool.setuptools] packages: {sorted(found - listed)}"
+
+
+# ---------------------------------------------------------------------------
+# Frequent subtree avoidance (Alpha Jungle Sec. 3)
+
+
+def test_root_genes_have_only_field_leaves_and_ignore_windows():
+    from capstone.factors.tree import gene_text, root_genes
+
+    genes = root_genes(parse("rank(ts_mean(close, 5) / volume) * signed_power(returns, 2)"))
+    # signed_power(returns, 2) has a constant leaf; bare fields are not genes.
+    assert genes == root_genes(parse("rank(ts_mean(close, 20) / volume)"))
+    assert "(signed_power F:returns C)" not in genes and "F:close" not in genes
+    assert root_genes(parse("ts_mean(close, 5)")) == root_genes(parse("ts_mean(close, 63)"))
+    assert gene_text(parse("ts_corr(close, volume, 21)")) == "ts_corr(close, volume, t)"
+
+
+def test_frequent_genes_are_closed_counted_once_per_factor_and_capped_at_k():
+    from capstone.factors.tree import frequent_root_genes
+
+    trees = [
+        parse("rank(close / shift(close, 5))"),
+        parse("rank(close / shift(close, 20))"),
+        parse("close / shift(close, 10) * volume"),
+        parse("ts_std(returns, 21) + ts_std(returns, 63)"),
+    ]
+    found = frequent_root_genes(trees, k=3)
+    texts = [text for _, _, text in found]
+    # shift(close, t) is in three factors, but so is its parent close / shift(close, t):
+    # only the larger, closed structure is named.
+    assert texts[0] == "(close / shift(close, t))" and found[0][1] == 0.75
+    assert "shift(close, t)" not in texts
+    assert texts[1] == "rank((close / shift(close, t)))"
+    # ts_std(returns, t) twice in one factor still counts once, and once is not frequent.
+    assert all("ts_std" not in t for t in texts)
+    assert len(frequent_root_genes(trees, k=1)) == 1
+    assert frequent_root_genes([], k=3) == []

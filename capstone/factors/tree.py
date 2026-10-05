@@ -425,3 +425,80 @@ def zoo_similarity(node: Node, zoo: Sequence[tuple[str, Node]]) -> tuple[int, fl
         if raw > best_raw:
             best_raw, best_name = raw, name
     return best_raw, best_raw / node_count(node), best_name
+
+
+# ---------------------------------------------------------------------------
+# Frequent subtree avoidance (Navigating the Alpha Jungle, #45: Sec. 3, Eq. 11-12)
+
+
+def _children(node: Node) -> list[Node]:
+    if isinstance(node, Unary):
+        return [node.operand]
+    if isinstance(node, BinOp):
+        return [node.left, node.right]
+    if isinstance(node, Call):
+        return [node.arg] if node.arg2 is None else [node.arg, node.arg2]
+    return []
+
+
+def _is_root_gene(node: Node) -> bool:
+    """A subtree whose leaves are all raw fields, with at least one operator.
+
+    The paper's root gene: "a subtree ... whose leaves are exclusively raw input
+    features". A bare field is left out: every factor reads some field, so a
+    field alone can't be a structure worth avoiding.
+    """
+    if isinstance(node, Field_ | Const):
+        return False
+    leaves = [n for n in walk(node) if not _children(n)]
+    return all(isinstance(leaf, Field_) for leaf in leaves)
+
+
+def root_genes(node: Node) -> frozenset[str]:
+    """The tree's root genes, abstracted: windows dropped, as in Abs(Ma(vwap, 20)) = Ma(vwap, t)."""
+    return frozenset(structural_key(n) for n in walk(node) if _is_root_gene(n))
+
+
+def gene_text(node: Node) -> str:
+    """A root gene as the model reads it: the expression with every window written t."""
+    return re.sub(r", \d+\)", ", t)", unparse(node))
+
+
+def frequent_root_genes(
+    trees: Sequence[Node], k: int = 3, *, min_count: int = 2
+) -> list[tuple[str, float, str]]:
+    """The `k` most frequent closed root genes across `trees`: (key, support, text).
+
+    Support is the share of trees containing the gene (Eq. 11). A gene is
+    closed when no immediate supertree that is itself a root gene has the same
+    support, so the largest shared structure is named rather than each piece
+    of it. Genes in fewer than `min_count` trees are not frequent. Ties are
+    broken by the larger gene, then by key, so the result is deterministic.
+    """
+    counts: dict[str, int] = {}
+    texts: dict[str, str] = {}
+    sizes: dict[str, int] = {}
+    parents: dict[str, set[str]] = {}
+    for tree in trees:
+        seen: set[str] = set()
+        for node in walk(tree):
+            if not _is_root_gene(node):
+                continue
+            key = structural_key(node)
+            seen.add(key)
+            texts.setdefault(key, gene_text(node))
+            sizes[key] = node_count(node)
+            for child in _children(node):
+                if _is_root_gene(child):
+                    parents.setdefault(structural_key(child), set()).add(key)
+        for key in seen:
+            counts[key] = counts.get(key, 0) + 1
+    if not trees:
+        return []
+    closed = [
+        key
+        for key, count in counts.items()
+        if count >= min_count and all(counts[p] != count for p in parents.get(key, ()))
+    ]
+    closed.sort(key=lambda g: (-counts[g], -sizes[g], g))
+    return [(g, counts[g] / len(trees), texts[g]) for g in closed[:k]]
