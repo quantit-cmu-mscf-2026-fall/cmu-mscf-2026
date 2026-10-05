@@ -69,17 +69,19 @@ listing file, `crsp.dsp500list` the S&P 500 membership spells.
 
 > **Most of the time you don't need this.** The team keeps a shared pull
 > (S&P 500 members 1990–2025 plus Compustat) that loads without a WRDS
-> connection: see `docs/shared_data.md`. Also note that `wrds_loader` reads the
-> legacy `crsp.dsf` table, which ends at 2024-12-31; newer data is only in the
-> CIZ tables (`crsp.dsf_v2`), which the shared pull uses.
+> connection: see `docs/shared_data.md`. For a pull of your own, `wrds_loader`
+> reads the CIZ tables (`crsp.dsf_v2`, through 2025-12-31) by default; pass
+> `ciz=False` for the legacy `crsp.dsf`, which ends at 2024-12-31. The delisting
+> return comes back as `dlret` on the last trading day: compound it with that
+> day's `ret`.
 
 ```python
 from capstone import wrds_loader
 
-conn = wrds_loader.connect("YOUR_WRDS_ID")
+conn = wrds_loader.connect()   # username from your pgpass file or $WRDS_USERNAME
 
 daily = wrds_loader.cached_crsp_daily(
-    conn, "2015-01-01", "2025-12-31", name="us_2015_2025"
+    conn, "2015-01-01", "2025-12-31", name="sp500_2015_2025", sp500_only=True
 )
 prices = wrds_loader.to_price_panel(daily)   # date x ticker
 
