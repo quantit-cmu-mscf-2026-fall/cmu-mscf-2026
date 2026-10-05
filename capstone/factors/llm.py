@@ -21,8 +21,9 @@ from pathlib import Path
 from capstone.factors.tree import (
     BINARY_PARAMETER_FUNCS,
     BINARY_WINDOW_FUNCS,
-    FIELDS,
     FUNCS,
+    MARKET_FIELDS,
+    STOCK_FIELDS,
     WINDOW_MAX,
     WINDOW_MIN,
 )
@@ -36,7 +37,7 @@ class FactorConfig:
 
     model: str = "claude-opus-5"
     max_tokens: int = 16000
-    prompt_version: str = "v4"
+    prompt_version: str = "v5"
     hypotheses_per_paper: int = 3
     factors_per_hypothesis: int = 4
     max_repairs: int = 2
@@ -117,12 +118,14 @@ def grammar_help() -> str:
     windowed = sorted(name for name, takes in FUNCS.items() if takes)
     plain = sorted(name for name, takes in FUNCS.items() if not takes)
     return (
-        f"Fields: {', '.join(FIELDS)}. Operators: + - * / and unary minus. "
+        f"Fields: {', '.join(STOCK_FIELDS)} (per stock), and {', '.join(MARKET_FIELDS)} "
+        "(the value-weighted market return, the same for every stock on a date; market "
+        "volatility is ts_std(mkt_return, n)). Operators: + - * / and unary minus. "
         f"f(x, window): {', '.join(windowed)}. "
         f"f(x, y, window): {', '.join(sorted(BINARY_WINDOW_FUNCS))}. "
         f"f(x, exponent): {', '.join(sorted(BINARY_PARAMETER_FUNCS))}. "
         f"f(x): {', '.join(plain)}. "
         f"Windows are integer literals in [{WINDOW_MIN}, {WINDOW_MAX}]; exponents are "
         "numeric literals. No other identifiers exist, and every expression must use "
-        "at least one field."
+        "at least one per-stock field."
     )

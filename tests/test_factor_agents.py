@@ -260,3 +260,9 @@ def test_call_tool_counts_calls_and_tokens():
     for _ in range(2):
         call_tool(client, CONFIG, system="s", user="u", tool={"name": "t"}, usage=usage)
     assert usage == {"calls": 2, "input_tokens": 2400, "output_tokens": 600}
+
+
+def test_grammar_help_explains_the_market_field():
+    help_text = grammar_help()
+    assert "mkt_return" in help_text and "value-weighted market return" in help_text
+    assert "per-stock field" in help_text

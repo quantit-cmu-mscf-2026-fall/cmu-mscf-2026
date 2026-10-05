@@ -141,7 +141,24 @@ def test_zoo_is_alpha101_in_ohlcv_plus_returns_spellings():
 def test_new_fields_parse_and_turnover_is_expressible():
     node = parse("rank(ts_mean(volume / shares, 21)) * -ts_sum(returns, 5) / log(cap)")
     assert features_used(node) == {"volume", "shares", "returns", "cap"}
-    assert set(FIELDS) == {*OHLCV, "returns", "shares", "cap"}
+    assert set(FIELDS) == {*OHLCV, "returns", "shares", "cap", "mkt_return"}
+
+
+def test_market_return_writes_beta_and_idiosyncratic_volatility():
+    # QUANTIT-82: Ang et al. (2006)'s idiosyncratic volatility, the residual of
+    # returns on the market, is now expressible without a new operator, and
+    # stays inside the proposer's node limit.
+    beta = "ts_cov(returns, mkt_return, 63) / ts_cov(mkt_return, mkt_return, 63)"
+    idio = parse(f"-ts_std(returns - {beta} * mkt_return, 21)")
+    assert features_used(idio) == {"returns", "mkt_return"}
+    assert node_count(idio) <= 30
+    assert "mkt_return" in features_used(parse("ts_std(mkt_return, 21) * rank(cap)"))
+
+
+def test_a_factor_from_market_fields_alone_is_rejected():
+    # Same value for every stock on a date: it cannot rank stocks.
+    with pytest.raises(ParseError, match="no stock field"):
+        parse("ts_std(mkt_return, 21)")
 
 
 def test_a_published_alpha_is_not_original_with_the_returns_field_either():
