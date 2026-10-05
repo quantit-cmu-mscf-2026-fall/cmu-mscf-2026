@@ -366,6 +366,16 @@ class TestTrackRecordAndPSR:
     def test_min_track_record_is_infinite_below_the_benchmark(self):
         assert min_track_record_length(0.5, benchmark=1.0) == float("inf")
 
+    def test_min_track_record_is_nan_when_the_variance_is_not_positive(self):
+        # 1 - skew*SR + (kurtosis-1)/4*SR^2 = 1 - 15 + 4.5 < 0 at SR = 3 per period.
+        sharpe = 3.0 * np.sqrt(252)
+        assert np.isnan(min_track_record_length(sharpe, skew=5.0))
+        assert np.isnan(probabilistic_sharpe_ratio(sharpe, 100, skew=5.0))
+        assert np.isnan(min_track_record_length(1.0, variance=0.0))
+
+    def test_min_track_record_is_nan_for_a_nan_sharpe(self):
+        assert np.isnan(min_track_record_length(float("nan")))
+
     def test_psr_at_min_track_record_is_the_confidence_level(self):
         n = min_track_record_length(1.5, benchmark=0.5, skew=-0.5, kurtosis=6.0)
         psr = probabilistic_sharpe_ratio(1.5, n, benchmark=0.5, skew=-0.5, kurtosis=6.0)
