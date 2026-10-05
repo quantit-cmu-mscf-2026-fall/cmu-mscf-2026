@@ -717,6 +717,22 @@ class TestCorrelationBreaksStorey:
 #     order of magnitude tighter than the error it has to detect.
 HAIRCUT_ATOL = 0.02
 
+# QUANTIT-52's ledger path needs `runlog.trial_count`, which arrives in its own
+# PR (#33) against `main` and is not in this stack. Skipping is deliberate:
+# vendoring a copy of the reader here would fork the thing the whole team
+# corrects against. These tests come back on their own once #33 lands.
+try:
+    from capstone.runlog import trial_count as _trial_count  # noqa: F401
+
+    HAS_LEDGER_READER = True
+except ImportError:  # pragma: no cover - depends on which PRs are merged
+    HAS_LEDGER_READER = False
+
+requires_ledger_reader = pytest.mark.skipif(
+    not HAS_LEDGER_READER,
+    reason="needs runlog.trial_count (#33), which is not in this stack yet",
+)
+
 # label, kwargs for haircut_sharpe, then the reference's N / p_raw / adjusted
 # Sharpes. `n_trials` is our ledger total; the reference's num_test = n_trials-1.
 HAIRCUT_REFERENCE = [
@@ -1007,6 +1023,7 @@ class TestHaircutTrialCountConvention:
         assert surviving == sorted(surviving, reverse=True)
         assert surviving[0] > surviving[-1]
 
+    @requires_ledger_reader
     def test_trial_count_is_read_from_the_ledger(self, tmp_path, monkeypatch):
         monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
         from capstone.runlog import log_run
@@ -1024,6 +1041,7 @@ class TestHaircutTrialCountConvention:
         assert from_ledger.attrs["num_test"] == 24
         pd.testing.assert_frame_equal(from_ledger, explicit)
 
+    @requires_ledger_reader
     def test_an_experiment_name_scopes_the_count(self, tmp_path, monkeypatch):
         monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
         from capstone.runlog import log_run
@@ -1039,6 +1057,7 @@ class TestHaircutTrialCountConvention:
         assert scoped.attrs["n_trials"] == 4
         assert scoped.attrs["num_test"] == 3
 
+    @requires_ledger_reader
     def test_an_empty_ledger_raises_instead_of_applying_no_haircut(self, tmp_path, monkeypatch):
         monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
 
