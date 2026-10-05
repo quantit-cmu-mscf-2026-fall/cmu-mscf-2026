@@ -112,8 +112,9 @@ defaults.
 
 ## Decisions the stages depend on
 
-Proposed 2026-09-29; holdout dates fixed 2026-10-05. These are fixed before any agent generates candidates;
-changing one later means re-running every candidate scored under the old one.
+Proposed 2026-09-29; holdout dates fixed 2026-10-05. These are fixed before any
+agent generates candidates; changing one later means re-running every candidate
+scored under the old one.
 
 **Holdout period.** Language models can reproduce market history from before
 their training cutoff, even when told not to (Glasserman & Lin 2023; Sarkar &
@@ -125,8 +126,23 @@ not against the model's memory, so there are two:
 - *Post-cutoff holdout:* all data after the cutoff, which grows with each new
   month. This is the final test.
 
-The exact dates depend on which model and version the agents run on; record
-them here once that is fixed.
+The agents run on Claude Opus 5 (`claude-opus-5`, a pinned snapshot; training
+cutoff May 2026; set in `config/factors.toml`). With CRSP data from 1990-01-02
+to 2025-12-31, the periods are (decided 2026-10-05):
+
+| Period | Dates | Who sees it |
+|---|---|---|
+| Search | 1990-01-02 to 2020-12-31 | Agents and stages 1-3 |
+| Pre-cutoff holdout | 2021-01-01 to 2025-12-31 | The final stage only, looked at once |
+| Post-cutoff holdout | 2026-06-01 onward | The final stage, once CRSP publishes it |
+
+Five years rather than three because at 95% confidence (normal returns) an
+annual Sharpe of 1.0 needs about 2.7 years to tell from zero, 0.75 about 4.8
+and 0.5 about 11: five years can confirm 0.75 and up, three only about 1 and
+up. There is no post-cutoff CRSP data yet, and when there is it will be months
+long, too short to test anything, so until it grows it serves as live
+monitoring alongside incubation, and the pre-cutoff holdout is the final test.
+Changing the agents' model means deciding these dates again.
 
 **Trading costs.** Candidates are scored net of costs from stage 1, with gross
 returns reported alongside. Most published anomalies earn close to nothing
