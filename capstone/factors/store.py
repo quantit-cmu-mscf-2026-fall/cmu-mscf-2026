@@ -125,6 +125,21 @@ CREATE TABLE IF NOT EXISTS moves (
   policy TEXT,
   created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS memory_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  parent_id TEXT NOT NULL,
+  child_id TEXT,
+  child_expression TEXT NOT NULL,
+  hypothesis_id TEXT,
+  context TEXT NOT NULL,
+  motif TEXT NOT NULL,
+  status TEXT NOT NULL,
+  quality REAL,
+  baseline REAL,
+  residual REAL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_memory_key ON memory_events(context, motif);
 CREATE INDEX IF NOT EXISTS ix_proposals_factor ON proposals(factor_id);
 CREATE INDEX IF NOT EXISTS ix_proposals_hypothesis ON proposals(hypothesis_id);
 CREATE INDEX IF NOT EXISTS ix_hypotheses_paper ON hypotheses(paper_key);
