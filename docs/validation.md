@@ -112,7 +112,7 @@ defaults.
 
 ## Decisions the stages depend on
 
-Proposed 2026-09-29. These are fixed before any agent generates candidates;
+Proposed 2026-09-29; holdout dates fixed 2026-10-05. These are fixed before any agent generates candidates;
 changing one later means re-running every candidate scored under the old one.
 
 **Holdout period.** Language models can reproduce market history from before
