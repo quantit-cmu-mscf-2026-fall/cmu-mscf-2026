@@ -743,3 +743,349 @@ def power(rejected: pd.Series, truth: pd.Series) -> float:
     if n_true == 0:
         return float("nan")
     return int((rejected & aligned_truth).sum()) / n_true
+
+
+# --------------------------------------------------------------------------- #
+# Haircut Sharpe: Harvey & Liu (2015) -- QUANTIT-51, QUANTIT-52
+#
+# This section follows the authors' own MATLAB reference implementation,
+# `Haircut_SR.m` and `sample_random_multests.m`
+# (https://people.duke.edu/~charvey/backtesting/), not a reading of the paper.
+# `scripts/haircut_reference.py` is a literal transcription of those two files
+# and is the oracle the tests compare this code against.
+#
+# IMPORTANT: Harvey & Liu's time conventions are NOT this repository's. They
+# convert every frequency to MONTHS and treat a daily year as 360 days; every
+# other method in this module annualises with `periods_per_year`, default 252.
+# Those conventions are confined to this section, reached only through
+# `haircut_sharpe`, and must not be propagated outward.
+# --------------------------------------------------------------------------- #
+
+# Harvey, Liu & Zhu (2014) parameters, verbatim from `Haircut_SR.m`:
+# rows are average correlation levels, columns [rho, m_tot, p_0, lambda].
+_HLZ_PARAMETERS = np.array(
+    [
+        [0.0, 1295, 3.9660 * 0.1, 5.4995 * 0.001],
+        [0.2, 1377, 4.4589 * 0.1, 5.5508 * 0.001],
+        [0.4, 1476, 4.8604 * 0.1, 5.5413 * 0.001],
+        [0.6, 1773, 5.9902 * 0.1, 5.5512 * 0.001],
+        [0.8, 3109, 8.3901 * 0.1, 5.5956 * 0.001],
+    ]
+)
+
+# The authors' `sm_fre` frequencies and their periods per year. 360, not 365 or
+# 252, is what `Haircut_SR.m` divides by for daily data.
+_HL_PERIODS_PER_YEAR = {
+    "daily": 360,
+    "weekly": 52,
+    "monthly": 12,
+    "quarterly": 4,
+    "annual": 1,
+}
+
+# `sample_random_multests.m`: the simulated trials are monthly returns with this
+# assumed volatility over this many periods.
+_HLZ_MONTHLY_VOL = 0.15 / np.sqrt(12)
+_HLZ_N_OBS = 240
+
+_HAIRCUT_METHODS = ("bonferroni", "holm", "bhy")
+
+
+def _hlz_parameters(avg_correlation: float) -> np.ndarray:
+    """`para_inter`: the HLZ row interpolated on the assumed average correlation.
+
+    Reproduces the authors' branch structure exactly, including the fact that
+    their `RHO >= 0.8` case reuses the `[0.6, 0.8)` formula and therefore
+    extrapolates (at 0.9 it gives `-0.5*row4 + 1.5*row5`), and that a RHO
+    outside `[0, 1)` silently falls back to the 0.2 row.
+    """
+    rho = float(avg_correlation)
+    if not 0.0 <= rho < 1.0:
+        return _HLZ_PARAMETERS[1]
+    index = min(int(rho / 0.2), 3)
+    weight = (rho - _HLZ_PARAMETERS[index, 0]) / 0.2
+    return (1.0 - weight) * _HLZ_PARAMETERS[index] + weight * _HLZ_PARAMETERS[index + 1]
+
+
+def _simulate_hlz_tstats(
+    n_other: int,
+    *,
+    rho: float,
+    p_0: float,
+    lambda_: float,
+    n_simulations: int,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """`sample_random_multests.m`: a panel of |t| ratios for `n_other` trials.
+
+    One row per repetition. A share `1 - p_0` of trials are given a non-zero
+    mean drawn from `Exponential(lambda_)`; all of them get an equicorrelated
+    normal shock.
+
+    The authors build the shock with `mvnrnd` on a full `m_tot x m_tot`
+    equicorrelation matrix and then use only its first M columns. An
+    equicorrelation matrix has the one-factor representation
+    `sqrt(rho) * common + sqrt(1 - rho) * own`, so drawing M columns that way is
+    distributionally identical to drawing `m_tot` and slicing, at a fraction of
+    the cost. `scripts/haircut_reference.py` keeps the literal `mvnrnd`, and
+    `TestHaircutReferenceComparison` checks the two agree.
+    """
+    scale = _HLZ_MONTHLY_VOL / np.sqrt(_HLZ_N_OBS)
+    common = rng.standard_normal((n_simulations, 1))
+    own = rng.standard_normal((n_simulations, n_other))
+    shock = (np.sqrt(rho) * common + np.sqrt(1.0 - rho) * own) * scale
+
+    is_real = rng.uniform(size=(n_simulations, n_other)) > p_0
+    means = rng.exponential(lambda_, size=(n_simulations, n_other))
+    return np.abs(is_real * means + shock) / scale
+
+
+def _hl_adjusted_pvalues(
+    pvalue: float, simulated: np.ndarray, family_size: int, harmonic: float
+) -> tuple[float, float]:
+    """Holm and BHY adjusted p-values for one observed p among simulated trials.
+
+    `simulated` is the panel of |t| ratios, one row per repetition. For each row
+    the observed p-value joins the row's p-values, the family of `family_size`
+    is adjusted, and the observed strategy's own adjusted value is read back out.
+    The authors take the MEDIAN across repetitions, which is what makes the
+    result stable without being any one draw.
+
+    Vectorised over repetitions. Holm's running maximum and BHY's running
+    minimum are the same recursions the reference transcription writes as loops.
+    """
+    p_simulated = 2.0 * stats.norm.sf(simulated)
+    n_reps = p_simulated.shape[0]
+    ordered = np.sort(np.column_stack([p_simulated, np.full(n_reps, pvalue)]), axis=1)
+    # Leftmost position of the observed p-value in each sorted row, matching the
+    # authors' `p_val_order == p_val` followed by taking the first match.
+    position = (p_simulated < pvalue).sum(axis=1)
+    rows = np.arange(n_reps)
+
+    ranks = np.arange(family_size)
+    holm = np.minimum(np.maximum.accumulate((family_size - ranks) * ordered, axis=1), 1.0)
+
+    # BHY: scale rank k by family_size * c(family_size) / k, then take a running
+    # minimum from the largest p-value down. The largest is left unscaled, as in
+    # the authors' `if kk == (M+1)` branch.
+    scaled = (family_size * harmonic / (ranks + 1.0)) * ordered
+    scaled[:, -1] = ordered[:, -1]
+    bhy = np.minimum.accumulate(scaled[:, ::-1], axis=1)[:, ::-1]
+
+    return float(np.median(holm[rows, position])), float(np.median(bhy[rows, position]))
+
+
+def haircut_sharpe(
+    sharpe: pd.Series | float,
+    n_obs: int,
+    *,
+    n_trials: int | None = None,
+    experiment: str | None = None,
+    frequency: str = "monthly",
+    annualized: bool = True,
+    autocorrelation: float = 0.0,
+    avg_correlation: float = 0.2,
+    n_simulations: int = 2000,
+    seed: int | None = 0,
+) -> pd.DataFrame:
+    """The Sharpe that survives the size of the search (Harvey & Liu 2015).
+
+    Turn the reported Sharpe into a p-value, adjust that p-value for every trial
+    the search ran, and read the adjusted p-value back out as a Sharpe. The
+    difference is the haircut. All three of the authors' adjustments are
+    reported, plus their average, because their program reports all four and
+    choosing between them after seeing the numbers is itself multiple testing.
+
+    A **graded score, not a gate** (`docs/validation/framework.md`, stage 4):
+    the stage-4 gate is the deflated Sharpe, and charging both charges the same
+    search twice.
+
+    **This follows the authors' reference code**, `Haircut_SR.m` and
+    `sample_random_multests.m`, which differs from a naive reading of the paper
+    in ways that matter:
+
+    - p-values are **two-sided**, from a **t distribution with N-1 degrees of
+      freedom** for the reported Sharpe and from a **normal** for the simulated
+      trials. There is no one-sided option: the authors do not offer one, and a
+      one-sided variant would not be comparable to any published figure.
+    - everything is converted to **monthly** units, and a daily year is **360
+      days**. This contradicts the `periods_per_year=252` convention every other
+      function here uses; it is deliberate, confined to this function, and must
+      not be copied outward. Pass `n_obs` in the units named by `frequency`.
+    - the trials that were run but are not reported are **simulated**, not
+      assumed away, from the Harvey, Liu & Zhu (2014) empirical p-value
+      distribution. Holm and BHY are computed on each simulated family and the
+      **median** adjusted p-value over `n_simulations` repetitions is taken, so
+      the result is stochastic. Fix `seed` to make it reproducible.
+
+    **The trial count, and the M / M+1 distinction.** `n_trials` is the ledger's
+    total, which *includes* the strategy being haircut. The authors' `num_test`
+    (their `M`) is the number of OTHER trials, so `num_test = n_trials - 1`. Get
+    this wrong by one and every adjusted p-value is wrong. The split is not
+    cosmetic, because the authors' own code is inconsistent about it:
+
+    - **Bonferroni** uses `min(num_test * p, 1)` -- `M`, not `M + 1`.
+    - **Holm and BHY** use a family of `num_test + 1 = n_trials`, the simulated
+      trials plus the reported one, and BHY's harmonic constant is
+      `sum(1/i)` over that same `n_trials`.
+
+    Both are reproduced as the authors wrote them. `.attrs` records `n_trials`
+    and `num_test` separately so the convention in force is never in doubt.
+
+    Leave `n_trials` as None and it comes from `runlog.trial_count(experiment)`.
+    `LookupError` is left to propagate: a haircut against no trials is no
+    haircut.
+
+    Args:
+        sharpe: reported Sharpe per candidate, indexed by candidate name; a bare
+            float is accepted and reported under the name "strategy". Annualised
+            unless `annualized=False`.
+        n_obs: observations behind each Sharpe, in the units of `frequency`.
+        n_trials: ledger total, *including* this strategy. None reads the ledger.
+        experiment: ledger experiment name to count; ignored if `n_trials` given.
+        frequency: "daily", "weekly", "monthly", "quarterly" or "annual".
+        annualized: whether `sharpe` is already annualised (the authors'
+            `ind_an`). False multiplies by sqrt(periods per year).
+        autocorrelation: first-order autocorrelation of the returns at
+            `frequency` (their `rho`). Non-zero applies their autocorrelation
+            correction to the annualised Sharpe before testing; it does nothing
+            at `frequency="annual"`, as in their code.
+        avg_correlation: assumed average correlation across trials (their
+            `RHO`), which selects the simulated p-value distribution. Only
+            `[0, 1)` is meaningful; outside it the authors fall back to 0.2.
+        n_simulations: repetitions of the simulated family (their `WW`).
+        seed: RNG seed for the simulation. None draws fresh entropy.
+
+    Returns:
+        DataFrame indexed by candidate, with `sharpe` as given,
+        `sharpe_annualized` after annualisation and any autocorrelation
+        correction, `pvalue`, and then `pvalue_*`, `sharpe_*` and `haircut_*`
+        for each of `bonferroni`, `holm`, `bhy` and `average`. `haircut` is the
+        fraction given up, `(sr - sr_adjusted) / sr`.
+
+        A candidate whose Sharpe is not positive gets NaN across the board: the
+        authors' `p_val = 2*(1 - tcdf(T, N-1))` uses `T`, not `|T|`, and exceeds
+        1 for `T < 0`, so their procedure is defined only for a positive
+        reported Sharpe.
+
+        `.attrs` carries `n_trials`, `num_test`, `n_monthly_obs`, `frequency`,
+        `n_simulations`, `seed` and `avg_correlation`.
+
+    Raises:
+        ValueError: unknown `frequency`; `n_obs` below 1; `n_trials` below 2
+            (the search must contain at least this strategy and one other);
+            `n_simulations` below 1; `autocorrelation` outside (-1, 1); or fewer
+            than 2 monthly observations after conversion, which leaves the t
+            distribution without a degree of freedom.
+        LookupError: from `runlog.trial_count` when the ledger has no match.
+    """
+    if frequency not in _HL_PERIODS_PER_YEAR:
+        raise ValueError(
+            f"unknown frequency {frequency!r}; options: {', '.join(_HL_PERIODS_PER_YEAR)}"
+        )
+    if n_obs < 1:
+        raise ValueError("n_obs must be at least 1")
+    if n_simulations < 1:
+        raise ValueError("n_simulations must be at least 1")
+    if not -1.0 < autocorrelation < 1.0:
+        raise ValueError("autocorrelation must be in (-1, 1)")
+
+    reported = pd.Series(sharpe, dtype=float)
+    if reported.index.equals(pd.RangeIndex(len(reported))) and len(reported) == 1:
+        reported.index = pd.Index(["strategy"])
+
+    if n_trials is None:
+        # Imported here so `evaluate` stays importable where the ledger is not
+        # configured; the ledger is consulted only when the count is not given.
+        from capstone.runlog import trial_count
+
+        n_trials = trial_count(experiment)
+    if n_trials < 2:
+        raise ValueError(
+            f"n_trials ({n_trials}) must be at least 2: it is the ledger's total "
+            "including this strategy, and the authors' num_test = n_trials - 1 "
+            "must leave at least one other trial"
+        )
+
+    num_test = int(n_trials) - 1  # the authors' M
+    family_size = int(n_trials)  # the authors' M + 1, for Holm and BHY
+    harmonic = float(np.sum(1.0 / np.arange(1, family_size + 1)))
+
+    periods = _HL_PERIODS_PER_YEAR[frequency]
+    n_monthly = int(np.floor(n_obs * 12 / periods))
+    if n_monthly < 2:
+        raise ValueError(
+            f"{n_obs} {frequency} observations is {n_monthly} months; the "
+            "authors' t test needs at least 2"
+        )
+
+    annualised = reported if annualized else reported * np.sqrt(periods)
+    if autocorrelation and frequency != "annual":
+        rho = autocorrelation
+        annualised = (
+            annualised
+            * (
+                1.0
+                + (2.0 * rho / (1.0 - rho))
+                * (1.0 - ((1.0 - rho**periods) / (periods * (1.0 - rho))))
+            )
+            ** -0.5
+        )
+
+    statistic = annualised / np.sqrt(12) * np.sqrt(n_monthly)
+    pvalue = pd.Series(2.0 * (1.0 - stats.t.cdf(statistic, n_monthly - 1)), index=reported.index)
+    testable = annualised.notna() & (annualised > 0) & pvalue.le(1.0)
+
+    rng = np.random.default_rng(seed)
+    params = _hlz_parameters(avg_correlation)
+    simulated = _simulate_hlz_tstats(
+        num_test,
+        rho=float(params[0]),
+        p_0=float(params[2]),
+        lambda_=float(params[3]),
+        n_simulations=n_simulations,
+        rng=rng,
+    )
+
+    columns = {name: pd.Series(np.nan, index=reported.index) for name in _HAIRCUT_METHODS}
+    for name in reported.index[testable]:
+        p = float(pvalue[name])
+        holm_p, bhy_p = _hl_adjusted_pvalues(p, simulated, family_size, harmonic)
+        columns["bonferroni"][name] = min(num_test * p, 1.0)
+        columns["holm"][name] = holm_p
+        columns["bhy"][name] = bhy_p
+
+    adjusted = pd.DataFrame(columns)
+    adjusted["average"] = adjusted.mean(axis=1)
+
+    out = pd.DataFrame(
+        {
+            "sharpe": reported,
+            "sharpe_annualized": annualised.where(testable),
+            "pvalue": pvalue.where(testable),
+        }
+    )
+    for name in (*_HAIRCUT_METHODS, "average"):
+        # Every adjusted p-value is clipped at 1, so the inverse is never
+        # negative and the haircut never exceeds 100%.
+        survived = (
+            stats.t.ppf(1.0 - adjusted[name] / 2.0, n_monthly - 1)
+            / np.sqrt(n_monthly)
+            * np.sqrt(12)
+        )
+        out[f"pvalue_{name}"] = adjusted[name]
+        out[f"sharpe_{name}"] = survived
+        out[f"haircut_{name}"] = 1.0 - survived / out["sharpe_annualized"]
+
+    out.attrs.update(
+        {
+            "n_trials": int(n_trials),
+            "num_test": num_test,
+            "n_monthly_obs": n_monthly,
+            "frequency": frequency,
+            "n_simulations": int(n_simulations),
+            "seed": seed,
+            "avg_correlation": float(avg_correlation),
+        }
+    )
+    return out.sort_values("pvalue")

@@ -115,9 +115,62 @@ defaults.
 | `cv` | purged k-fold with embargo (from the Alpha-GPT work), walk-forward | planned |
 | `pbo` | CSCV / probability of backtest overfitting | planned |
 | `spanning` | incremental value over known factors and accepted signals | planned |
-| `evaluate` | Harvey–Liu haircut Sharpe | planned |
+| `evaluate` | `haircut_sharpe`: Harvey–Liu haircut (their reference code), ledger trial count | done |
 | `gate` | staged, pre-registered scorecard; trial count from the ledger; holdout looked at once | planned |
 
 Already in `evaluate`: `benjamini_hochberg`, `bonferroni`,
 `deflated_sharpe_ratio`, `expected_max_sharpe`, and `false_discovery_rate` /
 `power` for scoring a selection rule against known truth.
+
+## Reading the haircut Sharpe
+
+Notes from QUANTIT-51 and QUANTIT-52 (Pin-Hua).
+
+**The haircut Sharpe is a graded score, not a gate** (stage 4 in
+`validation/framework.md`; the gate there is the deflated Sharpe). The trial
+count comes from `runlog.trial_count()`, and an empty ledger raises rather than
+quietly applying no haircut.
+
+`haircut_sharpe` follows **Harvey & Liu's own reference code**
+([`Haircut_SR.m`, `sample_random_multests.m`](https://people.duke.edu/~charvey/backtesting/)),
+not a reading of the paper, because the two differ in ways that change the
+number. `scripts/haircut_reference.py` is a literal transcription of those two
+files and is the oracle the tests compare against.
+
+What the authors do, and what it costs us:
+
+- **Two-sided p-values on a t distribution** with N−1 degrees of freedom for the
+  reported Sharpe, and on a *normal* for the simulated trials. There is no
+  one-sided option, so the haircut is the one place in this module that does not
+  screen on `pvalue_greater`.
+- **Everything is converted to months, and a daily year is 360 days.** This
+  contradicts the `periods_per_year=252` convention every other function here
+  uses. It is confined to `haircut_sharpe`, documented there, and a test pins
+  `sharpe_pvalue` at 252 so nobody "tidies up" the inconsistency in the wrong
+  direction. Pass `n_obs` in the units named by `frequency`.
+- **The unreported trials are simulated, not assumed away**, from the Harvey,
+  Liu & Zhu (2014) empirical p-value distribution selected by
+  `avg_correlation`. Holm and BHY are computed on each simulated family and the
+  **median** over `n_simulations` repetitions is taken, so the result is
+  stochastic — fix `seed` to reproduce it. Measured spread across 30 seeds: sd
+  ≤ 0.0003 (Holm), ≤ 0.0045 (BHY) in Sharpe units.
+- **The trial count is split, and the split is not cosmetic.** `n_trials` is the
+  ledger's total, *including* the strategy being haircut. The authors' `num_test`
+  (their `M`) is the number of **other** trials, so `num_test = n_trials - 1`.
+  Their own code is inconsistent about which to use: **Bonferroni multiplies by
+  `num_test`**, while **Holm and BHY use a family of `num_test + 1 = n_trials`**,
+  and BHY's harmonic constant runs over that same `n_trials`. Both are
+  reproduced as written; `.attrs` records `n_trials` and `num_test` separately so
+  the convention in force is never in doubt.
+
+Reference agreement (ours vs. the transcription, seed 0, 2,000 repetitions):
+closed-form quantities — the monthly conversion, the p-value and everything
+Bonferroni — agree to floating-point precision; Holm and BHY agree to within
+0.006 in Sharpe units, against a test tolerance of 0.02.
+
+One result worth keeping in mind: **BHY is *less* strict than Bonferroni here**,
+which is the opposite of what the same two procedures do when the unreported
+trials are assumed away instead of simulated. An earlier draft of this function
+padded the family with NaN p-values, which put the reported strategy at rank 1
+and made BHY the *strictest* of the three — out by 12 percentage points of
+haircut on the same inputs. Simulating the family is what fixes it.

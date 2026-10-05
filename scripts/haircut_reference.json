@@ -1,0 +1,42 @@
+{
+  "WW": 2000,
+  "seed": 0,
+  "cases": [
+    {
+      "label": "monthly, 240 obs, SR 1.0, M=100",
+      "frequency": "monthly", "num_obs": 240, "sharpe": 1.0,
+      "annualized": true, "autocorr": false, "num_test": 100,
+      "avg_correlation": 0.2
+    },
+    {
+      "label": "monthly, 240 obs, SR 1.0, M=315",
+      "frequency": "monthly", "num_obs": 240, "sharpe": 1.0,
+      "annualized": true, "autocorr": false, "num_test": 315,
+      "avg_correlation": 0.2
+    },
+    {
+      "label": "monthly, 120 obs, SR 0.75, M=315",
+      "frequency": "monthly", "num_obs": 120, "sharpe": 0.75,
+      "annualized": true, "autocorr": false, "num_test": 315,
+      "avg_correlation": 0.2
+    },
+    {
+      "label": "daily, 2520 obs, SR 1.5, M=200",
+      "frequency": "daily", "num_obs": 2520, "sharpe": 1.5,
+      "annualized": true, "autocorr": false, "num_test": 200,
+      "avg_correlation": 0.4
+    },
+    {
+      "label": "monthly, 240 obs, SR 1.0, M=100, rho=0.1",
+      "frequency": "monthly", "num_obs": 240, "sharpe": 1.0,
+      "annualized": true, "autocorr": true, "rho": 0.1,
+      "num_test": 100, "avg_correlation": 0.2
+    },
+    {
+      "label": "monthly, 240 obs, SR 0.3, M=315",
+      "frequency": "monthly", "num_obs": 240, "sharpe": 0.3,
+      "annualized": true, "autocorr": false, "num_test": 315,
+      "avg_correlation": 0.2
+    }
+  ]
+}
