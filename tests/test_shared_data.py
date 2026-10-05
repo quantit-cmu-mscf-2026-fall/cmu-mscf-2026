@@ -203,6 +203,30 @@ def test_stale_lock_from_crashed_process_is_cleared(env, monkeypatch):
     assert set(sd.sync().values()) == {"copied"}
 
 
+def test_stale_lock_replaced_by_another_waiter_is_left_alone(tmp_path, monkeypatch):
+    # Lauren's #26 race: two waiters see the same stale lock; the first removes
+    # it and takes a fresh one before the second acts. The second must not
+    # remove the fresh lock.
+    lock = tmp_path / ".sync.lock"
+    lock.write_text("1")
+    old = time.time() - 600
+    os.utime(lock, (old, old))
+    real_stat = Path.stat
+    calls = []
+
+    def stat_then_replace(self, *args, **kwargs):
+        result = real_stat(self, *args, **kwargs)
+        if self == lock and not calls:
+            calls.append(1)
+            lock.unlink()  # the other waiter clears the stale lock ...
+            lock.write_text("2")  # ... and takes a fresh one
+        return result
+
+    monkeypatch.setattr(Path, "stat", stat_then_replace)
+    assert sd._remove_if_stale(lock) is False
+    assert lock.read_text() == "2"
+
+
 def test_live_lock_is_respected_then_times_out(env, monkeypatch):
     """A recently refreshed lock belongs to a live sync: wait, never steal it."""
     _, cache = env
@@ -323,6 +347,15 @@ def test_available_from_is_strictly_after_report_and_falls_back():
     assert got.iloc[0] == pd.Timestamp("2020-04-27")  # Friday report -> Monday
     assert got.iloc[1] == pd.Timestamp("2020-06-30")  # 2020-06-29 + 1 trading day
     assert pd.isna(got.iloc[2]) and pd.isna(got.iloc[3])  # past calendar / no dates
+
+
+def test_available_from_annual_data_has_no_report_date():
+    # comp_funda has no rdq column (Lauren's #26 review): every year falls back.
+    days = pd.bdate_range("2020-01-01", "2020-12-31")
+    fund = pd.DataFrame({"datadate": pd.to_datetime(["2019-12-31", "2020-06-30"])})
+    got = sd.available_from(fund, days, report_col=None)
+    assert got.iloc[0] == pd.Timestamp("2020-03-31")  # 2020-03-30 + 1 trading day
+    assert got.iloc[1] == pd.Timestamp("2020-09-29")  # 2020-09-28 + 1 trading day
 
 
 def test_primary_links_filters_and_fills_open_end():
