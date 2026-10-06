@@ -76,13 +76,16 @@ def _backtest_components(
     gross_returns = (positions * returns).sum(axis=1)
     costs = cost_bps / 10000.0 * turnover
     net_returns = gross_returns - costs
-    # A date with nothing held and nothing traded is not a period with a return:
-    # NaN, rather than a zero that `summarize` would count as a flat day (#25).
-    # That covers the first date and any warm-up or gap where the signal is
-    # empty. A date that only closes the book is kept, since its cost is real.
-    held = positions.fillna(0.0).abs().sum(axis=1) > 0
-    idle = ~held & (turnover == 0)
-    idle.iloc[:1] = True
+    # A date whose position comes from no signal at all, and that trades
+    # nothing, is not a period with a return: NaN, rather than a zero that
+    # `summarize` would count as a flat day (#25). That covers the first date
+    # and any warm-up or gap where the signal row is entirely NaN. Idleness is
+    # decided from the signal, not the weights: a real signal with zero net
+    # weight (e.g. a timing overlay gone flat) is a genuine 0.0 day. The shift
+    # matches `positions`: the date-t position comes from the date t-1 signal.
+    # A date that only closes the book is kept, since its cost is real.
+    no_signal = signal.isna().all(axis=1).shift(1, fill_value=True)
+    idle = no_signal & (turnover == 0)
     net_returns[idle] = np.nan
     turnover[idle] = np.nan
     return net_returns, turnover
@@ -109,9 +112,10 @@ def run_backtest(
     Returns:
         Per-period strategy return series, net of costs. Positions are
         `to_weights(signal).shift(1)`, so the first observation is always
-        NaN (no prior signal to trade on). So is every date with no position
-        and no trade, such as a lookback's warm-up; a date that only closes
-        the book carries its cost.
+        NaN (no prior signal to trade on). So is every date whose prior
+        signal row is entirely NaN and that trades nothing, such as a
+        lookback's warm-up; a date that only closes the book carries its
+        cost. A real signal with zero net weight is a 0.0 day, not NaN.
     """
     net_returns, _turnover = _backtest_components(
         signal, returns, cost_bps=cost_bps, demean=demean, gross=gross

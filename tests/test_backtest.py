@@ -121,6 +121,20 @@ def test_closing_the_book_keeps_its_cost():
     assert strategy.iloc[42:].isna().all()
 
 
+def test_flat_signal_days_are_zero_not_nan():
+    # #25: a day with a real signal but zero net weight is a flat day, 0.0, not
+    # a missing one. A row equal across assets demeans to an empty book;
+    # dropping those days would inflate a timing overlay's Sharpe.
+    signal = _random_panel(n_dates=30, n_assets=5, seed=4)
+    returns = _random_panel(n_dates=30, n_assets=5, seed=5) * 0.01
+    signal.iloc[10:15] = 1.0  # five equal rows: real signal, zero weight
+    strategy = run_backtest(signal, returns, cost_bps=10.0)
+    assert np.isnan(strategy.iloc[0])
+    assert not strategy.iloc[1:].isna().any()
+    assert strategy.iloc[11] < 0  # closing the book is charged
+    assert (strategy.iloc[12:16] == 0.0).all()
+
+
 def test_summarize_short_series_raises():
     returns = pd.Series(np.random.default_rng(0).standard_normal(30) * 0.01)
     with pytest.raises(ValueError):
