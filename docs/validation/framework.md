@@ -61,7 +61,7 @@ Known weaknesses are measured ones, from the PRs cited.
 | Walk-forward (`cv`, planned) | Using the future to refit | candidate | Mimics live refitting | Fewer test dates than k-fold | Construction | all |
 | Net-of-cost returns (#43) | Untradable signals | candidate | Most anomalies vanish after costs | Cost model is an estimate | Construction | all |
 | Point-in-time data, delisting returns (#43) | Survivorship and look-ahead in data | data | No method below can fix this | Needs the right data source | Construction | all |
-| Holdout 2021–2025, looked at once (#43) | Reusing the final test | data | Five years can confirm an annual Sharpe of about 0.75 | Predates the agents' model cutoff, so a pass is not established against memorisation | Construction | 4 |
+| Holdout 2021–2025, looked at once (#43) | Reusing the final test; search overfitting of any kind | data | Independent of the search, so it guards the end-to-end FDR however hard the agents searched | The pipeline's real bottleneck: five years confirm a true Sharpe of 1.0 only about two-thirds to three-quarters of the time, and 0.5 almost never. Predates the agents' model cutoff, so a pass is not established against memorisation | Construction | 4 |
 | HAC Sharpe test, one-sided (`sharpe_test`, #29) | One series being luck | candidate | Allows for autocorrelation and fat tails | Slightly liberal in small samples (5.5–8% at a nominal 5% on AR(1) nulls) | Input to gates | 1, 2 |
 | BH adjusted p (`bh_adjusted`, #32) | Luck across many candidates | candidate | Most power of the FDR controls | Guarantee needs positive dependence, i.e. one-sided tests | **Gate** | 1 |
 | BY adjusted p (`by_adjusted`, #32) | Same | candidate | Valid under any dependence | Costs power; never failed in our simulations where BH held | Graded score | 1 |
@@ -76,7 +76,7 @@ Known weaknesses are measured ones, from the PRs cited.
 | Average correlation, implied independent trials (#29) | Overcounting correlated trials | batch | Explains why a correction is strict | Must not replace the ledger count in a decision | Batch diagnostic | all |
 | Search-adjusted FDR estimate (below) | Hidden specification search | batch | Uses what we can see: the whole search | Depends on the search being fully logged | Batch diagnostic | 1 |
 | Spanning alpha (`spanning`, planned) | Known factor in disguise; copy of a held signal | candidate | The novelty test | Needs the comparison set (#43) | **Gate** | 3 |
-| Deflated Sharpe (#29) | Best of N trials being luck | candidate | Uses the ledger count and the spread of trial Sharpes | As a per-candidate gate over 1,000 hypotheses with the searched trial count it finds 2–11% of real signals (#51), so only for the few that reach stage 4 | **Gate** (proposed; open) | 4 |
+| Deflated Sharpe (#29) | Best of N trials being luck | candidate | Uses the ledger count and the spread of trial Sharpes | Answers "is the best of N real?", not "is each survivor real?". As the stage-4 gate it lost to BH across survivors in every calibration run, and charging the searched count cut power to 0.08 | Graded score | 4 |
 | Haircut Sharpe (`haircut_sharpe`, #65) | Same | candidate | Readable as "the Sharpe after the search"; follows the authors' code | Same question as the deflated Sharpe | Graded score | 4 |
 | Reality Check, Romano–Wolf, SPA (planned) | Best of many correlated candidates | set | Keeps correlation by resampling | Not built yet; same question as the deflated Sharpe | Alternative stage-4 gate | 4 |
 
@@ -89,33 +89,35 @@ safe.
 | Stage | Data | Gate | Graded scores reported | Batch diagnostics |
 |---|---|---|---|---|
 | 1. Screen | Search period, 1990–2020 (#43) | BH ≤ q₁ across hypothesis families, on each family's search-adjusted p-value (bootstrap max) | BY, Holm, `lfdr`, raw p | Search-adjusted FDR, average correlation |
-| 2. Robustness | Not yet decided: see "Stage 2's fresh data" below | One-sided HAC p ≤ α₂ on that data, for stage-1 survivors only | PSR, lag / cost / sub-period sensitivity | PBO of the search |
+| 2. Robustness | Search period | — (no gate; see "Stage 2" below) | PSR, lag / cost / sub-period sensitivity | PBO of the search |
 | 3. Incremental value | Same period as stage 2, monthly returns | Spanning alpha p ≤ α₃ | Factor loadings | — |
-| 4. Final decision | Holdout, 2021–2025, looked at once | Deflated Sharpe ≥ d₄ with the full searched trial count (proposed; open) | Haircut Sharpe, Holm, MinTRL | — |
+| 4. Final decision | Holdout, 2021–2025, looked at once | BH ≤ q₄ across the survivors' one-sided holdout p-values | Deflated Sharpe, haircut Sharpe, Holm, MinTRL | — |
 | 5. Incubation | Live or paper | — | Realised vs. expected Sharpe | — |
 
-Stage 2 tests only the few stage-1 survivors on new data, so its family is small
-and its threshold can be modest. The multiple-testing penalty for the full search is
-charged twice on purpose: loosely at stage 1 (over the families screened) and
-strictly at stage 4 (over the ledger's full count). It is not charged at every stage.
+The search is paid for once, at stage 1, where each family's p-value is
+adjusted for everything it tried and BH runs across families. Stage 4 charges
+only for the candidates taken to the holdout: it is independent data, so the
+search no longer competes there (López de Prado & Fabozzi 2026 make the same
+point about independent validation data). Charging the full searched count
+again at stage 4 is the double penalty this page warns against; in calibration
+it cut power from about 0.47 to 0.08 (#68). Stage 4's level can be loose
+because the stages multiply: stage 1 already removes about 98.5% of the noise,
+and the target is the end-to-end FDR.
 
-### Stage 2's fresh data
+### Stage 2
 
-#43 gives agents and stages 1–3 the whole search period, 1990–2020. Stage 2
-is only meaningful on dates the search never saw, and there are none inside
-that period once the agents have used all of it. Two ways out, for the team to
-choose:
+#43 gives agents and stages 1–3 the whole search period, 1990–2020, so stage 2
+has no unseen dates to confirm on. Calibration compared splitting off the
+last seven years for a stage-2 confirmation against giving stage 1 all 31
+years and letting the holdout confirm. Not splitting found more real signals
+in both runs (mean power 0.54 vs 0.47, and 0.66 vs 0.59) at the same FDR
+target. The holdout already guards the end-to-end FDR, however hard the agents
+searched, and splitting costs stage 1 seven years.
 
-- **Split the search period:** agents and stage 1 see 1990–2013; stage 2
-  confirms on 2014–2020, untouched until then. Simple, but the agents search
-  on seven fewer years.
-- **Walk-forward inside it:** stage 2 re-fits and scores each survivor on
-  rolling out-of-sample windows (`cv`, walk-forward, QUANTIT-45). Keeps all
-  the data for search, but only works for candidates with fitted parameters;
-  a fixed formula has nothing to re-fit, so its windows were still seen.
-
-Until this is decided, the calibration harness treats stage 2 as a separate
-period of configurable length.
+So stage 2 is not a gate. It reports graded robustness checks on the search
+period (sensitivity to costs, lags and sub-periods; PSR; the search's PBO) for
+a reader to weigh, and nothing is rejected there. Walk-forward (QUANTIT-45)
+belongs here too, for candidates with fitted parameters.
 
 ## Search-adjusted testing
 
@@ -189,7 +191,11 @@ already implies it.
 
 **Baseline first (decided, Q5):** until the funnel is calibrated and shown to
 do better, the decision rule is the baseline: **BH at 10% on each family's
-search-adjusted p-value** (#51). The funnel's stage thresholds are then
+search-adjusted p-value**, using the bootstrap (#67) rather than the HAC-based
+formula (#51). The baseline has no holdout behind it, so its FDR rests
+entirely on those p-values, and the HAC tail is too optimistic under fat tails
+and volatility clustering: with the formula it overshot the target in
+calibration (see "Results"). The funnel's stage thresholds are then
 calibrated on simulated candidates to the same 10% across the whole 0–5%
 base-rate range, registered here before any real data is scored, and the
 funnel replaces the baseline only once it beats it.
@@ -199,6 +205,50 @@ naive stack (every method as a gate on all the data): end-to-end FDR, power,
 and expected true discoveries per incubation slot, by stage where there are
 stages. Running the whole funnel, not each method alone, is the point: it is
 how the cost of stacking becomes visible.
+
+### Results (2026-10-06; `scripts/calibrate_validation.py`, #68)
+
+Simulated agent output: 200 hypotheses × 10 near-copy variants (within-family
+correlation 0.9), cross-candidate correlation 0.1, AR(1) 0.3, t₅ tails, GARCH
+(0.05, 0.9); 31 years of search, 5 of holdout; 0, 1, 2 or 5% of hypotheses
+real at annual Sharpe 0.5, 1.0 or 1.5. Three runs: a full sweep (seeds 0–29),
+a looser sweep (100–119), and a confirmation of the best few sets (200–259).
+All are logged to the ledger as `validation-calibration`, tag `synthetic`.
+
+**Registered funnel thresholds (proposed):** q₁ = 0.10 at stage 1, no stage-2
+gate, q₄ = 0.30 at stage 4.
+
+| Confirmation run, 60 seeds | Worst-setting FDR | Mean power | Power at Sharpe 0.5 / 1.0 / 1.5 |
+|---|---|---|---|
+| Funnel, q₄ = 0.30 (registered) | 0.068 | 0.63 | not broken out in this run |
+| Funnel, q₄ = 0.50 | 0.100 | 0.69 | 0.18–0.20 / 0.85–0.93 / 0.98–1.0 |
+| Baseline, BH 10% on the formula p-values | 0.13–0.16 in every setting | — | 0.24–0.29 / 0.94–0.98 / 1.0 |
+| Naive stack (every screen as a gate) | 0.00–0.01 | — | 0.03 / 0.63–0.73 / 0.98–1.0 |
+
+- **q₄ = 0.30, not 0.50.** False discoveries cluster: a shared market factor
+  makes many null candidates look good together, so most runs have none and
+  a few have 5–10. q₄ = 0.50 sits exactly on the target; 0.30 leaves margin
+  for the clustering at a cost of about 0.06 in power.
+- **q₁ above 0.10 overshoots the target.** Every set with q₁ = 0.20 exceeded 10%.
+- **No stage-2 gate.** With stage 2 on the search period, α₂ = 0.5 and no gate
+  gave identical results: the check never binds, so it is a graded score.
+- **The baseline needs the bootstrap.** With the formula p-values it overshot
+  the target in every setting (60 seeds), with up to 12 false discoveries in
+  one run. With the bootstrap it came in under target: 0.067 when nothing is
+  real and 0.089 at 2% real (15 seeds; power 0.95).
+- **Funnel vs baseline (Q5): not decided by these runs.** The bootstrap
+  baseline matched the funnel's FDR with higher power in the one setting
+  checked (0.95 vs 0.85). The funnel's advantage is its holdout, which guards
+  against what the simulation doesn't model (agents iterating on the search
+  period); the simulation can't measure that. Team call.
+- **The holdout is the bottleneck.** At Sharpe 1.0 about 11% of real survivors
+  fail there, and at Sharpe 0.5 about 40%. No gate fixes that; only a longer
+  holdout or live incubation does.
+
+These thresholds belong to this simulated generator. Rerun the confirmation
+grid (`--params scripts/calibrate_validation_confirm.json`) with the real
+generator's measured correlation, autocorrelation and K before scoring real
+candidates.
 
 **Recalibrate when the generator changes:** a new agent, model, prompt set or
 search budget changes π₁ and K. The thresholds belong to a generator, not to
@@ -229,10 +279,10 @@ Recorded 2026-10-05 from the review of #50.
 |---|---|---|
 | Q1 | #37 and #31 both add BH and BY | Keep #31's functions. #37 is closed; it returns later as a thin wrapper over `evaluate`, bringing its Newey–West p-values from returns |
 | Q2 | Stage-1 gate when families exist | Carl's bootstrap max + BH. Local FDR (#54) is a graded score, and replaces the gate only if the harness shows a real power gain at our base rate |
-| Q3 | Stage-4 gate: deflated Sharpe, Romano–Wolf or SPA | **Open.** Proposed: the deflated Sharpe, since it exists; only one decides |
+| Q3 | Stage-4 gate: deflated Sharpe, Romano–Wolf or SPA | **Proposed from calibration:** BH across the survivors' holdout p-values; the deflated Sharpe becomes a graded score (#68) |
 | Q4 | Where the search is recorded | The factor store, for lineage; the ledger, for trials with computed performance; `shown_to_agent` added in #49 |
 | Q5 | Calibration target | A flat 10% end-to-end FDR; the baseline (BH on #51's family p-values) decides until the funnel beats it |
-| — | Where stage 2's fresh data comes from | **Open.** See "Stage 2's fresh data" |
+| — | Where stage 2's fresh data comes from | **Proposed from calibration:** no separate period; stage 2 reports graded robustness checks and the holdout confirms (#68) |
 | — | Stage 3's gate is the spanning alpha test | **To confirm** with its owner |
 
 ## What this page doesn't change
