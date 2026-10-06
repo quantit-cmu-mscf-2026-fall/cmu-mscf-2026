@@ -798,6 +798,50 @@ class TestLocalFdr:
         small, _ = _correlated_pvalues(50, 5, 0.0, seed=4)
         assert evidence_profile(small)["lfdr"].isna().all()
 
+    @staticmethod
+    def _planted_five(seed: int, extreme_p: float | None = None) -> pd.Series:
+        # 300 null z-scores, five planted at about +4; optionally the last
+        # candidate is replaced by an extreme one with p-value `extreme_p`.
+        z = np.random.default_rng(seed).standard_normal(300)
+        z[:5] += 4.0
+        pvalues = pd.Series(stats.norm.sf(z), index=[f"c{i:04d}" for i in range(300)])
+        if extreme_p is not None:
+            pvalues.iloc[-1] = extreme_p
+        return pvalues
+
+    def test_a_p_value_of_zero_does_not_break_the_profile(self):
+        # A leaky backtest can return p = 0 (z = 37 after clipping). It used to
+        # stretch the histogram bins until the fit failed, crashing the profile.
+        pvalues, _ = _correlated_pvalues(300, 0, 0.0, seed=5000)
+        pvalues.iloc[0] = 0.0
+        lfdr = evidence_profile(pvalues)["lfdr"]
+        assert lfdr.notna().all()
+        assert lfdr.loc[pvalues.index[0]] < 0.01
+
+    @pytest.mark.parametrize("extreme_p", [stats.norm.sf(15.0), 0.0], ids=["z=15", "p=0"])
+    def test_one_extreme_candidate_leaves_the_others_alone(self, extreme_p):
+        # One candidate at z = 15 used to raise the planted five's median lfdr
+        # from 0.03 to 0.23; one at p = 0 failed 98 of 100 fits. Now moving that
+        # one null candidate out to the extreme shifts the five by at most 0.03.
+        shifts = []
+        for seed in range(5000, 5020):
+            clean = local_fdr(self._planted_five(seed)).iloc[:5].median()
+            extreme = local_fdr(self._planted_five(seed, extreme_p)).iloc[:5].median()
+            shifts.append(extreme - clean)
+        assert np.median(np.abs(shifts)) < 0.01
+        assert np.max(np.abs(shifts)) < 0.05
+
+    def test_profile_leaves_lfdr_nan_when_there_is_no_null_to_fit(self):
+        # Two clusters and nothing in between: no concave centre, so no null.
+        rng = np.random.default_rng(0)
+        z = np.concatenate([rng.normal(-3, 0.3, 150), rng.normal(3, 0.3, 150)])
+        pvalues = pd.Series(stats.norm.sf(z))
+        with pytest.raises(ValueError, match="concave"):
+            local_fdr(pvalues)
+        with pytest.warns(RuntimeWarning, match="concave"):
+            profile = evidence_profile(pvalues)
+        assert profile["lfdr"].isna().all() and profile["bh"].notna().all()
+
     def test_on_real_sharpe_pvalues_end_to_end(self):
         # Correlated strategy returns -> one-sided HAC p-values -> lfdr <= 0.2.
         # Measured over 10 seeds: FDR 0.0, power 0.97.

@@ -96,6 +96,13 @@ at all". On independent candidates `lfdr` is the more conservative of the two
 shift 2.5). It is NaN below 200 candidates, where the null can't be estimated,
 which covers most single batches of 50-200.
 
+Strongly negative candidates suppress real positive ones: one density fit has
+to serve both tails, and five candidates at z = -4 cut the call rate of five
+planted at z = +4 from 0.80 to 0.19 (300 candidates). Keep one orientation per
+hypothesis rather than feeding a signal and its sign-flipped twin. A few extreme
+z-scores, such as a p-value of 0 from a leaky backtest, are kept out of the fit
+(though still scored), so they don't move anyone else's `lfdr`.
+
 Its role is a **graded score**, reported next to the gate, not a gate: the
 stage-1 gate stays BH-based unless calibration shows `lfdr` finds more real
 signals at our base rate. Feed it every candidate a search produced, or one

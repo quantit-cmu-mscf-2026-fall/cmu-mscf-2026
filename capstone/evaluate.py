@@ -12,6 +12,7 @@ this module, those tests are what tell you whether the guarantee still holds.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 
 import numpy as np
@@ -687,18 +688,20 @@ def evidence_profile(pvalues: pd.Series, *, lambda_: float | str = 0.5) -> pd.Da
     (the probability the candidate is null, against an empirical null; see
     `local_fdr`). Lower is stronger in every column; a candidate that is strong
     only in the right-hand columns is plausible, not established. `lfdr` is NaN
-    below `MIN_LOCAL_FDR_CANDIDATES` usable p-values, where the null can't be
-    estimated.
+    below `MIN_LOCAL_FDR_CANDIDATES` usable p-values, and NaN with a warning
+    when the histogram has no null to fit (`local_fdr` raises in both cases).
 
     Describing a candidate set is what this is for. A decision still takes one
     column and one threshold, fixed before the data is scored; choosing the
     column afterwards is itself a multiple-testing problem. Never decide on
     `q` for correlated candidates; see `storey_qvalues`.
     """
+    lfdr = pd.Series(np.nan, index=pvalues.index)
     if pvalues.notna().sum() >= MIN_LOCAL_FDR_CANDIDATES:
-        lfdr = local_fdr(pvalues)
-    else:
-        lfdr = pd.Series(np.nan, index=pvalues.index)
+        try:
+            lfdr = local_fdr(pvalues)
+        except ValueError as error:
+            warnings.warn(f"lfdr left NaN: {error}", RuntimeWarning, stacklevel=2)
     profile = pd.DataFrame(
         {
             "p": pvalues,
@@ -758,6 +761,9 @@ def power(rejected: pd.Series, truth: pd.Series) -> float:
 # ---------------------------------------------------------------------------
 
 MIN_LOCAL_FDR_CANDIDATES = 200
+# How far from the median, in robust widths (IQR / 1.349), a z-score can sit and
+# still enter the density fit; see `_fit_mixture`.
+_FIT_RANGE_SCALES = 8.0
 
 
 @dataclass(frozen=True)
@@ -784,12 +790,22 @@ def _fit_mixture(z: np.ndarray, degree: int) -> tuple[np.ndarray, np.ndarray, fl
     # in z estimates the density of all candidates, null and real together.
     import statsmodels.api as sm
 
+    #
+    # The bins span only the z-scores within `_FIT_RANGE_SCALES` robust widths of
+    # the median. One extreme z-score (a p-value of 0 is z = 37) would otherwise
+    # stretch the bins until the centre of the histogram is a few bins wide:
+    # every candidate's lfdr degrades, and the centre can stop being concave.
+    # Candidates outside the range are left out of the fit, not out of the
+    # scoring; `local_fdr` holds the density flat beyond the last bin.
     n = len(z)
-    lo, hi = float(z.min()), float(z.max())
+    q25, median, q75 = np.quantile(z, [0.25, 0.5, 0.75])
+    reach = _FIT_RANGE_SCALES * (q75 - q25) / 1.349
+    inside = z[np.abs(z - median) <= reach]
+    lo, hi = float(inside.min()), float(inside.max())
     pad = 0.1 * (hi - lo)
     edges = np.linspace(lo - pad, hi + pad, max(20, min(120, n // 5)) + 1)
     mids = (edges[:-1] + edges[1:]) / 2
-    counts, _ = np.histogram(z, edges)
+    counts, _ = np.histogram(inside, edges)
     x = (mids - mids.mean()) / mids.std()
     design = np.column_stack([x**k for k in range(degree + 1)])
     fit = sm.GLM(counts, design, family=sm.families.Poisson()).fit()
@@ -888,6 +904,19 @@ def local_fdr(
     Only candidates above the null's centre can be called real: below it,
     lfdr is 1. Low z-scores are the wrong direction for one-sided p-values.
 
+    But strongly negative candidates still hurt the positive ones. The density
+    fit is one cubic across both tails, and a heavy lower tail bends it so that
+    the upper tail is underfitted: with 300 candidates and five planted at
+    z = +4, adding five at z = -4 (what a sign-symmetric search produces) cut
+    the planted five's call rate at lfdr <= 0.2 from 0.80 to 0.19 over 100
+    sets. Don't feed it both a signal and its sign-flipped twin; keep one
+    orientation per hypothesis.
+
+    A few extreme z-scores, such as a p-value of exactly 0 from a leaky
+    backtest, are left out of the density fit (`_fit_mixture`) and still
+    scored, so they don't change anyone else's lfdr: one candidate at z = 15 or
+    p = 0 left the planted five's median lfdr at 0.028, against 0.029 without it.
+
     Its role is a graded score, reported next to the gate, not a gate: the
     stage-1 gate stays BH-based unless calibration shows lfdr finds more real
     signals at our base rate. Feed it every candidate a search produced (or
@@ -897,7 +926,13 @@ def local_fdr(
 
     Pass one-sided p-values (`sharpe_test(...).pvalue_greater`). NaN stays NaN.
     Needs at least `MIN_LOCAL_FDR_CANDIDATES` usable p-values, which most single
-    batches of 50-200 candidates won't reach; it's NaN for those.
+    batches of 50-200 candidates won't reach; `evidence_profile` reports NaN for
+    those, but this function raises.
+
+    Raises:
+        ValueError: with fewer than `MIN_LOCAL_FDR_CANDIDATES` usable
+            p-values, or if the centre of the z-score histogram isn't concave
+            (no null to fit; see `empirical_null`).
     """
     usable = pvalues.dropna()
     if len(usable) < MIN_LOCAL_FDR_CANDIDATES:
