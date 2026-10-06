@@ -1,9 +1,12 @@
-"""Learned memory search: what kind of parent and edit, and what each edit did.
+"""Learned memory search: what the agent's deepen move remembers, and how it chooses.
 
 Adapted from AlphaMemo (Yu, Zheng, Pan, Liu, Wang & He 2026, arXiv
-2606.20625). When the agent deepens a factor (refines it), learned memory
-search remembers, for each kind of parent and each kind of edit, whether the
-edit did better than expected.
+2606.20625). When the agent deepens (refines an existing factor), it picks a
+parent and a kind of edit. This module remembers, for each kind of parent
+and each kind of edit, whether that edit did better than expected, trusts
+that memory only once the evidence is solid, and lets repeated failures veto
+an edit. Successes only nudge; only failures can block (the paper's
+asymmetry).
 
 - `parent_context` is the paper's z(p) (Eq. 2): the field groups the parent
   reads, and bins of its quality, size and how often it has been selected.
@@ -13,6 +16,8 @@ edit did better than expected.
   `MemoryState` reduces the events to the Eq. 6 statistics per (context,
   motif): Welford mean and variance of the residuals, and a Beta posterior
   over failures.
+- `Baselines`, `gate`, `warmup`, `ledger_score`, `action_score`, `vetoed` and
+  `select_action` are Eq. 3-5, 7, 8 and 11.
 
 Nothing here reads market data: qualities come from the scorer.
 """
@@ -20,13 +25,15 @@ Nothing here reads market data: qualities come from the scorer.
 from __future__ import annotations
 
 import math
+import random
 import sqlite3
 import statistics
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 from capstone.factors import store
+from capstone.factors.llm import FactorConfig
 from capstone.factors.tree import (
     WINDOW_MAX,
     BinOp,
@@ -491,3 +498,191 @@ def reduce_events(events: Iterable[dict]) -> dict[tuple[str, str], PairStats]:
         m2 = statistics.variance(residuals) * (n - 1) if n >= 2 else 0.0
         out[key] = PairStats(n, mean, m2, len(rows), sum(r["status"] in FAILURES for r in rows))
     return out
+
+
+# ---------------------------------------------------------------------------
+# Decisions (Eq. 3, 5, 7, 8, 11)
+
+
+class Baselines:
+    """Q-hat(p): the mean quality of earlier children of parents with p's context
+    (Eq. 3); Q(p) itself until that context has a child. Call `baseline`
+    before `add` for the same child, so a child never counts toward its own."""
+
+    def __init__(self) -> None:
+        self._sum: dict[str, float] = {}
+        self._count: dict[str, int] = {}
+
+    def baseline(self, context: str, parent_quality: float | None) -> float | None:
+        count = self._count.get(context, 0)
+        return parent_quality if count == 0 else self._sum[context] / count
+
+    def add(self, context: str, child_quality: float) -> None:
+        self._sum[context] = self._sum.get(context, 0.0) + child_quality
+        self._count[context] = self._count.get(context, 0) + 1
+
+
+def gate(stats: PairStats, kappa: float, epsilon: float) -> float:
+    """c(z, m) = n / (n + kappa) * min(1, |mu| / (sigma + epsilon)); 0 while n < 2."""
+    if stats.n < 2:
+        return 0.0
+    return stats.n / (stats.n + kappa) * min(1.0, abs(stats.mean) / (stats.std + epsilon))
+
+
+def veto_gate(stats: PairStats, kappa: float, epsilon: float) -> float:
+    """The veto's confidence: `gate` once two children are scored, else
+    attempts / (attempts + kappa), so pairs whose children never get scored
+    (they all fail) can still be vetoed."""
+    if stats.n >= 2:
+        return gate(stats, kappa, epsilon)
+    return stats.attempts / (stats.attempts + kappa)
+
+
+def warmup(t: int, config: FactorConfig) -> float:
+    """lambda_t = lambda_max * min(1, max(0, t - t0) / T_w); t counts evaluations."""
+    ramp = max(0, t - config.memory_warmup_start) / config.memory_warmup_length
+    return config.memory_lambda_max * min(1.0, ramp)
+
+
+def ledger_score(quality: float, rho_max: float, times_selected: int) -> float:
+    """S_ledger(p) = Q(p) * (1 - rho_max(p)) / sqrt(1 + u_p) (plan decision D2; ours,
+    as the paper gives no formula). rho_max: the parent's largest |corr| with
+    another pool member."""
+    return abs(quality) * (1.0 - abs(rho_max)) / math.sqrt(1 + times_selected)
+
+
+def action_score(s_ledger: float, lambda_t: float, confidence: float, mean: float, eps: float):
+    """A(p, m) = log(S_ledger(p) + eps) + lambda_t * c(z(p), m) * mu(z(p), m)."""
+    return math.log(s_ledger + eps) + lambda_t * confidence * mean
+
+
+def vetoed(stats: PairStats, config: FactorConfig) -> bool:
+    """Excluded when the veto gate exceeds tau_c and the failure rate exceeds tau_v."""
+    confidence = veto_gate(stats, config.memory_kappa, config.memory_epsilon)
+    return (
+        confidence > config.memory_veto_confidence
+        and stats.failure_rate > config.memory_veto_failure_rate
+    )
+
+
+@dataclass(frozen=True)
+class ParentView:
+    """What selection needs to know about one pool member."""
+
+    id: str
+    context: str
+    quality: float
+    rho_max: float
+    times_selected: int
+
+
+@dataclass(frozen=True)
+class Action:
+    parent_id: str
+    motif: str
+    score: float
+
+
+def select_action(
+    parents: list[ParentView],
+    memory: MemoryState,
+    t: int,
+    config: FactorConfig,
+    allowed: Callable[[ParentView, str], bool] | None = None,
+    rng: random.Random | None = None,
+) -> Action | None:
+    """The highest-scoring non-vetoed (parent, motif); None if every pair is vetoed.
+
+    `allowed` drops pairs that cannot be made (a window rescale of a parent
+    without windows, say). Exact ties are broken by `rng` when given; without
+    it they go to the lower parent id, then the motif's place in
+    `PRODUCIBLE_MOTIFS`, as the paper orders them. A departure from the
+    paper: the deepen move passes an `rng`, because while the memory is
+    empty every motif of the best parent ties, and the fixed order would
+    make every early edit a rank switch.
+    """
+    lam = warmup(t, config)
+    best: list[Action] = []
+    for parent in sorted(parents, key=lambda p: p.id):
+        s = ledger_score(parent.quality, parent.rho_max, parent.times_selected)
+        for motif in PRODUCIBLE_MOTIFS:
+            if allowed is not None and not allowed(parent, motif):
+                continue
+            stats = memory.stats(parent.context, motif)
+            if vetoed(stats, config):
+                continue
+            c = gate(stats, config.memory_kappa, config.memory_epsilon)
+            score = action_score(s, lam, c, stats.mean, config.memory_epsilon)
+            if not best or score > best[0].score:
+                best = [Action(parent.id, motif, score)]
+            elif score == best[0].score:
+                best.append(Action(parent.id, motif, score))
+    if not best:
+        return None
+    return best[0] if rng is None else rng.choice(best)
+
+
+# ---------------------------------------------------------------------------
+# What the agent reads: the memory's evidence for one kind of parent
+
+
+@dataclass(frozen=True)
+class MotifEvidence:
+    """What the memory knows about one kind of edit for one kind of parent."""
+
+    motif: str
+    attempts: int  # children tried
+    scored: int  # children that got a score (and so a residual)
+    mean: float | None  # mean residual: score minus what was expected; None if none scored
+    confidence: float  # the gate c(z, m), 0 to 1
+    failure_rate: float  # posterior mean share of children that failed
+    vetoed: bool
+
+    @property
+    def verdict(self) -> str:
+        """The evidence in a few words, for the agent."""
+        if self.vetoed:
+            return "vetoed: keeps failing"
+        if self.attempts == 0:
+            return "untried"
+        if self.confidence == 0:
+            return "too little evidence"
+        return "beats expectations" if self.mean > 0 else "falls short of expectations"
+
+
+def evidence(
+    memory: MemoryState, context: str, config: FactorConfig, motifs=PRODUCIBLE_MOTIFS
+) -> list[MotifEvidence]:
+    """The memory's evidence for each of `motifs` on parents of this context."""
+    out = []
+    for motif in motifs:
+        s = memory.stats(context, motif)
+        out.append(
+            MotifEvidence(
+                motif,
+                s.attempts,
+                s.n,
+                s.mean if s.n else None,
+                gate(s, config.memory_kappa, config.memory_epsilon),
+                s.failure_rate,
+                vetoed(s, config),
+            )
+        )
+    return out
+
+
+def evidence_table(rows: list[MotifEvidence]) -> str:
+    """The evidence as a plain-text table the agent reads in its prompt.
+
+    Mean is the average score of the children minus what was expected for
+    this kind of parent; confidence is how far to trust that mean (0 to 1).
+    """
+    header = "edit | tried | scored | mean vs expected | confidence | failure rate | verdict"
+    lines = [header, "-" * len(header)]
+    for r in rows:
+        mean = "-" if r.mean is None else f"{r.mean:+.3f}"
+        lines.append(
+            f"{r.motif} | {r.attempts} | {r.scored} | {mean} | {r.confidence:.2f} "
+            f"| {r.failure_rate:.2f} | {r.verdict}"
+        )
+    return "\n".join(lines)

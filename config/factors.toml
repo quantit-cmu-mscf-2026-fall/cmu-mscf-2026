@@ -53,3 +53,18 @@ min_alignment = 0.0
 max_bond_leaves = 4
 max_member_share = 0.75
 max_bond_overlap = 0.75
+
+# Learned memory search, the agent's deepen move (capstone.factors.memory;
+# AlphaMemo, arXiv 2606.20625). The memory's weight grows with evaluations t:
+# lambda_t = lambda_max * min(1, max(0, t - start) / length) (paper Table 4,
+# "balanced"). kappa shrinks the confidence gate for small samples; an edit
+# is vetoed for a kind of parent when the gate exceeds memory_veto_confidence
+# and the posterior failure rate exceeds memory_veto_failure_rate. The paper
+# publishes no kappa, epsilon or veto thresholds: these are proposals.
+memory_lambda_max = 0.05
+memory_warmup_start = 0
+memory_warmup_length = 200
+memory_kappa = 5.0
+memory_epsilon = 1e-6
+memory_veto_confidence = 0.3
+memory_veto_failure_rate = 0.7
