@@ -179,17 +179,33 @@ estimated effective spread from CRSP times turnover, fixed before scoring.
 
 **Stage 3 comparison set.**
 
-- *Known factors:* Fama–French five factors plus momentum, from Ken French's
-  library (`load_french`; the momentum file still needs adding).
+- *Known factors (V-21):* the **daily** Fama–French five factors plus
+  momentum from Ken French's library, the same frequency as the candidate
+  returns. `capstone.data.load_ff5_momentum()` inner-joins the daily FF5 (2x3)
+  and Momentum files on date, so it covers only days present in both (FF5
+  starts 1963-07-01). Values are decimal returns; the library's `-99.99` /
+  `-999` missing-value codes become `NaN`.
+- *RF is returned, not regressed on.* The loader's columns are `Mkt-RF`,
+  `SMB`, `HML`, `RMW`, `CMA`, `RF`, `Mom`; the regressors are
+  `capstone.data.FF5_MOMENTUM_REGRESSORS`, the same list without `RF`. `RF`
+  is there to turn a raw return into an excess return: dollar-neutral
+  long-short candidates (the `backtest` default, `demean=True`) already are
+  one, while a long-only series needs `RF` subtracted before the regression.
+- *Why `capstone/data.py`, not `shared_data`:* Ken French data is public and
+  freely redistributable, so it uses the public-data loader, which downloads
+  and caches locally. `capstone.shared_data` is reserved for the licensed
+  CRSP/Compustat pull (`docs/shared_data.md`).
 - *Known signals:* the Chen & Zimmermann open-source anomaly portfolios (over
   200 published signals), plus any signal we already hold. An agent that has
   read the literature tends to rediscover published anomalies, and those earn
   about half as much after publication (McLean & Pontiff 2016). Adding value
   beyond this set is the test of novelty.
 
-Stage 3's frequency is an open decision for its owner: the anomaly portfolios
-are monthly, while #75 proposes daily factors to match the candidate returns.
-α₃ is chosen and calibrated only once the frequency is settled.
+Stage 3 runs at daily frequency against the factors above, and α₃ is chosen
+and calibrated for that test. The Chen & Zimmermann portfolios are monthly and
+will be considered later, as a separate decision. The alpha regression itself
+(estimator, standard errors) belongs to `spanning`
+([`validation/incremental-value.md`](validation/incremental-value.md)).
 
 **Calibration range for the share of real candidates.** Start at 0 to 5% for
 agent-generated candidates. Harvey & Liu (2020) use up to 20% for a curated
