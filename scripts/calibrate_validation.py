@@ -126,16 +126,16 @@ def evaluate_setting(p, share, sharpe, seeds, grid, stage1, n_boot=0):
                         **score(stages["stage4"], truth),
                     }
                 )
-                if design == "split":
+                if design == p.get("design", "split"):
                     g = gate_report(stages, truth).reset_index()
                     gates.append(g.assign(**base, thresholds=label(th)))
     return pd.DataFrame(rows), pd.concat(gates, ignore_index=True)
 
 
-def recommend(results: pd.DataFrame, target: float) -> pd.DataFrame:
+def recommend(results: pd.DataFrame, target: float, design: str = "split") -> pd.DataFrame:
     """Funnel threshold sets ranked by mean power, among those whose mean FDR
     is at most `target` in every setting (including nothing-real)."""
-    funnel = results[(results["arm"] == "funnel") & (results["design"] == "split")]
+    funnel = results[(results["arm"] == "funnel") & (results["design"] == design)]
     by_setting = funnel.groupby(["thresholds", "share_real", "sharpe_real"])[
         ["fdr", "power"]
     ].mean()
@@ -208,7 +208,8 @@ def main() -> None:
     pd.set_option("display.width", 160)
     pd.set_option("display.max_columns", 20)
 
-    ranked = recommend(results, p["target_fdr"])
+    design = p.get("design", "split")
+    ranked = recommend(results, p["target_fdr"], design)
     print(
         f"{len(seeds)} seeds per setting; {p['n_families']} hypotheses x {p['k']} variants "
         f"(within-family correlation {p['within_rho']}), defects {p['defects']}, "
@@ -227,7 +228,7 @@ def main() -> None:
         (results["arm"] == "baseline")
         | (
             (results["arm"] == "funnel")
-            & (results["design"] == "split")
+            & (results["design"] == design)
             & (results["thresholds"] == chosen)
         )
         | ((results["arm"] == "naive") & (results["thresholds"] == chosen))
@@ -239,6 +240,18 @@ def main() -> None:
         .unstack("arm")
         .to_string()
     )
+
+    print("\nHow bad the bad runs get (false discoveries per run, over every seed and setting)")
+    nothing_real = pick["share_real"] == 0.0
+    for label, block in (("nothing real", pick[nothing_real]), ("some real", pick[~nothing_real])):
+        stats = block.groupby("arm")["false"].agg(
+            p_any=lambda s: (s > 0).mean(),
+            mean="mean",
+            p90=lambda s: s.quantile(0.9),
+            worst="max",
+        )
+        print(f"{label}:")
+        print(stats.round(3).to_string(), "\n")
 
     print("\n2. Where real signals die and noise leaks (funnel, summed over seeds)")
     g = gates[gates["thresholds"] == chosen]
@@ -280,7 +293,7 @@ def main() -> None:
     print(f"stage-1 method (Sharpe {bc['sharpe_real']}, seeds {list(boot_seeds)}):")
     bsel = boot[
         (boot["arm"] == "baseline")
-        | ((boot["arm"] == "funnel") & (boot["design"] == "split") & (boot["thresholds"] == chosen))
+        | ((boot["arm"] == "funnel") & (boot["design"] == design) & (boot["thresholds"] == chosen))
     ]
     cols = ["fdr", "power", "any_false"]
     print(bsel.groupby(["share_real", "stage1", "arm"])[cols].mean().round(3).to_string(), "\n")
