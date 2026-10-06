@@ -5,10 +5,11 @@
 ## Why this workstream matters
 
 A candidate can pass every significance test and still be a known factor in
-disguise, or a near-copy of something we already hold. Stage 3 of the funnel in
-`docs/validation.md` asks "does it add anything beyond known factors and
-signals already held?" This workstream answers that with a time-series
-regression and a test on its intercept (the alpha).
+disguise, or a near-copy of something we already hold. Stage 3 of the
+calibrated validation funnel in `docs/validation.md` asks "does it add
+anything beyond known factors and signals already held?" This workstream
+answers that with a time-series regression and a test on its intercept (the
+alpha).
 
 ## Tasks
 
@@ -33,7 +34,9 @@ Available datasets: `factors_daily`, `factors_monthly`, `factors5_daily`,
 `industry49_daily`, `industry12_daily`. **Momentum is not there yet.** Adding
 the daily momentum file means adding it to `FRENCH_DATASETS` and checking the
 parser handles its layout. The other option is WRDS, through the shared-data
-loader in #26 (`capstone/shared_data.py`, not merged yet). Decide which, match
+loader, `capstone/shared_data.py` (#26). It is on `main` but not on the stack
+branch, so to use it with `make_return_matrix`, merge `origin/main` into your
+branch as [handoff.md](handoff.md) describes. Decide which, match
 the frequency of the candidates' returns, and write the decision into
 `docs/validation.md`.
 

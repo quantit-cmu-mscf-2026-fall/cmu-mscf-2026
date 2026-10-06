@@ -18,16 +18,15 @@ the matrix. Validation methods never call strategy code or CV splitters.
 
 | Jira | Task | Blocked by |
 |---|---|---|
-| QUANTIT-43 | Review PR #34 (your `cv.py`, brought to `main`) | nothing |
-| QUANTIT-44 | Purged k-fold: leakage tests on the performance matrix | #34, and #28 for `make_return_matrix` |
-| QUANTIT-45 | Walk-forward splitter and CV docs | #34 |
+| QUANTIT-43 | Review PR #34 (your `cv.py`, brought to `main`) | done: #34 is on `main` |
+| QUANTIT-44 | Purged k-fold: leakage tests on the performance matrix | nothing, but needs `cv.py` (`main`) and `make_return_matrix` (#28, on the stack) together; see below |
+| QUANTIT-45 | Walk-forward splitter and CV docs | nothing (`cv.py` is on `main`) |
 
-## Most of this already exists: PR #34
+## Most of this already exists: `cv.py` on `main`
 
 Your `capstone/cv.py` and `tests/test_cv.py` (16 tests), from commit
-`f94b6d9` on `laurenli/alpha-gpt-replication`, are in **PR #34** against
-`main`, unchanged and with you as the commit author. Please review it: the
-main question is whether it's the version you want on `main`. It has:
+`f94b6d9` on `laurenli/alpha-gpt-replication`, merged to `main` in **#34**,
+unchanged and with you as the commit author. It has:
 
 - `label_end_times(dates, horizon)`
 - `PurgedKFold(n_splits=4, *, horizon=1, embargo_pct=0.01)` with
@@ -35,23 +34,41 @@ main question is whether it's the version you want on `main`. It has:
   embargo never shorter than `horizon`
 - `average_uniqueness(t1, dates)` sample weights (López de Prado 2018, ch. 4)
 
-**Checked 2026-09-27.** The full suite passes on plain `main` with #34, and
-also on the validation stack (#32). `PurgedKFold.split` works directly on the
-index of a
-`make_return_matrix` matrix (a `DatetimeIndex`). With 5 folds on 1,000 dates
-and horizons of 1, 5 and 21, no training label's return window, (t, t1],
-overlaps any test label's, and the embargo band after every test fold is
-excluded from training.
+**Checked 2026-09-27, and again in the review of this brief.** The full suite
+passes on `main` with #34, and also on the validation stack (#32).
+`PurgedKFold.split` works directly on the index of a `make_return_matrix`
+matrix (a `DatetimeIndex`). With 5 folds on 1,000 dates and horizons of 1, 5
+and 21, no training label's return window, (t, t1], overlaps any test label's
+(0 overlaps), and the embargo band after every test fold is excluded from
+training (0 violations).
 
 So:
 
-- **QUANTIT-43** is reviewing #34. No code changes were needed to fit the
-  input format.
+- **QUANTIT-43 is done.** No code changes were needed to fit the input format.
 - **QUANTIT-44:** the splitter itself is done. What's left is a leakage test
   written against the performance matrix, over several horizons and fold
   counts, like the check above.
 - **QUANTIT-45 (walk-forward) is the real new work.** Nothing for it exists yet.
-  Build it in `cv.py` on a branch off #34 (or off `main` once #34 merges).
+  Build it in `cv.py` on a branch off `main`.
+
+## Getting `cv.py` and `make_return_matrix` together
+
+Until the validation stack reaches `main`, they live on different branches:
+`cv.py` is on `main`, and `make_return_matrix` is on the stack (#28, and so on
+`vincal848/graded-evidence`). QUANTIT-44 needs both, and so does the optional
+null test below. Branch from `origin/vincal848/graded-evidence` and merge
+`main` into it:
+
+```
+git switch -c laurenli/<topic> origin/vincal848/graded-evidence
+git merge origin/main
+```
+
+If git reports a conflict in `tests/test_synth.py`, both sides added tests at
+the end of the file; keep both. Set the PR's base to
+`vincal848/graded-evidence`, and say in the description that its diff also
+shows `main`'s changes until the stack is merged. See
+[handoff.md](handoff.md) for the general rule.
 
 When checking leakage yourself, use the same convention as `cv.py`: a label at
 date t covers the returns in (t, t1], so a training label ending exactly on the
@@ -59,7 +76,7 @@ first test date does **not** overlap. Treating the ends as closed reports one
 false overlap per fold boundary.
 
 If `laurenli/alpha-gpt-replication` merges later, its `cv.py` is identical
-to #34's and won't conflict. #28 also made `backtest.backtest_components`
+to `main`'s and won't conflict. #28 also made `backtest.backtest_components`
 public under the same name your branch uses.
 
 ## Design notes
@@ -91,5 +108,6 @@ public under the same name your branch uses.
 
 ## Who uses your output
 
-Every strategy that fits anything, including the Alpha-GPT pipeline. Their
-out-of-sample series feed the performance matrix.
+Every strategy that fits anything, including what the discovery pipeline's
+formula screening and strategy combination graph produce. Their out-of-sample
+series feed the performance matrix.
