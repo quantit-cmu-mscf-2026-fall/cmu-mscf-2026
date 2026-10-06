@@ -8,7 +8,8 @@ Both methods answer "how much of the best result is just the result of
 searching?" PBO asks whether choosing the best candidate on one half of the
 data tells you anything about the other half. The haircut Sharpe shrinks a
 Sharpe ratio to allow for how many trials were run. Both are used at the
-robustness and final-decision stages of the funnel in `docs/validation.md`.
+robustness and final-decision stages of the calibrated validation funnel in
+`docs/validation.md`.
 
 ## Tasks
 
@@ -17,7 +18,7 @@ robustness and final-decision stages of the funnel in `docs/validation.md`.
 | QUANTIT-46 | Review PR #35 (CSCV / PBO) | nothing |
 | QUANTIT-12 | Check the PBO statistic against the paper (in #35) | nothing |
 | QUANTIT-47 | PBO calibration tests on `make_return_matrix`, and docs | #35, #28 |
-| QUANTIT-51 | Harvey–Liu haircut Sharpe | #31 (QUANTIT-25) |
+| QUANTIT-51 | Harvey–Liu haircut Sharpe | #32 (`holm_adjusted`, `by_adjusted`) |
 | QUANTIT-52 | Use the ledger's trial count in the haircut | QUANTIT-51, #33 |
 
 You're the requested reviewer on **#33** (the ledger reader your haircut
@@ -90,7 +91,7 @@ Harvey & Liu (2015), "Backtesting", *Journal of Portfolio Management*. Turn
 each Sharpe into a p-value, adjust it for the number of trials, and convert
 the adjusted p-value back into a Sharpe. The haircut is the difference.
 
-- **Reuse the adjustments from #31**: `holm_adjusted` and `by_adjusted` (BY is
+- **Reuse the adjustments from #32**: `holm_adjusted` and `by_adjusted` (BY is
   the paper's BHY). Bonferroni is `min(1, p * M)`. Don't reimplement them.
 - Check the p-value convention against the paper before you code; the paper's
   worked examples are your test cases. Our screening convention elsewhere is
