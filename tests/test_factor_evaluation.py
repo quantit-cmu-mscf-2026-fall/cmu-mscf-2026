@@ -56,6 +56,7 @@ def fake_rows(n_stocks=30, n_days=260, *, spread=0.002, seed=0, start="2015-01-0
                     "dlycumfacshr": 1.0,
                     "dlybid": p * (1 - spread / 2),
                     "dlyask": p * (1 + spread / 2),
+                    "siccd": (2834, 3674, 6020)[j % 3],
                 }
             )
     return pd.DataFrame(rows)
@@ -133,9 +134,9 @@ def test_load_panel_never_asks_for_holdout_dates(monkeypatch):
     assert panel.data_version == "test-version"
 
 
-def test_every_factor_and_holding_period_is_a_logged_trial(tmp_path, monkeypatch):
+def test_every_variant_is_a_logged_trial_and_a_column(tmp_path, monkeypatch):
     monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
-    panel = build_panel(fake_rows(n_stocks=10, n_days=80), data_version="v-test")
+    panel = build_panel(fake_rows(n_stocks=12, n_days=80), data_version="v-test")
     trees = {"f1": parse("volume"), "f2": parse("ts_mean(returns, 5)"), "f3": parse("open")}
     original = ev.evaluate
 
@@ -145,16 +146,72 @@ def test_every_factor_and_holding_period_is_a_logged_trial(tmp_path, monkeypatch
         return original(tree, fields)
 
     monkeypatch.setattr(ev, "evaluate", failing)
-    matrix, summary = evaluate_factors(trees, panel, holds=(1, 5))
+    specs = ev.grid(holds=[1, 5], neutral=["none", "sector"])
+    matrix, summary = evaluate_factors(trees, panel, specs=specs)
     entries = [json.loads(line) for line in (tmp_path / "runs.jsonl").read_text().splitlines()]
-    tried = [(e["params"]["factor_id"], e["params"]["hold"]) for e in entries]
-    assert tried == [("f1", 1), ("f1", 5), ("f2", 1), ("f2", 5), ("f3", 1), ("f3", 5)]
+    assert len(entries) == 3 * 4  # every (factor, spec), the failing factor included
+    assert entries[-1]["metrics"] == {"error": "cannot compute"}
     assert all(e["params"]["data_version"] == "v-test" for e in entries)
-    assert entries[4]["metrics"] == {"error": "cannot compute"}  # a failure is a trial too
-    assert list(matrix.columns) == ["f1@1", "f1@5", "f2@1", "f2@5"]
-    assert list(summary.index) == list(matrix.columns)
+    assert len(matrix.columns) == 2 * 4 and list(summary.index) == list(matrix.columns)
+    assert summary.loc[matrix.columns[0], "factor_id"] == "f1"
+    assert set(zip(summary.hold, summary.neutral, strict=True)) == {
+        (1, "none"),
+        (5, "none"),
+        (1, "sector"),
+        (5, "sector"),
+    }
+    assert (summary.sharpe_net_full_spread <= summary.sharpe_net + 1e-12).all()
     assert matrix.index[0] == panel.fields["returns"].index[1]  # the untraded first day is dropped
     assert isinstance(panel, Panel)
+
+
+def test_variants_are_recorded_in_the_store(tmp_path, monkeypatch):
+    from capstone.factors import store
+
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    con = store.connect(tmp_path / "factors.db")
+    store.add_paper(con, "p", "Paper")
+    hid = store.add_hypothesis(con, store.Hypothesis("p", "o", "k", "j", "s", "f"))
+    fid, _ = store.add_factor(con, parse("volume"), hid)
+    panel = build_panel(fake_rows(n_stocks=9, n_days=40))
+    matrix, _ = evaluate_factors(
+        {fid: parse("volume")}, panel, specs=ev.grid([1, 21], ["none"]), con=con
+    )
+    stored = store.variants(con, fid)
+    assert [v["id"] for v in stored] == list(matrix.columns)
+    assert [v["spec"]["hold"] for v in stored] == [1, 21]
+
+
+def test_sector_neutral_weights_net_to_zero_within_every_sector():
+    panel = build_panel(fake_rows(n_stocks=30, n_days=40))
+    weights = ev.factor_weights(parse("volume"), panel, neutral="sector")
+    sectors = ev.sector_groups(panel)
+    long = weights.stack().reindex(sectors.index)
+    by_sector = long.groupby([long.index.get_level_values(0), sectors.values]).sum()
+    assert by_sector.abs().max() < 1e-12
+    np.testing.assert_allclose(weights.abs().sum(axis=1).iloc[5:], 1.0)
+
+
+def test_a_thin_sic_group_falls_back_to_its_division():
+    rows = fake_rows(n_stocks=12, n_days=10)
+    rows.loc[rows.permno == 10000, "siccd"] = 2010  # alone in group 20: manufacturing
+    sectors = ev.sector_groups(build_panel(rows))
+    day = sectors.index.get_level_values(0)[0]
+    assert sectors.loc[(day, 10000)] == "manufacturing"
+    assert sectors.loc[(day, 10003)] == "manufacturing"  # group 28 has 4 stocks: too thin
+    assert sectors.loc[(day, 10002)] == "finance"
+
+
+def test_a_bad_spec_is_refused():
+    with pytest.raises(ValueError):
+        ev.TradingSpec(hold=0)
+    with pytest.raises(ValueError):
+        ev.TradingSpec(neutral="industry")
+
+
+def test_the_full_spread_view_doubles_the_cost():
+    result = factor_returns(parse("volume"), build_panel(fake_rows(n_days=40)))
+    np.testing.assert_allclose(result.net_full_spread, result.gross - 2 * result.cost)
 
 
 def test_holding_one_day_is_daily_rebalancing():
@@ -181,3 +238,65 @@ def test_a_hold_below_one_day_is_refused():
     panel = build_panel(fake_rows(n_stocks=5, n_days=20))
     with pytest.raises(ValueError):
         ev.returns_from_weights(ev.factor_weights(parse("volume"), panel), panel, 0)
+
+
+def test_the_research_script_end_to_end(tmp_path, monkeypatch):
+    """The script on a fake panel: backs up the store, records variants, writes outputs."""
+    import importlib.util
+    import sys
+    from pathlib import Path
+
+    from capstone.factors import store
+
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path / "ledger"))
+    db = tmp_path / "factors.db"
+    con = store.connect(db)
+    store.add_paper(con, "p", "Paper")
+    hid = store.add_hypothesis(con, store.Hypothesis("p", "o", "k", "j", "s", "f"))
+    for e in ["volume", "ts_mean(returns, 5)", "-ts_std(returns, 21)", "rank(cap)"]:
+        store.add_factor(con, parse(e), hid)
+    con.close()
+
+    path = Path(__file__).resolve().parent.parent / "research" / "evaluate_factors.py"
+    spec = importlib.util.spec_from_file_location("evaluate_factors_script", path)
+    script = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(script)
+    panel = build_panel(fake_rows(n_stocks=12, n_days=60), data_version="v-fake")
+    monkeypatch.setattr(script, "load_panel", lambda: panel)
+    monkeypatch.setattr(script, "OUT", tmp_path / "out")
+    monkeypatch.setattr(sys, "argv", ["x", "--store", str(db), "--record-variants"])
+    script.main()
+
+    assert list(tmp_path.glob("factors.db.bak-*"))  # backed up before writing
+    con = store.connect(db)
+    n_specs = len(
+        script.grid(**{k: v for k, v in script.tomllib.loads(script.PARAMS.read_text()).items()})
+    )
+    assert len(store.variants(con)) == 4 * n_specs
+    con.close()
+    out = tmp_path / "out" / "v-fake"
+    assert (out / "matrix.parquet").exists() and (out / "summary.csv").exists()
+    ledger = (tmp_path / "ledger" / "runs.jsonl").read_text().splitlines()
+    assert len(ledger) == 4 * n_specs
+
+
+def test_a_correction_excludes_entries_without_deleting_them(tmp_path, monkeypatch):
+    from capstone.runlog import _read_entries, log_run
+
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    first = [log_run(ev.LEDGER_NAME, params={"factor_id": f}) for f in ("a", "b")]
+    log_run(ev.LEDGER_NAME, params={"factor_id": "a", "variant_id": "a-1"})
+    log_run("other-experiment", params={"factor_id": "a"})
+    assert ev.trial_count() == 3
+    log_run(
+        ev.CORRECTION_NAME,
+        params={
+            "ledger_name": ev.LEDGER_NAME,
+            "excludes": [
+                {"ts_utc": e["ts_utc"], "factor_id": e["params"]["factor_id"]} for e in first
+            ],
+            "reason": "duplicates",
+        },
+    )
+    assert ev.trial_count() == 1
+    assert len(_read_entries()) == 5  # nothing deleted

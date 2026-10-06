@@ -10,6 +10,10 @@ proposals that were rejected or failed to parse. Proposals are the lineage
 edges (paper -> hypothesis -> factor, and parent factor -> child), and their
 count is what the search actually produced: N_searched, not N_reported.
 
+A `variants` row is one way of trading a stored factor (a trading spec:
+holding period, sector neutrality, ...). Evaluation trades variants, not
+bare formulas, so each variant is a candidate with lineage to its factor.
+
 Nothing here computes performance, so nothing here is a ledger trial.
 """
 
@@ -125,6 +129,13 @@ CREATE TABLE IF NOT EXISTS moves (
   policy TEXT,
   created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS variants (
+  id TEXT PRIMARY KEY,
+  factor_id TEXT NOT NULL REFERENCES factors(id),
+  spec TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_variants_factor ON variants(factor_id);
 CREATE INDEX IF NOT EXISTS ix_proposals_factor ON proposals(factor_id);
 CREATE INDEX IF NOT EXISTS ix_proposals_hypothesis ON proposals(hypothesis_id);
 CREATE INDEX IF NOT EXISTS ix_hypotheses_paper ON hypotheses(paper_key);
@@ -385,6 +396,38 @@ def reject(
             alignment_reason=alignment_reason,
             alignment_model=alignment_model,
         )
+
+
+# ---------------------------------------------------------------------------
+# Variants: how a factor is traded
+
+
+def variant_id(fid: str, spec: dict) -> str:
+    """Stable id of a (factor, trading spec): the factor id, then a short hash of the spec."""
+    payload = json.dumps(spec, sort_keys=True, separators=(",", ":"))
+    return f"{fid}-{hashlib.sha256(payload.encode('utf-8')).hexdigest()[:8]}"
+
+
+def add_variant(con: sqlite3.Connection, fid: str, spec: dict) -> str:
+    """Record a way of trading a stored factor and return its id. Repeats are ignored."""
+    vid = variant_id(fid, spec)
+    with con:
+        con.execute(
+            "INSERT OR IGNORE INTO variants (id, factor_id, spec, created_at) VALUES (?, ?, ?, ?)",
+            (vid, fid, json.dumps(spec, sort_keys=True), _now()),
+        )
+    return vid
+
+
+def variants(con: sqlite3.Connection, fid: str | None = None) -> list[dict]:
+    """Stored variants (spec decoded), optionally of one factor."""
+    if fid is None:
+        rows = con.execute("SELECT * FROM variants ORDER BY created_at, id")
+    else:
+        rows = con.execute(
+            "SELECT * FROM variants WHERE factor_id = ? ORDER BY created_at, id", (fid,)
+        )
+    return [{**dict(r), "spec": json.loads(r["spec"])} for r in rows]
 
 
 # ---------------------------------------------------------------------------
