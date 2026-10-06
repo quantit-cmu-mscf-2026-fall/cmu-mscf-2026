@@ -15,12 +15,16 @@ from capstone.evaluate import (
     average_correlation,
     benjamini_hochberg,
     benjamini_yekutieli,
+    bh_adjusted,
     bonferroni,
+    by_adjusted,
     deflated_sharpe_ratio,
     estimate_pi0,
+    evidence_profile,
     expected_max_sharpe,
     false_discovery_rate,
     holm,
+    holm_adjusted,
     implied_independent_trials,
     min_track_record_length,
     newey_west_lags,
@@ -355,11 +359,15 @@ class TestSharpeVariance:
             sharpe_variance(pd.Series([0.01]))
 
     def test_sharpe_test_psr_agrees_with_its_pvalue(self):
-        # The one-sided PSR and the two-sided p-value come from the same z.
+        # The p-values and the PSR use the same sqrt(T - 1) (Lauren's #29
+        # review): with T in one and T - 1 in the other they differed slightly.
         returns = make_return_matrix(n_candidates=1, n_real=1, sharpe_real=0.8, seed=2).returns
+        for benchmark in (0.0, 0.5):
+            result = sharpe_test(returns.iloc[:, 0], benchmark=benchmark)
+            assert result.pvalue_greater == pytest.approx(1 - result.psr, abs=1e-12)
         result = sharpe_test(returns.iloc[:, 0])
         assert result.sharpe > 0
-        assert 1 - result.psr == pytest.approx(result.pvalue / 2, abs=2e-3)
+        assert 1 - result.psr == pytest.approx(result.pvalue / 2, abs=1e-12)
 
 
 class TestTrackRecordAndPSR:
@@ -396,6 +404,53 @@ class TestIndependentTrials:
     def test_average_correlation_recovers_rho(self):
         returns = make_return_matrix(n_candidates=40, rho=0.4, seed=0).returns
         assert average_correlation(returns) == pytest.approx(0.4, abs=0.05)
+
+    def test_average_correlation_leaves_out_undefined_pairs(self):
+        # A constant trial has no correlation with anything. Counting its pairs
+        # as 0 pulled the average toward independence (Lauren's #29 review).
+        returns = make_return_matrix(n_candidates=10, rho=0.4, seed=0).returns
+        with_constant = returns.assign(flat=0.0)
+        assert average_correlation(with_constant) == pytest.approx(average_correlation(returns))
+        flat = pd.DataFrame({"a": [0.0] * 5, "b": [1.0] * 5})
+        assert np.isnan(average_correlation(flat))
+
+    def test_fractional_trial_counts_are_accepted(self):
+        # implied_independent_trials returns a float; it feeds n_trials.
+        n = implied_independent_trials(100, 0.3)
+        assert n == pytest.approx(70.3)
+        between = expected_max_sharpe(n, 1000)
+        assert expected_max_sharpe(70, 1000) < between < expected_max_sharpe(71, 1000)
+        assert 0 <= deflated_sharpe_ratio(1.5, n, 1000) <= 1
+
+
+class TestDeflatedSharpeNullCalibration:
+    def test_best_of_autocorrelated_nulls_passes_rarely_with_both_corrections(self):
+        # Lauren's #29 review: DSR's null calibration on autocorrelated trials.
+        # 50 AR(1) nulls (coefficient 0.3, T = 1000), 120 sets, seeds 0-119.
+        # By default the IID threshold and IID standard error let the best null
+        # through about 10% of the time; with the HAC variance and the trials'
+        # own Sharpe spread it should pass no more than the 5% the 0.95 cut-off
+        # promises.
+        n_obs, n_trials, sets = 1000, 50, 120
+        default = corrected = 0
+        for seed in range(sets):
+            returns = make_return_matrix(n_obs=n_obs, n_candidates=n_trials, ar1=0.3, seed=seed)
+            x = returns.returns
+            sharpe = x.mean() / x.std(ddof=0) * np.sqrt(252)
+            best = sharpe.idxmax()
+            default += deflated_sharpe_ratio(float(sharpe[best]), n_trials, n_obs) > 0.95
+            corrected += (
+                deflated_sharpe_ratio(
+                    float(sharpe[best]),
+                    n_trials,
+                    n_obs,
+                    variance=sharpe_variance(x[best], method="hac"),
+                    trials_sharpe_variance=float(sharpe.var(ddof=1)),
+                )
+                > 0.95
+            )
+        assert corrected / sets <= 0.05
+        assert default / sets > corrected / sets
 
 
 def _correlated_pvalues(
@@ -568,3 +623,121 @@ class TestOneSidedScreening:
                 fdps[name].append(0.0 if np.isnan(fdr) else fdr)
         assert np.mean(fdps["bh"]) <= 0.08
         assert np.mean(fdps["by"]) <= 0.05
+
+
+class TestAdjustedPValues:
+    """Graded scores: each adjusted p-value is the level at which its procedure rejects."""
+
+    @pytest.mark.parametrize("alpha", [0.01, 0.05, 0.1, 0.2])
+    def test_thresholding_reproduces_every_decision(self, alpha):
+        # Two independent implementations must agree: the decision rules and
+        # their adjusted p-values. NaNs included, since the rules count them
+        # differently (Holm and BY in m, BH not).
+        for seed in range(25):
+            pvalues, _ = _correlated_pvalues(150, 30, 0.3, seed)
+            pvalues.iloc[[5, 60]] = np.nan
+            for adjusted, rule in [
+                (holm_adjusted, holm),
+                (bh_adjusted, benjamini_hochberg),
+                (by_adjusted, benjamini_yekutieli),
+            ]:
+                pd.testing.assert_series_equal(
+                    (adjusted(pvalues) <= alpha), rule(pvalues, alpha), check_names=False
+                )
+
+    def test_hand_computed_values(self):
+        pvalues = pd.Series([0.01, 0.04, 0.03, 0.2], index=list("abcd"))
+        # Holm: running max of (m - i + 1) p over the sorted p-values.
+        assert holm_adjusted(pvalues).to_dict() == pytest.approx(
+            {"a": 0.04, "c": 0.09, "b": 0.09, "d": 0.2}
+        )
+        # BH: running min from the top of m p / i.
+        assert bh_adjusted(pvalues).to_dict() == pytest.approx(
+            {"a": 0.04, "c": 0.0533333, "b": 0.0533333, "d": 0.2}
+        )
+        assert by_adjusted(pvalues).to_dict() == pytest.approx(
+            (bh_adjusted(pvalues) * 25 / 12).clip(upper=1).to_dict()
+        )
+
+    def test_ordering_between_procedures(self):
+        pvalues, _ = _correlated_pvalues(300, 40, 0.3, seed=1)
+        holm_p, by_p, bh_p = holm_adjusted(pvalues), by_adjusted(pvalues), bh_adjusted(pvalues)
+        assert (pvalues <= bh_p + 1e-15).all()
+        assert (bh_p <= by_p + 1e-15).all()
+        assert (bh_p <= holm_p + 1e-15).all()
+        assert ((holm_p <= 1) & (by_p <= 1)).all()
+
+    def test_bh_adjusted_is_the_q_value_at_lambda_zero(self):
+        pvalues, _ = _correlated_pvalues(200, 20, 0.0, seed=2)
+        pd.testing.assert_series_equal(
+            bh_adjusted(pvalues), storey_qvalues(pvalues, lambda_=0.0), check_names=False
+        )
+
+    def test_empty_and_nan(self):
+        empty = pd.Series(dtype=float)
+        assert holm_adjusted(empty).empty and bh_adjusted(empty).empty and by_adjusted(empty).empty
+        adjusted = holm_adjusted(pd.Series([0.01, np.nan], index=["a", "b"]))
+        assert adjusted["a"] == pytest.approx(0.02) and np.isnan(adjusted["b"])
+
+
+class TestEvidenceProfile:
+    def test_columns_order_and_monotone_strength(self):
+        pvalues, truth = _correlated_pvalues(200, 20, 0.2, seed=0)
+        profile = evidence_profile(pvalues)
+        assert list(profile.columns) == ["p", "holm", "by", "bh", "q"]
+        assert profile["p"].is_monotonic_increasing
+        # Planted candidates are the strongest on every graded score.
+        assert profile.index[:10].isin(truth[truth].index).all()
+
+    def test_every_procedure_on_real_sharpe_pvalues(self):
+        # The values the pipeline will actually pass: one-sided HAC p-values
+        # of correlated strategy returns. The planted candidates lead every column.
+        planted = make_return_matrix(
+            n_obs=750, n_candidates=200, n_real=10, sharpe_real=3.0, rho=0.5, seed=0
+        )
+        pvalues = pd.Series(
+            {c: sharpe_test(planted.returns[c]).pvalue_greater for c in planted.returns.columns}
+        )
+        profile = evidence_profile(pvalues)
+        real = planted.truth[planted.truth].index
+        for column in ["holm", "by", "bh", "q"]:
+            strongest = profile[column].sort_values(kind="stable").index[:5]
+            assert strongest.isin(real).all(), column
+
+
+class TestCorrelationBreaksStorey:
+    """Storey's estimates assume independence; correlated candidates break them, BH holds.
+
+    Global-null families of 100 one-sided tests with pairwise correlation 0.5,
+    400 of them: how often does each column call anything at 5%?
+    """
+
+    @staticmethod
+    def _any_discovery_rate(column: str, rho: float) -> float:
+        score = {"holm": holm_adjusted, "bh": bh_adjusted, "by": by_adjusted}.get(
+            column, storey_qvalues
+        )
+        hits = [
+            bool((score(_correlated_pvalues(100, 0, rho, seed)[0]) <= 0.05).any())
+            for seed in range(400)
+        ]
+        return float(np.mean(hits))
+
+    def test_bh_holm_and_by_keep_their_level(self):
+        for column in ["holm", "bh", "by"]:
+            assert self._any_discovery_rate(column, rho=0.5) <= 0.07, column
+
+    def test_q_values_are_too_permissive_under_correlation(self):
+        # Measured over four seed ranges: q 0.095-0.14 against BH 0.025-0.043
+        # under correlation, and 0.035-0.063 for q when candidates are independent.
+        assert self._any_discovery_rate("q", rho=0.0) <= 0.08
+        correlated_q = self._any_discovery_rate("q", rho=0.5)
+        assert correlated_q > 0.075
+        assert correlated_q > 2 * self._any_discovery_rate("bh", rho=0.5)
+
+    def test_pi0_collapses_under_correlation(self):
+        pi0 = np.array(
+            [estimate_pi0(_correlated_pvalues(100, 0, 0.5, seed)[0]) for seed in range(400)]
+        )
+        assert pi0.mean() < 0.85
+        assert (pi0 < 0.8).mean() > 0.25
