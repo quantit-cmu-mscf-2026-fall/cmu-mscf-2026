@@ -204,10 +204,13 @@ def bootstrap_family_pvalues(
        is retaken every time, so the reference is the best of a search of this
        size and this correlation.
 
-    The statistic is the one-sided t of the mean, sqrt(T) · mean / sd, which
-    ranks variants exactly as their Sharpe ratios do. Rows with a missing value
-    in any column are dropped first, so every variant is scored on the same
-    dates.
+    The statistic is the one-sided t of the mean, sqrt(n) · mean / sd, where n
+    is the number of dates the variant has data for. Missing values are
+    allowed: candidates with different warm-ups (#55 leaves dates with no
+    position NaN) keep their own dates, and every replication still resamples
+    one shared set of dates; each column uses whichever of its own values
+    fall in the resampled blocks. Dropping every row with any missing value
+    would instead cut every candidate to the longest warm-up.
 
     **Resolution.** A bootstrap p-value can't go below 1 / (n_boot + 1). BH
     across H hypotheses at level q tests its most extreme rank at q / H, so
@@ -234,13 +237,13 @@ def bootstrap_family_pvalues(
     missing = returns.columns.difference(family.dropna().index)
     if len(missing):
         raise ValueError(f"family is missing for {len(missing)} columns, e.g. {missing[0]!r}")
-    data = returns.dropna(how="any")
+    data = returns.dropna(how="all")
     n_obs = len(data)
+    if (data.notna().sum() < 3).any():
+        raise ValueError("every column needs at least 3 non-missing values")
     block = block_length if block_length is not None else block_length_rule(n_obs)
     if not 1 <= block <= n_obs:
-        raise ValueError("block_length must be between 1 and the number of complete rows")
-    if n_obs < 3:
-        raise ValueError("need at least 3 rows with no missing value")
+        raise ValueError("block_length must be between 1 and the number of dated rows")
 
     # Lay the columns out family by family, so each family is one slice.
     labels = family.reindex(data.columns)
@@ -257,18 +260,23 @@ def bootstrap_family_pvalues(
         )
 
     x = data.to_numpy(dtype=np.float64)
-    mean = x.mean(axis=0)
-    sd = np.maximum(x.std(axis=0, ddof=1), 1e-300)
-    t_obs = np.sqrt(n_obs) * mean / sd
+    present = ~np.isnan(x)
+    x = np.where(present, x, 0.0)
+    count = present.sum(axis=0)
+    mean = x.sum(axis=0) / count
+    sd = np.sqrt(np.maximum(((x - mean) ** 2 * present).sum(axis=0) / (count - 1), 1e-300))
+    t_obs = np.sqrt(count) * mean / sd
     best_obs = np.maximum.reduceat(t_obs, starts_at)
 
     # A circular block sum is a difference of prefix sums over the doubled
-    # series, so each replication moves n_blocks x N numbers, not T x N.
-    doubled = np.concatenate([x, x], axis=0)
-    p1 = np.zeros((2 * n_obs + 1, x.shape[1]))
-    p2 = np.zeros_like(p1)
-    np.cumsum(doubled, axis=0, out=p1[1:])
-    np.cumsum(doubled**2, axis=0, out=p2[1:])
+    # series, so each replication moves n_blocks x N numbers, not T x N. The
+    # count prefix sum gives each column its own number of resampled values.
+    def prefix(values: np.ndarray) -> np.ndarray:
+        out = np.zeros((2 * n_obs + 1, values.shape[1]))
+        np.cumsum(np.concatenate([values, values], axis=0), axis=0, out=out[1:])
+        return out
+
+    p0, p1, p2 = prefix(present.astype(np.float64)), prefix(x), prefix(x**2)
     n_full, remainder = divmod(n_obs, block)
 
     rng = np.random.default_rng(seed)
@@ -277,15 +285,20 @@ def bootstrap_family_pvalues(
     while done < n_boot:
         size = min(batch_size, n_boot - done)
         starts = rng.integers(0, n_obs, size=(size, n_full))  # rule 1: shared draw
+        s0 = (p0[starts + block] - p0[starts]).sum(axis=1)
         s1 = (p1[starts + block] - p1[starts]).sum(axis=1)
         s2 = (p2[starts + block] - p2[starts]).sum(axis=1)
         if remainder:
             tail = rng.integers(0, n_obs, size=(size, 1))
+            s0 += (p0[tail + remainder] - p0[tail]).sum(axis=1)
             s1 += (p1[tail + remainder] - p1[tail]).sum(axis=1)
             s2 += (p2[tail + remainder] - p2[tail]).sum(axis=1)
-        mean_star = s1 / n_obs
-        var_star = np.maximum((s2 - n_obs * mean_star**2) / (n_obs - 1), 1e-300)
-        t_star = np.sqrt(n_obs) * (mean_star - mean) / np.sqrt(var_star)  # rule 2
+        with np.errstate(divide="ignore", invalid="ignore"):
+            mean_star = s1 / s0
+            var_star = np.maximum((s2 - s0 * mean_star**2) / (s0 - 1), 1e-300)
+            t_star = np.sqrt(s0) * (mean_star - mean) / np.sqrt(var_star)  # rule 2
+        # A resample with fewer than 3 of a column's values can't score it.
+        t_star = np.where(s0 >= 3, t_star, -np.inf)
         best_star = np.maximum.reduceat(t_star, starts_at, axis=1)  # rule 3
         exceed += (best_star >= best_obs).sum(axis=0)
         done += size
