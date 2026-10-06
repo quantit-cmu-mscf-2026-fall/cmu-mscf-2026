@@ -528,7 +528,9 @@ class TestBootstrapFamilyPvalues:
         family = pd.Series({f"c{i}": f"H{i}" for i in range(200)})
         wide = pd.DataFrame(np.random.default_rng(0).normal(size=(50, 200)), columns=family.index)
         with pytest.raises(ValueError, match="resolve"):
-            bootstrap_family_pvalues(wide, family, n_boot=999)
+            bootstrap_family_pvalues(wide, family, n_boot=3998)
+        # 4,000 draws resolve 0.05 / 200 exactly; that is enough.
+        assert len(bootstrap_family_pvalues(wide, family, n_boot=3999)) == 200
 
     def test_rows_with_a_missing_value_are_dropped(self):
         rng = np.random.default_rng(4)

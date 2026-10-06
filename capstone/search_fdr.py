@@ -249,10 +249,11 @@ def bootstrap_family_pvalues(
     labels = labels.iloc[order]
     hypotheses, starts_at = np.unique(labels.to_numpy().astype(str), return_index=True)
     n_hyp = len(hypotheses)
-    if n_boot + 1 <= n_hyp / 0.05:
+    # Carl's condition: 1 / (n_boot + 1) <= q / H, i.e. n_boot + 1 >= H / q.
+    if n_boot + 1 < n_hyp / 0.05:
         raise ValueError(
             f"n_boot={n_boot} can't resolve BH at 0.05 across {n_hyp} hypotheses; "
-            f"use n_boot >= {int(np.ceil(n_hyp / 0.05))}"
+            f"use n_boot >= {int(np.ceil(n_hyp / 0.05)) - 1}"
         )
 
     x = data.to_numpy(dtype=np.float64)
