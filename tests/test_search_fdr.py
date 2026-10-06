@@ -532,15 +532,43 @@ class TestBootstrapFamilyPvalues:
         # 4,000 draws resolve 0.05 / 200 exactly; that is enough.
         assert len(bootstrap_family_pvalues(wide, family, n_boot=3999)) == 200
 
-    def test_rows_with_a_missing_value_are_dropped(self):
+    def test_a_late_start_keeps_its_own_dates_and_cuts_no_one_else(self):
+        # One variant of family A starts 300 days late (a longer warm-up).
+        # Family B's p-value must not change: the shared resampling is the
+        # same, and B's columns keep all their dates.
         rng = np.random.default_rng(4)
-        returns = pd.DataFrame(rng.normal(0, 0.01, (300, 2)), columns=["a", "b"])
-        family = pd.Series({"a": "A", "b": "A"})
-        holed = returns.copy()
-        holed.iloc[:20, 0] = np.nan
-        out = bootstrap_family_pvalues(holed, family, n_boot=199)
-        same = bootstrap_family_pvalues(returns.iloc[20:], family, n_boot=199)
-        pd.testing.assert_frame_equal(out, same)
+        returns = pd.DataFrame(
+            rng.normal(0.0003, 0.01, (1000, 4)), columns=["a1", "a2", "b1", "b2"]
+        )
+        family = pd.Series({"a1": "A", "a2": "A", "b1": "B", "b2": "B"})
+        full = bootstrap_family_pvalues(returns, family, n_boot=499)
+        late = returns.copy()
+        late.iloc[:300, 0] = np.nan
+        out = bootstrap_family_pvalues(late, family, n_boot=499)
+        assert out.loc["B", "pvalue"] == full.loc["B", "pvalue"]
+        assert out.loc["B", "t"] == pytest.approx(full.loc["B", "t"])
+        # Family A's late variant is scored on its own 700 dates.
+        own = returns["a1"].iloc[300:]
+        t_a1 = np.sqrt(len(own)) * own.mean() / own.std()
+        t_a2 = np.sqrt(1000) * returns["a2"].mean() / returns["a2"].std()
+        assert out.loc["A", "t"] == pytest.approx(max(t_a1, t_a2))
+
+    def test_no_missing_values_gives_the_same_answer_as_before(self):
+        # With complete data the masked arithmetic must reduce to the plain one.
+        rng = np.random.default_rng(5)
+        returns = pd.DataFrame(rng.normal(0.0005, 0.01, (400, 3)), columns=["x", "y", "z"])
+        family = pd.Series({"x": "X", "y": "X", "z": "Z"})
+        out = bootstrap_family_pvalues(returns, family, n_boot=199, seed=1)
+        t = np.sqrt(400) * returns.mean() / returns.std()
+        assert out.loc["X", "t"] == pytest.approx(max(t["x"], t["y"]))
+        assert out.loc["Z", "t"] == pytest.approx(t["z"])
+
+    def test_a_column_with_too_little_data_raises(self):
+        returns = pd.DataFrame(
+            {"a": [np.nan] * 48 + [0.01, 0.02], "b": np.linspace(-0.01, 0.01, 50)}
+        )
+        with pytest.raises(ValueError, match="at least 3"):
+            bootstrap_family_pvalues(returns, pd.Series({"a": "A", "b": "B"}), n_boot=199)
 
     def test_block_length_rule(self):
         assert block_length_rule(500) == 16
