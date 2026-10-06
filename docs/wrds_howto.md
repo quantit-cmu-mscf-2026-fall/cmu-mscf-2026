@@ -23,7 +23,10 @@ through your account.
    `@andrew.cmu.edu` address** — the institutional match is what grants access.
 2. WRDS emails you a confirmation link. Approval is usually same-day but can
    take longer; start this early.
-3. Off campus, connect to CMU full VPN first. WRDS checks the network path.
+3. **VPN is not required** for the database connection. On 2026-09-21 a
+   `wrds.Connection()` succeeded from a residential ISP with no CMU VPN active
+   — authentication is by username and password, not by network path. Connect
+   the VPN only if your own network blocks the outbound port.
 
 CMU's subscription includes CRSP and Compustat. If a query returns a permission
 error, that table is outside the subscription — ask a business librarian rather
@@ -40,16 +43,28 @@ import wrds
 conn = wrds.Connection(wrds_username="YOUR_WRDS_ID")
 ```
 
-The first connection offers to create `~/.pgpass`. **Say yes.** It stores the
+The first connection offers to create a password file. **Say yes.** It stores the
 credential so you never type the password again — which matters because you will
 reconnect constantly, and a password typed into a notebook has a way of ending up
 in a transcript or a commit.
 
-If you create it by hand, permissions are enforced by the driver:
+Where it lands depends on the platform, which is worth knowing before you go
+hunting for it:
+
+| Platform | Path |
+|---|---|
+| macOS / Linux | `~/.pgpass` |
+| Windows | `%APPDATA%\postgresql\pgpass.conf` |
+
+If you create it by hand on macOS or Linux, permissions are enforced by the
+driver:
 
 ```bash
 chmod 0600 ~/.pgpass
 ```
+
+The file's fourth colon-separated field is your WRDS username, so tooling can
+read it from there rather than hard-coding an account name into a script.
 
 Never put your WRDS password in code, in a config file inside the repo, or in a
 notebook cell. The repository is public.
@@ -66,6 +81,12 @@ conn.describe_table("crsp", "dsf")       # columns of the daily stock file
 listing file, `crsp.dsp500list` the S&P 500 membership spells.
 
 ## 4. Pull a panel with this kit
+
+> **Most of the time you don't need this.** The team keeps a shared pull
+> (S&P 500 members 1990–2025 plus Compustat) that loads without a WRDS
+> connection: see `docs/shared_data.md`. Also note that `wrds_loader` reads the
+> legacy `crsp.dsf` table, which ends at 2024-12-31; newer data is only in the
+> CIZ tables (`crsp.dsf_v2`), which the shared pull uses.
 
 ```python
 from capstone import wrds_loader
