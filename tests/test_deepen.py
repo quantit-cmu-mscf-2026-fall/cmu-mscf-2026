@@ -7,7 +7,9 @@ scorer gives each factor a fixed quality and independent values.
 from __future__ import annotations
 
 import hashlib
+import json
 from collections import Counter
+from dataclasses import replace
 from types import SimpleNamespace
 
 import numpy as np
@@ -17,6 +19,8 @@ from capstone.factors import store
 from capstone.factors.deepen import (
     MOTIF_WORDS,
     BudgetExhausted,
+    DeepenAgent,
+    Deepener,
     Draft,
     ModelEditor,
     Pool,
@@ -26,8 +30,8 @@ from capstone.factors.deepen import (
     edit_prompt,
 )
 from capstone.factors.llm import FactorConfig
-from capstone.factors.memory import PRODUCIBLE_MOTIFS
-from capstone.factors.tree import identity_key, parse
+from capstone.factors.memory import PRODUCIBLE_MOTIFS, memory_events
+from capstone.factors.tree import factor_id, identity_key, parse
 
 CONFIG = FactorConfig(model="test-model", alignment_model="", max_repairs=1)
 
@@ -115,6 +119,104 @@ def con(tmp_path):
         store.add_factor(con, parse(e), hid)
     yield con
     con.close()
+
+
+def deepener(con, editor, scorer=None, *, children=5, seed=0, parents=SEEDS):
+    cfg = replace(CONFIG, memory_children_per_parent=children)
+    d = Deepener(con, cfg, scorer or FakeScorer(), editor, run_id="test", seed=seed)
+    for e in parents:
+        assert d.add_parent(factor_id(parse(e)))
+    return d
+
+
+def _entries(path):
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+
+# ---------------------------------------------------------------------------
+# One round
+
+
+def test_a_round_records_move_lineage_events_and_one_ledger_trial_per_score(con, ledger):
+    editor = ScriptedEditor(["ts_mean(returns, 5)", "log(cap)", "returns +", "-ts_sum(volume, 10)"])
+    d = deepener(con, editor, children=4)
+    outcomes = d.step()
+    assert [o.status for o in outcomes].count("invalid") == 1  # "returns +" does not parse
+    assert d.evaluations == 4
+    moves = con.execute("SELECT action, from_id, reason FROM moves").fetchall()
+    assert len(moves) == 1 and moves[0]["action"] == "deepen"
+    parent_id, record = moves[0]["from_id"], json.loads(moves[0]["reason"])
+    motif = record["motif"]
+    assert record["by"] == "memory"  # no agent: the memory selected
+    refined = [p for p in store.proposals(con) if p["edge_type"] == "refined"]
+    assert len(refined) == 4 and {p["parent_factor_id"] for p in refined} == {parent_id}
+    events = memory_events(con, "test")
+    assert len(events) == 4 and {e["motif_intended"] for e in events} == {motif}
+    scored = [o for o in outcomes if o.quality is not None]
+    entries = _entries(ledger)
+    assert scored and len(entries) == len(scored)  # one trial per score, no more
+    assert {e["params"]["factor_id"] for e in entries} == {o.factor_id for o in scored}
+    assert all(e["tags"] == ["learned-memory-search", "deepen"] for e in entries)
+
+
+def test_screening_rejections_are_not_scored(con, ledger):
+    # Window variants of a stored factor fail the store-originality check.
+    editor = ScriptedEditor(["ts_mean(returns, 63)", "ts_mean(returns, 252)"])
+    scorer = FakeScorer()
+    d = deepener(con, editor, scorer, children=2, parents=["ts_mean(returns, 21)"])
+    calls_before = scorer.calls
+    outcomes = d.step()
+    assert all(o.status == "rejected" and "not original" in o.reason for o in outcomes)
+    assert scorer.calls == calls_before and _entries(ledger) == []
+
+
+def test_pool_decisions_set_the_memory_status(con, ledger):
+    scorer = FakeScorer({"log(cap)": 0.25, "sign(volume)": 0.05}, fail={"ts_max(cap, 5)"})
+    editor = ScriptedEditor(["log(cap)", "sign(volume)", "ts_max(cap, 5)"])
+    d = deepener(con, editor, scorer, children=3)
+    by_expr = {o.expression: o for o in d.step()}
+    assert by_expr["log(cap)"].status == "high_quality"
+    low = by_expr["sign(volume)"]
+    assert low.status == "rejected" and "Q 0.050" in low.reason
+    assert by_expr["ts_max(cap, 5)"].status == "invalid"
+    assert factor_id(parse("log(cap)")) in d.pool.quality  # a future parent
+    assert len(_entries(ledger)) == 2  # the unscorable child is not a trial
+
+
+def test_an_admitted_child_carries_its_lineage(con, ledger):
+    editor = ScriptedEditor(["log(cap)"])
+    d = deepener(con, editor, children=1)
+    d.step()
+    chain = d.lineage(factor_id(parse("log(cap)")))
+    assert [parse(e) for e in chain] == [editor.asked[0][0], parse("log(cap)")]
+
+
+def test_repeated_failures_veto_an_edit_and_the_prompt_says_so(con, ledger):
+    # One parent, so every round's memory is about the same kind of parent.
+    # Round 1 runs at u0; rounds 2 and 3 at u1 (selected once, then twice).
+    editor = ScriptedEditor(*[["returns +"] * 5] * 3)
+    d = deepener(con, editor, parents=["ts_mean(returns, 21)"])
+    for _ in range(3):
+        d.step()
+    round2_motif, round3_vetoes = editor.asked[1][1], editor.asked[2][4]
+    assert round2_motif in round3_vetoes  # five failures of five: vetoed, and said so
+    assert editor.asked[2][1] != round2_motif  # and not chosen again
+
+
+def test_the_same_seed_makes_the_same_choices(tmp_path, ledger):
+    def run(name):
+        c = store.connect(tmp_path / f"{name}.db")
+        store.add_paper(c, "paper:1", "A paper")
+        hid = store.add_hypothesis(c, store.Hypothesis("paper:1", "o", "k", "j", "s", "f"))
+        for e in SEEDS:
+            store.add_factor(c, parse(e), hid)
+        editor = ScriptedEditor(*[["log(cap)", "sign(volume)"]] * 4)
+        d = deepener(c, editor, children=2, seed=3)
+        for _ in range(4):
+            d.step()
+        return [(a[1], a[0]) for a in editor.asked]
+
+    assert run("a") == run("b")
 
 
 # ---------------------------------------------------------------------------
@@ -237,3 +339,135 @@ def test_the_call_limit_is_hard():
     editor.drafts(parse("returns"), "rank_switch", 1, [], [])
     with pytest.raises(BudgetExhausted):
         editor.drafts(parse("returns"), "rank_switch", 1, [], [])
+
+
+def test_window_rescale_is_skipped_while_screening_rejects_every_window_variant(con, ledger):
+    d = deepener(con, ScriptedEditor(), parents=["ts_mean(returns, 21)"])
+    view = d._views()[0]
+    assert not d._allowed(view, "window_rescale")
+    d.config = replace(d.config, max_store_share=0.9)
+    assert d._allowed(view, "window_rescale")
+
+
+def test_frequent_subtrees_count_only_what_the_edit_added(con, ledger):
+    # Make ts_std(volume, t) and ts_mean(cap, t) the store's frequent structures.
+    hid = con.execute("SELECT id FROM hypotheses").fetchone()[0]
+    for e in [
+        "ts_std(volume, 5) * high",
+        "ts_std(volume, 10) - low",
+        "ts_mean(cap, 5) / open",
+        "ts_mean(cap, 21) + high",
+    ]:
+        store.add_factor(con, parse(e), hid)
+    editor = ScriptedEditor(["log(ts_std(volume, 63))", "ts_std(volume, 63) - ts_mean(cap, 3)"])
+    d = deepener(con, editor, children=2, parents=["ts_std(volume, 63)"])
+    keeps, adds = d.step()
+    assert "frequent subtree" not in keeps.reason  # inherited from the parent: allowed
+    assert adds.status == "rejected" and "frequent subtree" in adds.reason  # newly added
+
+
+# ---------------------------------------------------------------------------
+# The agent decides, the memory advises
+
+
+class AgentClient:
+    """Answers record_deepen calls with scripted decisions; repairs with scripted edits."""
+
+    def __init__(self, *answers: dict):
+        self.answers = list(answers)
+        self.calls: list[dict] = []
+        self.messages = self
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        block = SimpleNamespace(
+            type="tool_use", name=kwargs["tools"][0]["name"], input=self.answers.pop(0)
+        )
+        return SimpleNamespace(
+            content=[block], usage=SimpleNamespace(input_tokens=1000, output_tokens=500)
+        )
+
+
+def _decision(parent, edit, edits, reason="nesting beat expectations here"):
+    return {
+        "parent_id": factor_id(parse(parent)),
+        "edit": edit,
+        "reason": reason,
+        "evidence_used": "nesting: +0.05 at confidence 0.55",
+        "edits": [{"expression": e, "rationale": "r"} for e in edits],
+    }
+
+
+def _agent_deepener(con, client, children=2):
+    agent = DeepenAgent(client, CONFIG, max_calls=10, usage=Counter())
+    d = deepener(con, ScriptedEditor(), children=children)
+    d.agent = agent
+    return d
+
+
+def test_the_agent_decides_and_its_reason_is_recorded_before_scoring(con, ledger):
+    client = AgentClient(
+        _decision("rank(close / open)", "nesting", ["ts_mean(rank(close / open), 5)", "log(cap)"])
+    )
+    d = _agent_deepener(con, client)
+    outcomes = d.step()
+    assert len(client.calls) == 1  # decision and edits in one call
+    prompt = client.calls[0]["messages"][0]["content"]
+    assert "Parent " in prompt and "allowed edits:" in prompt and "edit | tried" in prompt
+    move = con.execute("SELECT from_id, reason FROM moves").fetchone()
+    record = json.loads(move["reason"])
+    assert move["from_id"] == factor_id(parse("rank(close / open)"))
+    assert record["by"] == "agent" and record["motif"] == "nesting"
+    assert record["reason"] and record["evidence_used"]
+    assert {o.motif_intended for o in outcomes} == {"nesting"}
+
+
+def test_a_vetoed_edit_is_refused_then_asked_again(con, ledger):
+    d = _agent_deepener(con, None)
+    parent = factor_id(parse("rank(close / open)"))
+    ctx = next(v.context for v in d._views() if v.id == parent)
+    for _ in range(6):  # nesting keeps failing for this kind of parent: vetoed
+        d.memory.update(
+            {
+                "context": ctx,
+                "motif_realized": None,
+                "motif_intended": "nesting",
+                "status": "invalid",
+                "residual": None,
+            }
+        )
+    client = AgentClient(
+        _decision("rank(close / open)", "nesting", ["ts_mean(rank(close / open), 5)"]),
+        _decision(
+            "rank(close / open)",
+            "normalization",
+            ["log(rank(close / open))", "-rank(close / open)"],
+        ),
+    )
+    d.agent.client = client
+    # Before the round, the parent's allowed edits already exclude the vetoed one.
+    assert "nesting" not in next(c for c in d.candidates() if c.view.id == parent).allowed
+    outcomes = d.step()
+    assert len(client.calls) == 2
+    assert "refused" in client.calls[1]["messages"][0]["content"]
+    assert {o.motif_intended for o in outcomes} == {"normalization"}
+
+
+def test_two_refusals_fall_back_to_the_memorys_selection(con, ledger):
+    bad = _decision("rank(close / open)", "window_rescale", ["rank(close / open)"])  # not offered
+    unknown = {**bad, "parent_id": "nope", "edit": "nesting"}
+    d = _agent_deepener(con, AgentClient(bad, unknown))
+    d.editor = ScriptedEditor(["log(cap)", "sign(volume)"])
+    d.step()
+    record = json.loads(con.execute("SELECT reason FROM moves").fetchone()["reason"])
+    assert record["by"] == "memory" and d.refusals == 1
+    assert len(d.editor.asked) == 1  # the editor wrote the fallback round
+
+
+def test_the_agent_spends_from_the_same_call_limit(con, ledger):
+    client = AgentClient(_decision("rank(close / open)", "nesting", ["log(cap)", "x("]))
+    agent = DeepenAgent(client, CONFIG, max_calls=1, usage=Counter())
+    d = deepener(con, ScriptedEditor(), children=2)
+    d.agent = agent
+    with pytest.raises(BudgetExhausted):  # the repair call would be the second
+        d.step()
