@@ -1,0 +1,56 @@
+# Step 3 of learned memory search, v2: the small check, pre-registered again.
+# Written before any v2 run. Read by research/learned_memory_search_check.py
+# with --design research/learned_memory_search_check_v2.toml.
+#
+# Why a v2. The v1 check (learned_memory_search_check.toml, run 2026-10-05,
+# commit 8cda429) did not answer its question: neither condition recovered
+# the planted factor in any of its 10 planted runs (criterion 1 not met;
+# criterion 2 met on medians, 13 vs 23 admitted, with overlapping ranges).
+# Diagnosis from its stores: 58% of children were rejected by screening
+# before scoring, 81% of those by frequent subtree avoidance applied to
+# structure inherited from the parent (fixed in 6aa05f3: only structure the
+# edit adds is judged now); and on its null panel noise alone reached
+# |ICIR| 0.26-0.30, as high as the planted 0.30.
+#
+# Changes from v1, and nothing else: the screening fix above (in the code);
+# a 7-year panel (1764 days, was 1260); the planted factor at |ICIR| 0.50
+# (was 0.30). Question, conditions, budget, seeds and criteria are v1's.
+
+[panel]
+n_stocks = 100
+n_days = 1764
+seed = 0
+# Planted: -ts_sum(returns, 5). Beta set by bisection on panel seed 0 to a
+# |ICIR| of 0.50 (h = 20, every 5th day); the null panel has beta = 0.
+beta = 1.46e-3
+horizon = 20
+ic_step = 5
+sample_cells = 20000
+
+[search]
+seeds = [
+  "ts_mean(returns, 63) / ts_std(returns, 63)",
+  "ts_std(returns, 21)",
+  "rank(cap)",
+  "(high - low) / close",
+  "ts_corr(returns, mkt_return, 63)",
+  "ts_mean(volume, 5) / ts_mean(volume, 63)",
+  "ema(abs(returns), 21)",
+  "shift(returns, 21)",
+  "high / low",
+  "ts_corr(close, volume, 21)",
+]
+recovery_corr = 0.9
+
+[check]
+conditions = ["memory", "no_memory"]
+panels = ["planted", "null"]
+run_seeds = [0, 1, 2, 3, 4]
+budget = 300
+
+# Criteria, unchanged from v1:
+# 1. planted panel: memory's median evaluations to first recovery is lower
+#    than no_memory's (a run that never recovers counts as budget + 1);
+# 2. null panel: memory's median admitted children per run is at most
+#    no_memory's.
+# With 5 seeds this shows a direction, not significance.

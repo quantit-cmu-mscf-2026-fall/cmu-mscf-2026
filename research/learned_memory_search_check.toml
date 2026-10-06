@@ -1,0 +1,55 @@
+# Step 3 of learned memory search: a small check, pre-registered.
+# Written before any run. Read by research/learned_memory_search_check.py.
+#
+# Question: running the deepen move on a synthetic panel with one planted
+# factor, does learned memory search find it in fewer evaluations than the
+# same move with the memory switched off, without admitting more factors on
+# the null panel?
+#
+# "No memory" is the same code with lambda_max = 0 (the memory never moves a
+# score) and the veto off (memory_veto_confidence = 1.0): the parent is the
+# best by S_ledger and the edit is chosen at random among those it offers.
+# Edits come from the free random editor (capstone.factors.edits), so the
+# check makes no model calls. Screening, pool and settings are as in
+# config/factors.toml, with the alignment judge off (it needs a model).
+
+[panel]
+n_stocks = 100
+n_days = 1260
+seed = 0
+# Planted: -ts_sum(returns, 5). Beta set by bisection on panel seed 0 to a
+# |ICIR| of 0.30 (h = 20, every 5th day); the null panel has beta = 0.
+beta = 7.87e-4
+horizon = 20
+ic_step = 5
+sample_cells = 20000
+
+[search]
+seeds = [
+  "ts_mean(returns, 63) / ts_std(returns, 63)",
+  "ts_std(returns, 21)",
+  "rank(cap)",
+  "(high - low) / close",
+  "ts_corr(returns, mkt_return, 63)",
+  "ts_mean(volume, 5) / ts_mean(volume, 63)",
+  "ema(abs(returns), 21)",
+  "shift(returns, 21)",
+  "high / low",
+  "ts_corr(close, volume, 21)",
+]
+# Recovered: some admitted child has |corr| >= this with the planted factor.
+recovery_corr = 0.9
+
+[check]
+conditions = ["memory", "no_memory"]
+panels = ["planted", "null"]
+run_seeds = [0, 1, 2, 3, 4]
+budget = 300 # evaluations (children) per run: 60 deepen rounds of 5
+
+# Criteria, fixed in advance:
+# 1. planted panel: memory's median evaluations to first recovery is lower
+#    than no_memory's (a run that never recovers counts as budget + 1);
+# 2. null panel: memory's median admitted children per run is at most
+#    no_memory's.
+# With 5 seeds this shows a direction, not significance; the spread is
+# reported alongside.
