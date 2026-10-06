@@ -49,8 +49,10 @@ Stooq, and most aggregators) are freely *accessible* but do not grant us the
 right to republish a prepared dataset — the underlying exchange data is
 separately licensed regardless of what the aggregator's own terms say. So:
 
-**Preferred: CRSP via WRDS.** CMU subscribes; you register with your CMU email
-and connect through full VPN off campus. CRSP is the academic standard for US
+**Preferred: CRSP via WRDS.** CMU subscribes; you register with your CMU email.
+No VPN is needed — a connection from a residential ISP with no CMU VPN active
+succeeded on 2026-09-21, because WRDS authenticates by credentials rather than
+by network path. CRSP is the academic standard for US
 equity prices — properly adjusted, delisting returns included, and PERMNO
 identifiers that survive ticker changes. It is better than anything free, it is
 already yours, and it is explicitly allowed by the agreement. Every team member
