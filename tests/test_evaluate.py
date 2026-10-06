@@ -9,16 +9,25 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
+from scipy import stats
 
 from capstone.evaluate import (
+    average_correlation,
     benjamini_hochberg,
     bonferroni,
     deflated_sharpe_ratio,
     expected_max_sharpe,
     false_discovery_rate,
+    implied_independent_trials,
+    min_track_record_length,
+    newey_west_lags,
     power,
+    probabilistic_sharpe_ratio,
     sharpe_pvalue,
+    sharpe_test,
+    sharpe_variance,
 )
+from capstone.synth import make_return_matrix
 
 
 def _uniform_pvalues(n: int, seed: int = 0) -> pd.Series:
@@ -203,3 +212,183 @@ class TestPower:
         never_fires = pd.Series(False, index=names)
         assert np.isnan(false_discovery_rate(never_fires, truth))
         assert power(never_fires, truth) == 0.0
+
+
+class TestPaperExamples:
+    """Each number here is printed in the paper cited; the functions must reproduce it."""
+
+    def test_lo_2002_table_1_iid_standard_errors(self):
+        # Table 1: SE = sqrt((1 + SR^2 / 2) / T), SR per period.
+        for sr, t, printed in [(0.5, 12, 0.306), (1.0, 60, 0.158), (3.0, 500, 0.105)]:
+            assert np.sqrt((1 + sr**2 / 2) / t) == pytest.approx(printed, abs=5e-4)
+        returns = pd.Series(np.r_[np.full(50, 2.0), np.full(50, 0.0)])  # SR exactly 1
+        assert sharpe_variance(returns, method="normal") == pytest.approx(1.5)
+
+    def test_bailey_2012_psr_example(self):
+        # Section 3: monthly SR 0.458 over two years gives 0.982 assuming
+        # normality, 0.913 with the track record's skew and kurtosis, and 0.953
+        # over three years (0.9535 unrounded).
+        sharpe = 0.458 * np.sqrt(12)
+        fat = dict(skew=-2.448, kurtosis=10.164, periods_per_year=12)
+        normal = probabilistic_sharpe_ratio(sharpe, 24, periods_per_year=12)
+        assert normal == pytest.approx(0.982, abs=5e-4)
+        assert probabilistic_sharpe_ratio(sharpe, 24, **fat) == pytest.approx(0.913, abs=5e-4)
+        assert probabilistic_sharpe_ratio(sharpe, 36, **fat) == pytest.approx(0.953, abs=1e-3)
+
+    @pytest.mark.parametrize(
+        "periods_per_year, skew, kurtosis, years",
+        [
+            (252, 0.0, 3.0, 2.73),
+            (52, 0.0, 3.0, 2.83),
+            (12, 0.0, 3.0, 3.24),
+            (12, -0.72, 5.78, 4.99),
+        ],
+    )
+    def test_bailey_2012_min_track_record_examples(self, periods_per_year, skew, kurtosis, years):
+        # Section 5: annualised SR 2 against 1 at 95%, daily, weekly and
+        # monthly, then monthly with the HFR index's skew and kurtosis.
+        observations = min_track_record_length(
+            2.0, benchmark=1.0, skew=skew, kurtosis=kurtosis, periods_per_year=periods_per_year
+        )
+        assert observations / periods_per_year == pytest.approx(years, abs=5e-3)
+
+    def test_bailey_2014_dsr_example(self):
+        # "A numerical example": N=100, V[SR_n]=1/2 (annualised), T=1250,
+        # skew -3, kurtosis 10, SR 2.5, 250 periods a year.
+        kwargs = dict(periods_per_year=250, trials_sharpe_variance=0.5)
+        threshold = expected_max_sharpe(100, 1250, **kwargs)
+        assert threshold / np.sqrt(250) == pytest.approx(0.1132, abs=5e-5)
+        dsr = deflated_sharpe_ratio(2.5, 100, 1250, skew=-3, kurtosis=10, **kwargs)
+        assert dsr == pytest.approx(0.9004, abs=5e-5)
+        # 0.9505 after only N=46 trials, and with normal returns 0.9505 after N=88.
+        at_46 = deflated_sharpe_ratio(2.5, 46, 1250, skew=-3, kurtosis=10, **kwargs)
+        assert at_46 == pytest.approx(0.9505, abs=5e-5)
+        assert deflated_sharpe_ratio(2.5, 88, 1250, **kwargs) == pytest.approx(0.9505, abs=5e-5)
+
+    def test_default_trial_variance_is_the_iid_null_one(self):
+        # Without a measured variance the old behaviour holds: V[SR_n] = 1/T
+        # per period. On the paper's example that is far too lenient.
+        assert expected_max_sharpe(100, 1250, 250) == pytest.approx(
+            expected_max_sharpe(100, 1250, 250, trials_sharpe_variance=250 / 1250)
+        )
+        lenient = deflated_sharpe_ratio(2.5, 100, 1250, skew=-3, kurtosis=10, periods_per_year=250)
+        assert lenient > 0.95
+
+
+def _rejection_rate(method: str, n_obs: int = 1000, n_candidates: int = 1000, **options) -> float:
+    returns = make_return_matrix(n_obs=n_obs, n_candidates=n_candidates, seed=0, **options).returns
+    pvalues = [sharpe_test(returns[name], method=method).pvalue for name in returns.columns]
+    return float(np.mean(np.array(pvalues) < 0.05))
+
+
+class TestSharpeVarianceCalibration:
+    """Null calibration: at a nominal 5%, how often does each method reject a true null?
+
+    1000 null candidates per case, so a correct 5% test lands in about
+    [0.036, 0.064]. The bounds leave a little more room than that: across ten
+    seeds the calibrated cases ranged 0.040-0.069 and the broken ones started
+    at 0.128.
+    """
+
+    @pytest.mark.parametrize("method", ["normal", "nonnormal", "hac"])
+    def test_every_method_is_calibrated_on_iid_normal_nulls(self, method):
+        assert 0.025 <= _rejection_rate(method) <= 0.08
+
+    def test_nonnormal_is_calibrated_under_fat_tails(self):
+        assert 0.025 <= _rejection_rate("nonnormal", t_df=5) <= 0.08
+
+    def test_autocorrelation_breaks_the_iid_methods_and_hac_repairs_most_of_it(self):
+        # AR(1) at 0.3 inflates the variance of the mean by (1+0.3)/(1-0.3).
+        # Mertens has no autocorrelation term, so it over-rejects as badly as
+        # the normal formula; this is the claim in sharpe_variance's docstring.
+        assert _rejection_rate("normal", ar1=0.3) > 0.12
+        assert _rejection_rate("nonnormal", ar1=0.3) > 0.12
+        assert _rejection_rate("hac", ar1=0.3) < 0.10
+
+    def test_negative_autocorrelation_makes_the_iid_methods_timid(self):
+        assert _rejection_rate("nonnormal", ar1=-0.3) < 0.02
+        assert _rejection_rate("hac", ar1=-0.3) > 0.025
+
+    def test_hac_holds_up_under_volatility_clustering(self):
+        assert _rejection_rate("hac", ar1=0.3, garch=(0.1, 0.85)) < 0.10
+
+    def test_hac_finds_planted_signal(self):
+        # Power: Sharpe 1.0 over ten years with AR(1) 0.3 is about 2.3 standard errors.
+        matrix = make_return_matrix(n_candidates=200, n_real=200, sharpe_real=1.0, ar1=0.3, seed=0)
+        pvalues = [sharpe_test(matrix.returns[c]).pvalue for c in matrix.returns.columns]
+        assert np.mean(np.array(pvalues) < 0.05) > 0.5
+
+
+class TestSharpeVariance:
+    def test_hac_with_no_lags_is_exactly_mertens(self):
+        returns = make_return_matrix(n_obs=500, n_candidates=1, n_real=1, t_df=5, seed=3).returns
+        series = returns.iloc[:, 0]
+        assert sharpe_variance(series, "hac", lags=0) == pytest.approx(
+            sharpe_variance(series, "nonnormal"), rel=1e-12
+        )
+
+    def test_nonnormal_matches_the_skew_kurtosis_formula(self):
+        returns = make_return_matrix(n_obs=800, n_candidates=1, n_real=1, t_df=5, seed=1).returns
+        x = returns.iloc[:, 0].to_numpy()
+        sr = x.mean() / x.std()
+        expected = 1 - stats.skew(x) * sr + (stats.kurtosis(x, fisher=False) - 1) / 4 * sr**2
+        assert sharpe_variance(returns.iloc[:, 0], "nonnormal") == pytest.approx(expected)
+
+    def test_default_lags_follow_the_newey_west_rule(self):
+        assert newey_west_lags(100) == 4
+        assert newey_west_lags(2520) == 8
+
+    def test_zero_variance_gives_nan(self):
+        assert np.isnan(sharpe_variance(pd.Series([0.01] * 100)))
+
+    def test_rejects_bad_arguments(self):
+        series = pd.Series(np.random.default_rng(0).standard_normal(100))
+        with pytest.raises(ValueError):
+            sharpe_variance(series, method="bootstrap")
+        with pytest.raises(ValueError):
+            sharpe_variance(series, lags=-1)
+        with pytest.raises(ValueError):
+            sharpe_variance(pd.Series([0.01]))
+
+    def test_sharpe_test_psr_agrees_with_its_pvalue(self):
+        # The one-sided PSR and the two-sided p-value come from the same z.
+        returns = make_return_matrix(n_candidates=1, n_real=1, sharpe_real=0.8, seed=2).returns
+        result = sharpe_test(returns.iloc[:, 0])
+        assert result.sharpe > 0
+        assert 1 - result.psr == pytest.approx(result.pvalue / 2, abs=2e-3)
+
+
+class TestTrackRecordAndPSR:
+    def test_min_track_record_is_infinite_below_the_benchmark(self):
+        assert min_track_record_length(0.5, benchmark=1.0) == float("inf")
+
+    def test_min_track_record_is_nan_when_the_variance_is_not_positive(self):
+        # 1 - skew*SR + (kurtosis-1)/4*SR^2 = 1 - 15 + 4.5 < 0 at SR = 3 per period.
+        sharpe = 3.0 * np.sqrt(252)
+        assert np.isnan(min_track_record_length(sharpe, skew=5.0))
+        assert np.isnan(probabilistic_sharpe_ratio(sharpe, 100, skew=5.0))
+        assert np.isnan(min_track_record_length(1.0, variance=0.0))
+
+    def test_min_track_record_is_nan_for_a_nan_sharpe(self):
+        assert np.isnan(min_track_record_length(float("nan")))
+
+    def test_psr_at_min_track_record_is_the_confidence_level(self):
+        n = min_track_record_length(1.5, benchmark=0.5, skew=-0.5, kurtosis=6.0)
+        psr = probabilistic_sharpe_ratio(1.5, n, benchmark=0.5, skew=-0.5, kurtosis=6.0)
+        assert psr == pytest.approx(0.95, abs=1e-9)
+
+    def test_variance_override_is_used(self):
+        assert probabilistic_sharpe_ratio(1.0, 500, variance=4.0) < probabilistic_sharpe_ratio(
+            1.0, 500
+        )
+
+
+class TestIndependentTrials:
+    def test_endpoints(self):
+        assert implied_independent_trials(100, 0.0) == 100
+        assert implied_independent_trials(100, 1.0) == 1
+        assert implied_independent_trials(100, -0.2) == 100
+
+    def test_average_correlation_recovers_rho(self):
+        returns = make_return_matrix(n_candidates=40, rho=0.4, seed=0).returns
+        assert average_correlation(returns) == pytest.approx(0.4, abs=0.05)
