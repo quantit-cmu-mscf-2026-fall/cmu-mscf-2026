@@ -62,6 +62,14 @@ Every correction depends on how many candidates were tried. That number comes
 from the run ledger (`capstone.runlog`), not from an argument someone typed:
 log every trial before looking at its result.
 
+**What counts as a trial:** every candidate whose performance anyone, or any
+agent, has seen. That includes parameter variants, candidates that were
+discarded, and every iteration inside an agent's search. An idea that never
+produced a performance number is not a trial. Counts accumulate across rounds
+of a search, because each round is chosen knowing the earlier results. The
+deflated Sharpe ratio needs this full count and the spread of Sharpe ratios
+across all of it (Bailey & López de Prado 2014).
+
 ## Graded evidence, not one yes/no
 
 A candidate is not "real" because one procedure said so. Every correction here
@@ -101,6 +109,61 @@ Choosing the procedure or threshold after seeing results is multiple testing
 of its own. Thresholds are tuned on simulated candidate sets to a chosen ratio
 of missed discoveries to false ones (Harvey & Liu 2020), not left at textbook
 defaults.
+
+## Decisions the stages depend on
+
+Proposed 2026-09-29; holdout dates fixed 2026-10-05. These are fixed before any
+agent generates candidates; changing one later means re-running every candidate
+scored under the old one.
+
+**Holdout period.** Language models can reproduce market history from before
+their training cutoff, even when told not to (Glasserman & Lin 2023; Sarkar &
+Vafa 2024). A holdout guards against search overfitting but not against the
+model's memory of the period it covers.
+
+The agents run on Claude Opus 5 (`claude-opus-5`, a pinned snapshot; training
+cutoff May 2026; set in `config/factors.toml`). The data is CRSP from
+1990-01-02 to 2025-12-31, and no new data is coming while this is built, so
+all of it predates the cutoff. The split (decided 2026-10-05):
+
+| Period | Dates | Who sees it |
+|---|---|---|
+| Search | 1990-01-02 to 2020-12-31 | Agents and stages 1-3 |
+| Holdout | 2021-01-01 to 2025-12-31 | The final stage only, looked at once |
+
+Five years rather than three because at 95% confidence (normal returns) an
+annual Sharpe of 1.0 needs about 2.7 years to tell from zero, 0.75 about 4.8
+and 0.5 about 11: five years can confirm 0.75 and up, three only about 1 and
+up. Since the holdout predates the cutoff, the model may remember it: a
+candidate that passes is not established against memorisation, and results
+should say so. Changing the agents' model means deciding these dates again.
+
+**Trading costs.** Candidates are scored net of costs from stage 1, with gross
+returns reported alongside. Most published anomalies earn close to nothing
+after bid-ask costs (Chen & Velikov 2023), so screening gross returns spends
+the later stages on candidates that were never tradable. The cost model is an
+estimated effective spread from CRSP times turnover, fixed before scoring.
+
+**Stage 3 comparison set.**
+
+- *Known factors:* Fama–French five factors plus momentum, from Ken French's
+  library (`load_french`; the momentum file still needs adding).
+- *Known signals:* the Chen & Zimmermann open-source anomaly portfolios (over
+  200 published signals), plus any signal we already hold. An agent that has
+  read the literature tends to rediscover published anomalies, and those earn
+  about half as much after publication (McLean & Pontiff 2016). Adding value
+  beyond this set is the test of novelty.
+
+The anomaly portfolios are monthly, so stage 3 runs on monthly returns.
+
+**Calibration range for the share of real candidates.** Start at 0 to 5% for
+agent-generated candidates. Harvey & Liu (2020) use up to 20% for a curated
+database of strategies already known to have worked, which is not our setting.
+Update the range as planted signals and the ledger's history give base rates.
+
+**Data.** Index membership as of each date, not today's members, and returns
+that include delisting returns (Shumway 1997). Either mistake biases every
+backtest upward, and no method in this document can correct it.
 
 ## What exists
 
