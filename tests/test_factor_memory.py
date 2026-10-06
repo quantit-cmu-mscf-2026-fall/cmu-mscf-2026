@@ -3,18 +3,27 @@
 from __future__ import annotations
 
 import math
+import random
+import sqlite3
 
 import pytest
 
+from capstone.factors import store
 from capstone.factors.llm import FactorConfig
 from capstone.factors.memory import (
     MOTIFS,
     PRODUCIBLE_MOTIFS,
+    STATUSES,
+    MemoryState,
     edit_motif,
+    event_motif,
     locate_edit,
+    memory_events,
     parameter_bin,
     parent_context,
     preprocess,
+    record_event,
+    reduce_events,
 )
 from capstone.factors.tree import Const, identity_key, parse, unparse
 
@@ -217,3 +226,119 @@ def test_context_size_bin_edges(nodes, band):
 )
 def test_context_usage_bin_edges(times, band):
     assert parent_context(parse("returns"), quality=0.0, times_selected=times).endswith(band)
+
+
+# ---------------------------------------------------------------------------
+# Memory events and statistics
+
+
+@pytest.fixture
+def con(tmp_path):
+    con = store.connect(tmp_path / "factors.db")
+    yield con
+    con.close()
+
+
+def event(con, status, quality=None, baseline=None, *, motif="nesting", realized="", **kw):
+    return record_event(
+        con,
+        run_id=kw.pop("run_id", "run-a"),
+        iteration=kw.pop("iteration", 0),
+        parent_id="p1",
+        context=kw.pop("context", "returns|q2|d0|u0"),
+        motif_intended=motif,
+        motif_realized=motif if realized == "" else realized,
+        status=status,
+        child_expression="ts_mean(returns, 5)",
+        quality=quality,
+        baseline=baseline,
+        **kw,
+    )
+
+
+def test_events_store_the_residual_and_read_back_in_order(con):
+    event(con, "admitted", 0.25, 0.10, iteration=0)
+    event(con, "invalid", realized=None, iteration=1)
+    rows = memory_events(con)
+    assert [r["iteration"] for r in rows] == [0, 1]
+    assert rows[0]["residual"] == pytest.approx(0.15)
+    assert rows[1]["residual"] is None
+    assert memory_events(con, run_id="other") == []
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"status": "stored"},
+        {"status": "admitted", "motif": "rewrite"},
+        {"status": "admitted", "quality": 0.2},
+        {"status": "admitted", "baseline": 0.1},
+    ],
+)
+def test_bad_events_are_refused(con, bad):
+    with pytest.raises(ValueError):
+        event(con, **bad)
+    assert memory_events(con) == []
+
+
+def test_a_failed_parse_counts_under_the_intended_motif():
+    assert event_motif({"motif_realized": None, "motif_intended": "nesting"}) == "nesting"
+    assert event_motif({"motif_realized": "other", "motif_intended": "nesting"}) == "other"
+
+
+def test_statistics_by_hand(con):
+    # Residuals 0.1, 0.3, -0.1: mean 0.1, sample sd 0.2. Two failures of four.
+    for status, q in [("admitted", 0.2), ("high_quality", 0.4), ("rejected", 0.0)]:
+        event(con, status, q, 0.1)
+    event(con, "invalid", realized=None)
+    stats = MemoryState.from_events(memory_events(con)).stats("returns|q2|d0|u0", "nesting")
+    assert (stats.n, stats.attempts, stats.failures) == (3, 4, 2)
+    assert stats.mean == pytest.approx(0.1) and stats.std == pytest.approx(0.2)
+    assert stats.failure_rate == pytest.approx(3 / 6)  # Beta(3, 3)
+
+
+def test_an_unseen_pair_has_the_prior():
+    stats = MemoryState().stats("price|unscored|d0|u0", "feature_swap")
+    assert (stats.n, stats.attempts, stats.failure_rate) == (0, 0, 0.5)
+    assert math.isnan(stats.std)
+
+
+def test_online_welford_equals_batch_reduction(con):
+    rng = random.Random(0)
+    contexts = ["returns|q1|d0|u0", "price+volume|q2|d1|u1", "size|unscored|d0|u0"]
+    online = MemoryState()
+    for i in range(600):
+        status = rng.choice(STATUSES)
+        scored = status != "invalid"
+        online.update(
+            event(
+                con,
+                status,
+                rng.gauss(0.1, 0.08) if scored else None,
+                rng.uniform(0.0, 0.2) if scored else None,
+                motif=rng.choice(PRODUCIBLE_MOTIFS),
+                realized="" if scored else None,
+                context=rng.choice(contexts),
+                iteration=i,
+            )
+        )
+    batch = reduce_events(memory_events(con))
+    assert online.pairs.keys() == batch.keys()
+    for key, want in batch.items():
+        got = online.pairs[key]
+        assert (got.n, got.attempts, got.failures) == (want.n, want.attempts, want.failures)
+        assert got.mean == pytest.approx(want.mean, abs=1e-12)
+        assert got.m2 == pytest.approx(want.m2, abs=1e-12)
+
+
+def test_older_stores_gain_the_memory_table(tmp_path):
+    path = tmp_path / "factors.db"
+    store.connect(path).close()
+    old = sqlite3.connect(path)
+    old.execute("DROP TABLE memory_events")  # a store from before the table existed
+    old.commit()
+    old.close()
+    con = store.connect(path)
+    event(con, "admitted", 0.2, 0.1)
+    assert len(memory_events(con)) == 1
+    con.close()

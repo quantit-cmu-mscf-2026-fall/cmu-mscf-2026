@@ -1,23 +1,32 @@
-"""Learned memory search: what kind of parent, and what kind of edit.
+"""Learned memory search: what kind of parent and edit, and what each edit did.
 
 Adapted from AlphaMemo (Yu, Zheng, Pan, Liu, Wang & He 2026, arXiv
 2606.20625). When the agent deepens a factor (refines it), learned memory
 search remembers, for each kind of parent and each kind of edit, whether the
-edit did better than expected. This module names the two kinds:
+edit did better than expected.
 
 - `parent_context` is the paper's z(p) (Eq. 2): the field groups the parent
   reads, and bins of its quality, size and how often it has been selected.
 - `edit_motif` is the paper's m(p, c) (Eq. 9-10): one of the ten `MOTIFS`,
   read off the parent and child trees.
+- `record_event` appends each edit to the store's `memory_events` table;
+  `MemoryState` reduces the events to the Eq. 6 statistics per (context,
+  motif): Welford mean and variance of the residuals, and a Beta posterior
+  over failures.
 
-Nothing here reads market data.
+Nothing here reads market data: qualities come from the scorer.
 """
 
 from __future__ import annotations
 
 import math
+import sqlite3
+import statistics
 from collections import Counter
+from collections.abc import Iterable
+from dataclasses import dataclass
 
+from capstone.factors import store
 from capstone.factors.tree import (
     WINDOW_MAX,
     BinOp,
@@ -331,3 +340,154 @@ def edit_motif(parent: Node, child: Node) -> str:
     """
     pair = locate_edit(parent, child)
     return "other" if pair is None else _classify(*pair)
+
+
+# ---------------------------------------------------------------------------
+# Memory events and statistics (Eq. 4, 6)
+
+# invalid: fails to parse or compute; rejected: fails screening or admission;
+# admitted: enters the pool; high_quality: admitted with Q >= 0.20.
+STATUSES = ("invalid", "rejected", "admitted", "high_quality")
+FAILURES = frozenset({"invalid", "rejected"})
+
+
+def record_event(
+    con: sqlite3.Connection,
+    *,
+    run_id: str,
+    iteration: int,
+    parent_id: str,
+    context: str,
+    motif_intended: str,
+    status: str,
+    child_expression: str,
+    child_id: str | None = None,
+    hypothesis_id: str | None = None,
+    motif_realized: str | None = None,
+    quality: float | None = None,
+    baseline: float | None = None,
+) -> dict:
+    """Append one edit to `memory_events` and return it as `MemoryState.update` takes it.
+
+    A scored child carries its quality Q(c) and its parent's baseline; the
+    residual Q(c) - Q-hat(p) (Eq. 4) is computed here, so a row cannot
+    disagree with itself.
+    """
+    if status not in STATUSES:
+        raise ValueError(f"status must be one of {STATUSES}, got {status!r}")
+    for motif in (motif_intended, motif_realized):
+        if motif is not None and motif not in MOTIFS:
+            raise ValueError(f"unknown motif {motif!r}")
+    if (quality is None) != (baseline is None):
+        raise ValueError("a scored child needs both its quality and its parent's baseline")
+    residual = None if quality is None else quality - baseline
+    row = {
+        "run_id": run_id,
+        "iteration": iteration,
+        "parent_id": parent_id,
+        "child_id": child_id,
+        "child_expression": child_expression,
+        "hypothesis_id": hypothesis_id,
+        "context": context,
+        "motif_intended": motif_intended,
+        "motif_realized": motif_realized,
+        "status": status,
+        "quality": quality,
+        "baseline": baseline,
+        "residual": residual,
+        "created_at": store._now(),
+    }
+    with con:
+        con.execute(
+            f"INSERT INTO memory_events ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})",
+            tuple(row.values()),
+        )
+    return row
+
+
+def memory_events(con: sqlite3.Connection, run_id: str | None = None) -> list[dict]:
+    """Every memory event in the order it was recorded, optionally for one run."""
+    if run_id is None:
+        rows = con.execute("SELECT * FROM memory_events ORDER BY id")
+    else:
+        rows = con.execute("SELECT * FROM memory_events WHERE run_id = ? ORDER BY id", (run_id,))
+    return [dict(r) for r in rows]
+
+
+def event_motif(event: dict) -> str:
+    """The motif an event counts under: the realized one, else (no child tree) the intended one."""
+    return event["motif_realized"] or event["motif_intended"]
+
+
+@dataclass
+class PairStats:
+    """Eq. 6 for one (context, motif) pair.
+
+    `n`, `mean`, `m2`: Welford's count, mean and sum of squared deviations of
+    the scored children's residuals (mean is 0 while n is 0). `attempts`
+    counts every child; `failures` those invalid or rejected. The failure
+    posterior is Beta(1 + failures, 1 + attempts - failures).
+    """
+
+    n: int = 0
+    mean: float = 0.0
+    m2: float = 0.0
+    attempts: int = 0
+    failures: int = 0
+
+    def add(self, status: str, residual: float | None) -> None:
+        self.attempts += 1
+        self.failures += status in FAILURES
+        if residual is not None:
+            self.n += 1
+            delta = residual - self.mean
+            self.mean += delta / self.n
+            self.m2 += delta * (residual - self.mean)
+
+    @property
+    def std(self) -> float:
+        """Sample standard deviation of the residuals; NaN below two."""
+        return math.sqrt(self.m2 / (self.n - 1)) if self.n >= 2 else math.nan
+
+    @property
+    def failure_rate(self) -> float:
+        """Posterior mean failure rate a- / (a- + b-)."""
+        return (1 + self.failures) / (2 + self.attempts)
+
+
+class MemoryState:
+    """The memory, updated one event at a time: (context, motif) -> PairStats."""
+
+    def __init__(self) -> None:
+        self.pairs: dict[tuple[str, str], PairStats] = {}
+
+    def update(self, event: dict) -> None:
+        key = (event["context"], event_motif(event))
+        self.pairs.setdefault(key, PairStats()).add(event["status"], event["residual"])
+
+    def stats(self, context: str, motif: str) -> PairStats:
+        """The pair's statistics; an unseen pair has none (n = 0, Beta(1, 1))."""
+        return self.pairs.get((context, motif), PairStats())
+
+    @classmethod
+    def from_events(cls, events: Iterable[dict]) -> MemoryState:
+        state = cls()
+        for event in events:
+            state.update(event)
+        return state
+
+
+def reduce_events(events: Iterable[dict]) -> dict[tuple[str, str], PairStats]:
+    """The same statistics in one batch pass per pair (`statistics`, not Welford),
+    so the two paths check each other."""
+    grouped: dict[tuple[str, str], list[dict]] = {}
+    for event in events:
+        grouped.setdefault((event["context"], event_motif(event)), []).append(event)
+    out = {}
+    for key, rows in grouped.items():
+        residuals = [r["residual"] for r in rows if r["residual"] is not None]
+        n = len(residuals)
+        mean = statistics.fmean(residuals) if n else 0.0
+        m2 = statistics.variance(residuals) * (n - 1) if n >= 2 else 0.0
+        out[key] = PairStats(n, mean, m2, len(rows), sum(r["status"] in FAILURES for r in rows))
+    return out
