@@ -57,6 +57,11 @@ class FactorConfig:
     memory_epsilon: float = 1e-6
     memory_veto_confidence: float = 0.3
     memory_veto_failure_rate: float = 0.7
+    memory_min_quality: float = 0.10
+    memory_high_quality: float = 0.20
+    memory_max_correlation: float = 0.70
+    memory_pool_capacity: int = 50
+    memory_children_per_parent: int = 5
 
     def __post_init__(self) -> None:
         if self.max_nodes < 3:
@@ -78,6 +83,12 @@ class FactorConfig:
             raise ValueError("need memory_warmup_start >= 0 and memory_warmup_length >= 1")
         if self.memory_lambda_max < 0 or self.memory_kappa <= 0 or self.memory_epsilon <= 0:
             raise ValueError("need memory_lambda_max >= 0, memory_kappa > 0, memory_epsilon > 0")
+        if not 0 <= self.memory_min_quality <= self.memory_high_quality:
+            raise ValueError("need 0 <= memory_min_quality <= memory_high_quality")
+        if not 0 < self.memory_max_correlation <= 1:
+            raise ValueError("memory_max_correlation must be in (0, 1]")
+        if self.memory_pool_capacity < 1 or self.memory_children_per_parent < 1:
+            raise ValueError("memory_pool_capacity and memory_children_per_parent must be >= 1")
         for name in ("memory_veto_confidence", "memory_veto_failure_rate"):
             if not 0 <= getattr(self, name) <= 1:
                 raise ValueError(f"{name} must be in [0, 1]")
