@@ -114,9 +114,19 @@ def _judge(
     client,
     usage: Counter | None,
     avoid: dict[str, str] | None = None,
+    lineage: dict | None = None,
+    inherited: frozenset[str] = frozenset(),
 ) -> Outcome:
+    """Screen one parsed formula and store or reject it.
+
+    `lineage` (parent_factor_id, edge_type) records a refinement of an
+    existing factor, as the deepen move makes. `inherited` is the parent's
+    root genes: a refinement keeps most of its parent by design, so frequent
+    subtree avoidance judges only the genes the edit added.
+    """
     hypothesis_id = hypothesis["id"]
     meta = dict(rationale=rationale, model=config.model, prompt_version=config.prompt_version)
+    meta.update(lineage or {})
     fid = factor_id(node)
     stored = [(name, tree) for name, tree in store.factor_trees(con) if name != fid]
     _, zoo_share, nearest_zoo = zoo_similarity(node, zoo)
@@ -135,7 +145,7 @@ def _judge(
         reason = f"not original: {zoo_share:.0%} of it is in {nearest_zoo}"
     elif store_share >= config.max_store_share:
         reason = f"not original: {store_share:.0%} of it is stored factor {nearest_factor}"
-    elif avoid and (overused := sorted(root_genes(node) & avoid.keys())):
+    elif avoid and (overused := sorted((root_genes(node) - inherited) & avoid.keys())):
         reason = "frequent subtree: " + "; ".join(avoid[g] for g in overused)
     else:
         # The judge runs last: it costs a model call, the checks above don't.
