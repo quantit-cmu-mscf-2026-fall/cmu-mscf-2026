@@ -99,9 +99,22 @@ def log_run(
     }
     ledger_dir = _ledger_dir()
     ledger_dir.mkdir(parents=True, exist_ok=True)
-    with (ledger_dir / LEDGER_FILENAME).open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(entry) + "\n")
+    path = ledger_dir / LEDGER_FILENAME
+    # A run interrupted mid-write leaves a last line with no newline. Start on a
+    # fresh line so this entry doesn't share it, and deleting the broken line
+    # can't take a complete trial with it.
+    lead = "\n" if _ends_mid_line(path) else ""
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(lead + json.dumps(entry) + "\n")
     return entry
+
+
+def _ends_mid_line(path: Path) -> bool:
+    if not path.exists() or path.stat().st_size == 0:
+        return False
+    with path.open("rb") as fh:
+        fh.seek(-1, os.SEEK_END)
+        return fh.read(1) != b"\n"
 
 
 def read_entries() -> list[dict]:
@@ -110,8 +123,7 @@ def read_entries() -> list[dict]:
     Blank lines are skipped. A line that is not valid JSON raises `ValueError`
     naming the file and line number, rather than being skipped: a skipped entry
     is a trial that silently vanishes from the count, which under-corrects every
-    downstream test and invents discoveries. Losing the SHA is survivable;
-    losing a trial is not.
+    downstream test and invents discoveries.
     """
     path = _ledger_dir() / LEDGER_FILENAME
     if not path.exists():
@@ -156,8 +168,8 @@ def trial_count(
             reuses one name). None counts every name.
         include_tags: count only entries carrying at least one of these tags.
         exclude_tags: drop entries carrying any of these tags. Use it to keep
-            methodology runs out of a strategy's family size; the convention in
-            `scripts/` is to tag those "synthetic".
+            methodology runs out of a strategy's family size; the convention
+            is to tag those "synthetic".
 
     Returns:
         The number of matching entries. Entries written without a `name` are
@@ -169,8 +181,13 @@ def trial_count(
             applies no correction at all, and the usual cause is a wrong
             `CAPSTONE_LEDGER_DIR`, a misspelled name or a tag filter that
             excluded everything, so it fails loudly instead of returning 0.
+        TypeError: if a tag filter is a bare string. `set("synthetic")` is a
+            set of letters, which would silently match nothing.
         ValueError: from `read_entries`, if a ledger line is malformed.
     """
+    for arg, tags in (("include_tags", include_tags), ("exclude_tags", exclude_tags)):
+        if isinstance(tags, str):
+            raise TypeError(f"{arg} takes a list of tags, not a string: [{tags!r}]")
     entries = read_entries()
     if name is not None:
         entries = [entry for entry in entries if entry.get("name") == name]

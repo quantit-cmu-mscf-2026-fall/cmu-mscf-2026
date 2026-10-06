@@ -141,6 +141,42 @@ def test_read_entries_names_a_malformed_line_instead_of_skipping_it(tmp_path, mo
         runlog.trial_count()
 
 
+def test_an_interrupted_write_does_not_swallow_the_next_entry(tmp_path, monkeypatch):
+    # The truncated line usually has no newline. If the next entry were
+    # appended onto it, deleting the line the error names would drop a
+    # complete trial along with the fragment.
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    path = tmp_path / runlog.LEDGER_FILENAME
+    runlog.log_run("alpha", seed=0)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write('{"name": "beta", "seed": 1')
+    runlog.log_run("gamma", seed=2)
+
+    with pytest.raises(ValueError, match=r"runs\.jsonl:2 is not valid JSON"):
+        runlog.read_entries()
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert lines[1] == '{"name": "beta", "seed": 1'
+    assert json.loads(lines[2])["name"] == "gamma"
+
+    # Deleting the named line, as the error says, keeps every complete trial.
+    path.write_text("\n".join([lines[0], *lines[2:]]) + "\n", encoding="utf-8")
+    assert [e["name"] for e in runlog.read_entries()] == ["alpha", "gamma"]
+
+
+def test_a_bare_string_tag_filter_is_refused(tmp_path, monkeypatch):
+    # set("synthetic") is a set of letters: as an exclude it matches nothing
+    # and returns the unscoped count with no error.
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    runlog.log_run("pbo-calibration", tags=["synthetic"])
+    runlog.log_run("mom-sweep")
+
+    with pytest.raises(TypeError, match="exclude_tags takes a list"):
+        runlog.trial_count(exclude_tags="synthetic")
+    with pytest.raises(TypeError, match="include_tags takes a list"):
+        runlog.trial_count(include_tags="synthetic")
+    assert runlog.trial_count(exclude_tags=["synthetic"]) == 1
+
+
 def test_blank_lines_are_not_trials(tmp_path, monkeypatch):
     monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
     runlog.log_run("alpha")
