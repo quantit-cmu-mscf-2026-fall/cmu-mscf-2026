@@ -150,6 +150,161 @@ def search_intensity(hypothesis_ids: Iterable) -> pd.Series:
 
 
 # ---------------------------------------------------------------------------
+# Bootstrapping a family's best variant (adapted from Carl Cui's
+# `carl/validation1-hypothesis-fdr`, paper_validation/.../bootstrap.py)
+# ---------------------------------------------------------------------------
+
+
+def block_length_rule(n_obs: int) -> int:
+    """Default circular block length, ceil(2 · n_obs^(1/3)): 16 at 500, 28 at 2,520.
+
+    Carl's calibration at n_obs = 500 (P(p <= 0.01) against a target of 0.010,
+    AR(1) coefficient phi):
+
+        block:        8        16        25        50
+        phi=0.0    0.0121    0.0132    0.0159    0.0227
+        phi=0.2    0.0141    0.0144    0.0169    0.0234
+        phi=0.5    0.0198    0.0172    0.0189    0.0245
+
+    Short blocks cut serial dependence at their edges; long blocks leave too
+    few distinct blocks. The minimum sits near 16, which this rule gives. A
+    1.3-1.7x excess at the 1% level remains at every length: a finite-sample
+    property of the studentised block bootstrap.
+    """
+    return max(1, int(np.ceil(2.0 * n_obs ** (1.0 / 3.0))))
+
+
+def bootstrap_family_pvalues(
+    returns: pd.DataFrame,
+    family: pd.Series,
+    *,
+    n_boot: int = 1999,
+    block_length: int | None = None,
+    seed: int | None = 0,
+    batch_size: int = 64,
+) -> pd.DataFrame:
+    """p-value of each hypothesis's best variant, by a block bootstrap of the maximum.
+
+    The stage-1 gate's input (`docs/validation/framework.md`, Q2): for each
+    hypothesis, how often the best of *its* variants would look this good in
+    a world where none of them is real, with the variants' actual correlation,
+    autocorrelation and tails. Unlike `search_adjusted_pvalue`, it needs no
+    assumption about how the variants are correlated, at the cost of
+    resampling.
+
+    Three rules make it correct (Carl's design, kept as he wrote it):
+
+    1. **One resampling for everyone.** Each replication draws one set of
+       circular blocks of dates and applies it to every column, so the
+       correlation between variants and between hypotheses survives.
+    2. **The null comes from centring.** The bootstrap statistic is
+       sqrt(T)(mean* - mean) / sd*, so the resampled world has no real variant
+       while keeping everything else about the data.
+    3. **The search is redone inside each replication.** The family maximum
+       is retaken every time, so the reference is the best of a search of this
+       size and this correlation.
+
+    The statistic is the one-sided t of the mean, sqrt(T) · mean / sd, which
+    ranks variants exactly as their Sharpe ratios do. Rows with a missing value
+    in any column are dropped first, so every variant is scored on the same
+    dates.
+
+    **Resolution.** A bootstrap p-value can't go below 1 / (n_boot + 1). BH
+    across H hypotheses at level q tests its most extreme rank at q / H, so
+    n_boot + 1 must exceed H / q, or the strongest hypotheses can't be told
+    apart and power collapses silently (Carl measured exactly that). This
+    raises if it doesn't.
+
+    Args:
+        returns: performance matrix, dates x candidates, higher is better.
+        family: hypothesis label per column of `returns` (a Series indexed by
+            column name). Families may differ in size.
+        n_boot: bootstrap replications.
+        block_length: circular block length; `block_length_rule` if omitted.
+        seed: seed for the resampling.
+        batch_size: replications per vectorised pass; memory only, never the
+            result.
+
+    Returns:
+        DataFrame indexed by hypothesis: `pvalue`, `k` (variants), `best`
+        (the column with the largest t) and `t` (its t-statistic).
+    """
+    if not isinstance(returns, pd.DataFrame) or not isinstance(family, pd.Series):
+        raise TypeError("returns must be a DataFrame and family a Series")
+    missing = returns.columns.difference(family.dropna().index)
+    if len(missing):
+        raise ValueError(f"family is missing for {len(missing)} columns, e.g. {missing[0]!r}")
+    data = returns.dropna(how="any")
+    n_obs = len(data)
+    block = block_length if block_length is not None else block_length_rule(n_obs)
+    if not 1 <= block <= n_obs:
+        raise ValueError("block_length must be between 1 and the number of complete rows")
+    if n_obs < 3:
+        raise ValueError("need at least 3 rows with no missing value")
+
+    # Lay the columns out family by family, so each family is one slice.
+    labels = family.reindex(data.columns)
+    order = np.argsort(labels.to_numpy().astype(str), kind="stable")
+    data = data.iloc[:, order]
+    labels = labels.iloc[order]
+    hypotheses, starts_at = np.unique(labels.to_numpy().astype(str), return_index=True)
+    n_hyp = len(hypotheses)
+    if n_boot + 1 <= n_hyp / 0.05:
+        raise ValueError(
+            f"n_boot={n_boot} can't resolve BH at 0.05 across {n_hyp} hypotheses; "
+            f"use n_boot >= {int(np.ceil(n_hyp / 0.05))}"
+        )
+
+    x = data.to_numpy(dtype=np.float64)
+    mean = x.mean(axis=0)
+    sd = np.maximum(x.std(axis=0, ddof=1), 1e-300)
+    t_obs = np.sqrt(n_obs) * mean / sd
+    best_obs = np.maximum.reduceat(t_obs, starts_at)
+
+    # A circular block sum is a difference of prefix sums over the doubled
+    # series, so each replication moves n_blocks x N numbers, not T x N.
+    doubled = np.concatenate([x, x], axis=0)
+    p1 = np.zeros((2 * n_obs + 1, x.shape[1]))
+    p2 = np.zeros_like(p1)
+    np.cumsum(doubled, axis=0, out=p1[1:])
+    np.cumsum(doubled**2, axis=0, out=p2[1:])
+    n_full, remainder = divmod(n_obs, block)
+
+    rng = np.random.default_rng(seed)
+    exceed = np.zeros(n_hyp, dtype=np.int64)
+    done = 0
+    while done < n_boot:
+        size = min(batch_size, n_boot - done)
+        starts = rng.integers(0, n_obs, size=(size, n_full))  # rule 1: shared draw
+        s1 = (p1[starts + block] - p1[starts]).sum(axis=1)
+        s2 = (p2[starts + block] - p2[starts]).sum(axis=1)
+        if remainder:
+            tail = rng.integers(0, n_obs, size=(size, 1))
+            s1 += (p1[tail + remainder] - p1[tail]).sum(axis=1)
+            s2 += (p2[tail + remainder] - p2[tail]).sum(axis=1)
+        mean_star = s1 / n_obs
+        var_star = np.maximum((s2 - n_obs * mean_star**2) / (n_obs - 1), 1e-300)
+        t_star = np.sqrt(n_obs) * (mean_star - mean) / np.sqrt(var_star)  # rule 2
+        best_star = np.maximum.reduceat(t_star, starts_at, axis=1)  # rule 3
+        exceed += (best_star >= best_obs).sum(axis=0)
+        done += size
+
+    best_col = [
+        data.columns[i + int(np.argmax(t_obs[i:j]))]
+        for i, j in zip(starts_at, [*starts_at[1:], len(t_obs)], strict=True)
+    ]
+    return pd.DataFrame(
+        {
+            "pvalue": (1.0 + exceed) / (n_boot + 1.0),
+            "k": np.diff([*starts_at, len(t_obs)]),
+            "best": best_col,
+            "t": best_obs,
+        },
+        index=pd.Index(hypotheses, name="hypothesis"),
+    )
+
+
+# ---------------------------------------------------------------------------
 # The FDR implied by a threshold under search (paper Section 4)
 # ---------------------------------------------------------------------------
 

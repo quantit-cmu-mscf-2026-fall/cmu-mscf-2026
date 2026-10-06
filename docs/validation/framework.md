@@ -68,8 +68,8 @@ Known weaknesses are measured ones, from the PRs cited.
 | Holm adjusted p (`holm_adjusted`, #32) | Any false call | candidate | Strictest guarantee | Far too strict for a screen | Graded score | 1, 4 |
 | Storey q (#31, #32) | Same as BH | candidate | More power when candidates are independent | **Unsafe when correlated**: 10–14% any-discovery rate at a nominal 5% | Graded score, independent candidates only | — |
 | Local FDR / empirical null (`local_fdr`, #54) | Same as BH, under correlation | candidate | A probability of being null per candidate, against a null that moves with a shared factor | Needs 200+ p-values; "real" means stands out from the other candidates, not Sharpe above zero | Graded score (`lfdr` column); replaces the stage-1 gate only if the harness shows a power gain | 1 |
-| Family-level bootstrap max + BH (Carl, `carl/validation1-hypothesis-fdr`) | Search within one hypothesis | hypothesis | Keeps any correlation pattern between a hypothesis's variants | Needs the family structure recorded; not yet a module | **Gate** | 1 |
-| Search-adjusted family p-value (`search_adjusted_pvalue`, #51) | Search within one hypothesis | hypothesis | Exact for independent or evenly correlated variants (`rho=`); used for the baseline | The independent formula over-corrects near-copies: power 0.64 vs 0.81 at K = 20, ρ = 0.9 | **Gate** input until the bootstrap is a module; the baseline's input | 1 |
+| Family-level bootstrap max + BH (`bootstrap_family_pvalues`, adapted from Carl's `carl/validation1-hypothesis-fdr`) | Search within one hypothesis | hypothesis | Keeps any correlation pattern between a hypothesis's variants; each family's null rate 0.047–0.060 at a nominal 0.05 | Needs the family structure recorded; 1.3–1.7× liberal at the 1% level with fat tails over 4 years (finite-sample) | **Gate** | 1 |
+| Search-adjusted family p-value (`search_adjusted_pvalue`, #51) | Search within one hypothesis | hypothesis | Exact for independent or evenly correlated variants (`rho=`); used for the baseline | The independent formula over-corrects near-copies: power 0.64 vs 0.81 at K = 20, ρ = 0.9 | The baseline's input; a check on the bootstrap | 1 |
 | PSR, MinTRL (#29) | Too short a track record | candidate | Readable: "how many years would we need?" | Single-candidate; no multiple testing | Graded score | 2, 4 |
 | Robustness to lags, costs, sub-periods | Fragile signals | candidate | Catches results that hang on one choice | Each check is another test if used as a gate | Graded score | 2 |
 | PBO / CSCV (`pbo`, #35) | Overfitting in the *selection* of the best | batch | Measures the search, not one candidate | 0.5 is the no-skill baseline; a single set ranges 0.06–0.78 | Batch diagnostic | 2 |
@@ -137,9 +137,10 @@ see the whole search.** The ledger records every trial, and the factor store
 
 - **The stage-1 unit is the hypothesis family**: one economic idea and all the
   expressions and parameters tried for it. Its p-value is adjusted for its own
-  search: Carl's bootstrap max (decided, Q2), or `search_adjusted_pvalue`
-  (#51) with the family's measured correlation `rho` until the bootstrap is a
-  module. BH then runs across families. This *replaces* BH across every
+  search: Carl's bootstrap max (decided, Q2; `bootstrap_family_pvalues`).
+  `search_adjusted_pvalue` (#51), with the family's measured correlation
+  `rho`, is the baseline's input and a quick check on it. BH then runs across
+  families. This *replaces* BH across every
   individual variant; it is not added on top. Use the correlation: an agent's
   variants of one idea are near-copies (ρ ≈ 0.9), and the independent formula
   then over-corrects.
