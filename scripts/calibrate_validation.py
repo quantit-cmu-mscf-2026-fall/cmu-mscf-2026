@@ -26,6 +26,9 @@ Each simulated setting is logged to the ledger as "validation-calibration"
 
     python scripts/calibrate_validation.py            # the full grid
     python scripts/calibrate_validation.py --quick    # 3 seeds, for a smoke test
+    python scripts/calibrate_validation.py --params scripts/calibrate_validation_extended.json
+
+`alpha2 = 1.0` in a sweep means no stage-2 gate (every survivor passes).
 """
 
 from __future__ import annotations
@@ -146,8 +149,9 @@ def recommend(results: pd.DataFrame, target: float) -> pd.DataFrame:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--quick", action="store_true", help="3 seeds, for a smoke test")
+    parser.add_argument("--params", type=Path, default=PARAMS, help="parameter file")
     args = parser.parse_args()
-    p = json.loads(PARAMS.read_text())
+    p = json.loads(args.params.read_text())
     seeds = range(3) if args.quick else range(*p["seeds"])
     grid = threshold_grid(p["sweep"])
 
@@ -165,6 +169,7 @@ def main() -> None:
                 "share_real": share,
                 "sharpe_real": sharpe,
                 "seed_range": [seeds.start, seeds.stop],
+                "params_file": args.params.name,
             },
             metrics={
                 f"{arm}_{m}": float(rows.loc[rows["arm"] == arm, m].mean())

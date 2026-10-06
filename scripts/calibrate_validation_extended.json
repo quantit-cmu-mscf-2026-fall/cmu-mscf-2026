@@ -1,0 +1,22 @@
+{
+  "n_families": 200,
+  "k": 10,
+  "within_rho": 0.9,
+  "defects": {"rho": 0.1, "ar1": 0.3, "t_df": 5, "garch": [0.05, 0.9]},
+  "search_years": 31,
+  "holdout_years": 5,
+  "stage2_years": 7,
+  "share_real": [0.0, 0.01, 0.02, 0.05],
+  "sharpe_real": [0.5, 1.0, 1.5],
+  "seeds": [100, 120],
+  "target_fdr": 0.10,
+  "baseline_q": 0.10,
+  "stage1": "rho",
+  "sweep": {
+    "q1": [0.1, 0.2, 0.3, 0.5],
+    "alpha2": [0.1, 0.2, 0.3, 0.5, 1.0],
+    "dsr": {"d4": [0.8], "final_trials": ["survivors"]},
+    "bh": {"q4": [0.1, 0.2, 0.3, 0.5]}
+  },
+  "bootstrap_check": {"share_real": [0.0, 0.02, 0.05], "sharpe_real": 1.0, "seeds": [100, 110], "n_boot": 3999}
+}
