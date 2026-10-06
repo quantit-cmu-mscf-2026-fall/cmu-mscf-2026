@@ -24,7 +24,10 @@ packages = ["capstone", "capstone.factors"]  # list every subpackage (tests chec
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["network: requires internet access (skips cleanly if unavailable)"]
+markers = [
+    "network: requires internet access (skips cleanly if unavailable)",
+    "report: writes a checkpoint report; runs only with --report",
+]
 
 [tool.ruff]
 line-length = 100

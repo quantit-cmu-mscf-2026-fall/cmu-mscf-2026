@@ -5,18 +5,27 @@ from __future__ import annotations
 import math
 import random
 import sqlite3
+from dataclasses import replace
 
 import pytest
 
 from capstone.factors import store
-from capstone.factors.llm import FactorConfig
+from capstone.factors.llm import FactorConfig, load_config
 from capstone.factors.memory import (
     MOTIFS,
     PRODUCIBLE_MOTIFS,
     STATUSES,
+    Baselines,
     MemoryState,
+    PairStats,
+    ParentView,
+    action_score,
     edit_motif,
     event_motif,
+    evidence,
+    evidence_table,
+    gate,
+    ledger_score,
     locate_edit,
     memory_events,
     parameter_bin,
@@ -24,6 +33,10 @@ from capstone.factors.memory import (
     preprocess,
     record_event,
     reduce_events,
+    select_action,
+    veto_gate,
+    vetoed,
+    warmup,
 )
 from capstone.factors.tree import Const, identity_key, parse, unparse
 
@@ -342,3 +355,210 @@ def test_older_stores_gain_the_memory_table(tmp_path):
     event(con, "admitted", 0.2, 0.1)
     assert len(memory_events(con)) == 1
     con.close()
+
+
+# ---------------------------------------------------------------------------
+# Decisions
+
+
+def stats_of(residuals, failures=0):
+    s = PairStats()
+    for r in residuals:
+        s.add("admitted", r)
+    for _ in range(failures):
+        s.add("invalid", None)
+    return s
+
+
+def test_settings_load_from_the_config_file():
+    cfg = load_config()
+    assert (cfg.memory_lambda_max, cfg.memory_warmup_start, cfg.memory_warmup_length) == (
+        0.05,
+        0,
+        200,
+    )
+    assert (cfg.memory_kappa, cfg.memory_veto_confidence, cfg.memory_veto_failure_rate) == (
+        5.0,
+        0.3,
+        0.7,
+    )
+
+
+@pytest.mark.parametrize(
+    "bad", [{"memory_warmup_length": 0}, {"memory_kappa": 0.0}, {"memory_veto_failure_rate": 1.5}]
+)
+def test_bad_settings_are_refused(bad):
+    with pytest.raises(ValueError):
+        FactorConfig(**bad)
+
+
+def test_baseline_is_the_parent_quality_until_the_context_has_history():
+    b = Baselines()
+    assert b.baseline("returns|q2|d0|u0", 0.15) == 0.15
+    b.add("returns|q2|d0|u0", 0.10)
+    b.add("returns|q2|d0|u0", 0.30)
+    b.add("price|q0|d0|u0", 0.90)  # another context does not count
+    assert b.baseline("returns|q2|d0|u0", 0.15) == pytest.approx(0.20)
+
+
+def test_gate_by_hand():
+    # n = 3, mu = 0.1, sigma = 0.2: 3/8 * min(1, 0.1 / 0.200001).
+    assert gate(stats_of([0.1, 0.3, -0.1]), 5.0, 1e-6) == pytest.approx(0.1875, rel=1e-4)
+    assert gate(stats_of([0.2] * 5), 5.0, 1e-6) == pytest.approx(0.5)  # sigma 0: saturates
+    assert gate(stats_of([0.5]), 5.0, 1e-6) == 0.0  # closed below two residuals
+
+
+def test_veto_gate_counts_attempts_until_two_are_scored():
+    assert veto_gate(stats_of([], failures=5), 5.0, 1e-6) == pytest.approx(0.5)
+    s = stats_of([0.1, 0.3, -0.1], failures=10)
+    assert veto_gate(s, 5.0, 1e-6) == gate(s, 5.0, 1e-6)
+
+
+@pytest.mark.parametrize(
+    ("t", "start", "expected"),
+    [(0, 0, 0.0), (50, 0, 0.0125), (200, 0, 0.05), (900, 0, 0.05), (150, 50, 0.025)],
+)
+def test_warmup_by_hand(t, start, expected):
+    assert warmup(t, replace(CONFIG, memory_warmup_start=start)) == pytest.approx(expected)
+
+
+def test_scores_by_hand():
+    assert ledger_score(0.2, 0.5, 3) == pytest.approx(0.2 * 0.5 / 2)
+    expected = math.log(0.05 + 1e-6) + 0.05 * 0.5 * 0.1
+    assert action_score(0.05, 0.05, 0.5, 0.1, 1e-6) == pytest.approx(expected)
+
+
+def test_veto_needs_both_confidence_and_failures():
+    assert vetoed(stats_of([], failures=4), CONFIG)  # gate 4/9 > 0.3, rate 5/6 > 0.7
+    assert not vetoed(stats_of([], failures=1), CONFIG)  # rate 2/3 < 0.7
+    assert not vetoed(stats_of([], failures=2), CONFIG)  # gate 2/7 < 0.3
+    assert not vetoed(stats_of([0.2] * 50), CONFIG)  # successes never veto
+
+
+PARENTS = [
+    ParentView("a", "returns|q2|d0|u0", 0.15, 0.0, 0),
+    ParentView("b", "volume|q1|d0|u0", 0.12, 0.0, 0),
+]
+
+
+def _fail(memory, context, motif, times=10):
+    for _ in range(times):
+        memory.update(
+            {
+                "context": context,
+                "motif_realized": None,
+                "motif_intended": motif,
+                "status": "invalid",
+                "residual": None,
+            }
+        )
+
+
+def test_selection_without_memory_follows_the_ledger_and_breaks_ties_in_order():
+    action = select_action(PARENTS, MemoryState(), 0, CONFIG)
+    assert (action.parent_id, action.motif) == ("a", PRODUCIBLE_MOTIFS[0])
+
+
+def test_a_vetoed_action_is_never_chosen():
+    memory = MemoryState()
+    _fail(memory, "returns|q2|d0|u0", "rank_switch")
+    action = select_action(PARENTS, memory, 0, CONFIG)
+    assert (action.parent_id, action.motif) == ("a", PRODUCIBLE_MOTIFS[1])
+
+
+def test_everything_vetoed_selects_nothing():
+    memory = MemoryState()
+    for p in PARENTS:
+        for m in PRODUCIBLE_MOTIFS:
+            _fail(memory, p.context, m)
+    assert select_action(PARENTS, memory, 0, CONFIG) is None
+
+
+def test_selection_skips_pairs_that_cannot_be_made():
+    action = select_action(PARENTS, MemoryState(), 0, CONFIG, lambda p, m: m != "rank_switch")
+    assert action.motif == PRODUCIBLE_MOTIFS[1]
+
+
+def test_positive_memory_lifts_a_weaker_parent_only_after_warmup():
+    memory = MemoryState()
+    for _ in range(20):  # nesting did much better than expected for b's kind of parent
+        memory.update(
+            {
+                "context": "volume|q1|d0|u0",
+                "motif_realized": "nesting",
+                "motif_intended": "nesting",
+                "status": "admitted",
+                "residual": 0.5,
+            }
+        )
+    cfg = replace(CONFIG, memory_lambda_max=1.0)
+    assert select_action(PARENTS, memory, 0, cfg).parent_id == "a"  # lambda_0 = 0
+    action = select_action(PARENTS, memory, 200, cfg)
+    assert (action.parent_id, action.motif) == ("b", "nesting")
+
+
+def test_an_rng_breaks_exact_ties_at_random():
+    picks = {
+        select_action(PARENTS, MemoryState(), 0, CONFIG, rng=random.Random(i)).motif
+        for i in range(40)
+    }
+    assert len(picks) > 3  # not always the first motif
+    assert all(
+        select_action(PARENTS, MemoryState(), 0, CONFIG, rng=random.Random(i)).parent_id == "a"
+        for i in range(10)
+    )  # only exact ties are random: the better parent still wins
+
+
+# ---------------------------------------------------------------------------
+# The evidence the agent reads
+
+
+def _event(context, motif, status, residual):
+    return {
+        "context": context,
+        "motif_realized": motif if status != "invalid" else None,
+        "motif_intended": motif,
+        "status": status,
+        "residual": residual,
+    }
+
+
+def test_evidence_gives_each_edit_a_verdict():
+    ctx = "returns|q2|d0|u0"
+    memory = MemoryState()
+    for r in [0.2, 0.2, 0.3, 0.25, 0.2]:  # nesting beat expectations, consistently
+        memory.update(_event(ctx, "nesting", "admitted", r))
+    for r in [-0.1, -0.12, -0.09, -0.11]:  # interaction fell short, consistently
+        memory.update(_event(ctx, "interaction", "rejected", r))
+    for _ in range(5):  # rank_switch never even scored
+        memory.update(_event(ctx, "rank_switch", "invalid", None))
+    memory.update(_event(ctx, "feature_swap", "admitted", 0.4))  # one result: not enough
+    rows = {r.motif: r for r in evidence(memory, ctx, CONFIG)}
+    assert rows["nesting"].verdict == "beats expectations"
+    assert rows["interaction"].verdict == "vetoed: keeps failing"  # 4 of 4 failed
+    assert rows["rank_switch"].verdict == "vetoed: keeps failing"
+    assert rows["feature_swap"].verdict == "too little evidence"
+    assert rows["operator_sub"].verdict == "untried"
+    nesting = rows["nesting"]
+    stats = memory.stats(ctx, "nesting")
+    assert (nesting.attempts, nesting.scored) == (5, 5)
+    assert nesting.mean == pytest.approx(stats.mean)
+    assert nesting.confidence == pytest.approx(gate(stats, 5.0, 1e-6))
+    assert rows["rank_switch"].mean is None
+
+
+def test_evidence_falls_short_when_trusted_and_negative():
+    ctx = "price|q1|d1|u0"
+    memory = MemoryState()
+    for r in [-0.05, -0.06, -0.05, -0.04, -0.05]:  # scored, admitted, but below expectation
+        memory.update(_event(ctx, "operator_sub", "admitted", r))
+    (row,) = evidence(memory, ctx, CONFIG, motifs=["operator_sub"])
+    assert row.verdict == "falls short of expectations"
+
+
+def test_evidence_table_lists_every_edit_once():
+    rows = evidence(MemoryState(), "size|unscored|d0|u0", CONFIG)
+    table = evidence_table(rows)
+    assert table.splitlines()[0].startswith("edit | tried")
+    assert len(table.splitlines()) == 2 + len(PRODUCIBLE_MOTIFS)
+    assert all(m in table for m in PRODUCIBLE_MOTIFS) and "untried" in table
