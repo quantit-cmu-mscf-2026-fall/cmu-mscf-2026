@@ -24,6 +24,7 @@ FRENCH_DATASETS = {
     "factors_daily": "F-F_Research_Data_Factors_daily_CSV.zip",
     "factors_monthly": "F-F_Research_Data_Factors_CSV.zip",
     "factors5_daily": "F-F_Research_Data_5_Factors_2x3_daily_CSV.zip",
+    "momentum_daily": "F-F_Momentum_Factor_daily_CSV.zip",
     "industry49_daily": "49_Industry_Portfolios_daily_CSV.zip",
     "industry12_daily": "12_Industry_Portfolios_daily_CSV.zip",
 }
@@ -118,6 +119,20 @@ def load_french(dataset: str = "factors_daily", use_cache: bool = True) -> pd.Da
     frame = _parse_french_csv(_download_french_csv(FRENCH_DATASETS[dataset]))
     frame.to_parquet(cache)
     return frame
+
+
+FF5_MOMENTUM_COLUMNS = ["Mkt-RF", "SMB", "HML", "RMW", "CMA", "RF", "Mom"]
+
+
+def load_ff5_momentum(use_cache: bool = True) -> pd.DataFrame:
+    """Daily Fama-French 5 factors plus Momentum, as decimal returns by date.
+
+    The two files cover different spans (Momentum starts in 1926, FF5 in 1963),
+    so they are inner-joined on date: only days present in both survive.
+    """
+    ff5 = load_french("factors5_daily", use_cache=use_cache)
+    mom = load_french("momentum_daily", use_cache=use_cache)
+    return ff5.join(mom[["Mom"]], how="inner")[FF5_MOMENTUM_COLUMNS]
 
 
 def load_industry_returns(n: int = 49, use_cache: bool = True) -> pd.DataFrame:
