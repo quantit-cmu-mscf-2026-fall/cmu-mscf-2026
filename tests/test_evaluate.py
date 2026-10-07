@@ -12,6 +12,7 @@ import pytest
 from scipy import stats
 
 from capstone.evaluate import (
+    MIN_LOCAL_FDR_CANDIDATES,
     average_correlation,
     benjamini_hochberg,
     benjamini_yekutieli,
@@ -19,6 +20,7 @@ from capstone.evaluate import (
     bonferroni,
     by_adjusted,
     deflated_sharpe_ratio,
+    empirical_null,
     estimate_pi0,
     evidence_profile,
     expected_max_sharpe,
@@ -26,6 +28,7 @@ from capstone.evaluate import (
     holm,
     holm_adjusted,
     implied_independent_trials,
+    local_fdr,
     min_track_record_length,
     newey_west_lags,
     power,
@@ -684,7 +687,7 @@ class TestEvidenceProfile:
     def test_columns_order_and_monotone_strength(self):
         pvalues, truth = _correlated_pvalues(200, 20, 0.2, seed=0)
         profile = evidence_profile(pvalues)
-        assert list(profile.columns) == ["p", "holm", "by", "bh", "q"]
+        assert list(profile.columns) == ["p", "holm", "by", "bh", "q", "lfdr"]
         assert profile["p"].is_monotonic_increasing
         # Planted candidates are the strongest on every graded score.
         assert profile.index[:10].isin(truth[truth].index).all()
@@ -700,7 +703,7 @@ class TestEvidenceProfile:
         )
         profile = evidence_profile(pvalues)
         real = planted.truth[planted.truth].index
-        for column in ["holm", "by", "bh", "q"]:
+        for column in ["holm", "by", "bh", "q", "lfdr"]:
             strongest = profile[column].sort_values(kind="stable").index[:5]
             assert strongest.isin(real).all(), column
 
@@ -741,3 +744,178 @@ class TestCorrelationBreaksStorey:
         )
         assert pi0.mean() < 0.85
         assert (pi0 < 0.8).mean() > 0.25
+
+
+def _shared_shift(seed: int, rho: float) -> float:
+    # The common factor's contribution in `_correlated_pvalues`: its first draw.
+    return float(np.sqrt(rho) * np.random.default_rng(seed).standard_normal())
+
+
+def _selection_scores(pvalues: pd.Series, truth: pd.Series, selected: pd.Series) -> tuple:
+    found = float(selected[truth].mean())
+    fdp = 0.0 if not selected.any() else float((selected & ~truth).sum() / selected.sum())
+    return found, fdp
+
+
+class TestEmpiricalNull:
+    """Efron's central matching: the null estimated from the bulk of the candidates."""
+
+    def test_recovers_the_theoretical_null_when_independent(self):
+        # 1,000 all-null candidates: measured width 0.996 (sd 0.022) over 200 sets.
+        fits = [empirical_null(_correlated_pvalues(1000, 0, 0.0, seed)[0]) for seed in range(30)]
+        assert np.mean([f.sigma for f in fits]) == pytest.approx(1.0, abs=0.05)
+        assert np.mean([abs(f.delta) for f in fits]) < 0.1
+        assert np.mean([f.pi0 for f in fits]) > 0.95
+
+    def test_follows_a_shared_factor(self):
+        # Equicorrelated nulls sit at sqrt(rho) W with width sqrt(1 - rho) within a
+        # set. Measured: width 0.705 against 0.707, centre-shift correlation 0.999.
+        rho, seeds = 0.5, range(30)
+        fits = [empirical_null(_correlated_pvalues(1000, 0, rho, seed)[0]) for seed in seeds]
+        assert np.mean([f.sigma for f in fits]) == pytest.approx(np.sqrt(1 - rho), abs=0.03)
+        shifts = [_shared_shift(seed, rho) for seed in seeds]
+        assert np.corrcoef([f.delta for f in fits], shifts)[0, 1] > 0.95
+
+    def test_needs_enough_candidates(self):
+        pvalues, _ = _correlated_pvalues(MIN_LOCAL_FDR_CANDIDATES - 1, 0, 0.0, seed=0)
+        with pytest.raises(ValueError, match="at least"):
+            empirical_null(pvalues)
+        with pytest.raises(ValueError, match="at least"):
+            local_fdr(pvalues)
+
+
+class TestLocalFdr:
+    @staticmethod
+    def _any_flag_rate(rho: float, *, degree: int | None = None, reps: int = 300) -> float:
+        # degree=None exercises local_fdr's own default, which is what is under test.
+        options = {} if degree is None else {"degree": degree}
+        return float(
+            np.mean(
+                [
+                    (local_fdr(_correlated_pvalues(200, 0, rho, seed)[0], **options) <= 0.2).any()
+                    for seed in range(reps)
+                ]
+            )
+        )
+
+    def test_all_null_sets_rarely_flag_anything(self):
+        # 200 candidates, lfdr <= 0.2: measured 2.3-5.3% over four seed ranges.
+        assert self._any_flag_rate(0.0) <= 0.08
+
+    def test_a_shared_factor_changes_nothing(self):
+        # On all-null sets equicorrelation only shifts and rescales the z-scores,
+        # and the empirical null moves with them: the same draws give the same
+        # lfdr at rho 0 and 0.5. (Planted signals are shifted after the scaling in
+        # `_correlated_pvalues`, so this exact identity holds for nulls only.)
+        values = []
+        for seed in range(30):
+            independent = local_fdr(_correlated_pvalues(200, 0, 0.0, seed)[0])
+            correlated = local_fdr(_correlated_pvalues(200, 0, 0.5, seed)[0])
+            np.testing.assert_allclose(independent, correlated, atol=1e-6)
+            values.append(independent.min())
+        assert min(values) < 0.9  # not vacuous: some nulls get scored below 1
+
+    def test_efron_default_degree_is_too_loose_at_this_size(self):
+        # Why degree 3 is the default: degree 7 flagged 30-35% of all-null sets.
+        assert self._any_flag_rate(0.0, degree=7, reps=150) > 0.2
+
+    def test_finds_planted_candidates_under_correlation(self):
+        # 2% real at shift 3.5, rho 0.5: measured power 0.96 and FDR 0.036-0.059,
+        # against BH-at-10% power 0.62-0.76.
+        found, fdps, bh_found = [], [], []
+        for seed in range(150):
+            pvalues, truth = _correlated_pvalues(200, 4, 0.5, seed)
+            f, fdp = _selection_scores(pvalues, truth, local_fdr(pvalues) <= 0.2)
+            found.append(f)
+            fdps.append(fdp)
+            bh_found.append(_selection_scores(pvalues, truth, bh_adjusted(pvalues) <= 0.1)[0])
+        assert np.mean(found) >= 0.9
+        assert np.mean(fdps) <= 0.09
+        assert np.mean(found) > np.mean(bh_found)
+
+    def test_more_conservative_than_bh_when_independent(self):
+        # The cost of estimating the null: with 10% real at shift 2.5 and no
+        # correlation, measured power 0.19 against BH-at-10% 0.49.
+        found, bh_found = [], []
+        for seed in range(100):
+            pvalues, truth = _correlated_pvalues(200, 20, 0.0, seed, shift=2.5)
+            found.append(_selection_scores(pvalues, truth, local_fdr(pvalues) <= 0.2)[0])
+            bh_found.append(_selection_scores(pvalues, truth, bh_adjusted(pvalues) <= 0.1)[0])
+        assert np.mean(found) < np.mean(bh_found)
+
+    def test_only_candidates_above_the_null_centre_can_be_called(self):
+        pvalues, _ = _correlated_pvalues(300, 10, 0.3, seed=3)
+        lfdr = local_fdr(pvalues)
+        z = pd.Series(stats.norm.isf(pvalues), index=pvalues.index)
+        below = z <= empirical_null(pvalues).delta
+        assert below.any() and (lfdr[below] == 1.0).all()
+        assert ((lfdr >= 0) & (lfdr <= 1)).all()
+
+    def test_nan_stays_nan_and_small_sets_get_nan_in_the_profile(self):
+        pvalues, _ = _correlated_pvalues(250, 10, 0.0, seed=4)
+        pvalues.iloc[[3, 100]] = np.nan
+        lfdr = local_fdr(pvalues)
+        assert lfdr.isna().sum() == 2 and np.isnan(lfdr.iloc[3])
+        small, _ = _correlated_pvalues(50, 5, 0.0, seed=4)
+        assert evidence_profile(small)["lfdr"].isna().all()
+
+    @staticmethod
+    def _planted_five(seed: int, extreme_p: float | None = None) -> pd.Series:
+        # 300 null z-scores, five planted at about +4; optionally the last
+        # candidate is replaced by an extreme one with p-value `extreme_p`.
+        z = np.random.default_rng(seed).standard_normal(300)
+        z[:5] += 4.0
+        pvalues = pd.Series(stats.norm.sf(z), index=[f"c{i:04d}" for i in range(300)])
+        if extreme_p is not None:
+            pvalues.iloc[-1] = extreme_p
+        return pvalues
+
+    def test_a_p_value_of_zero_does_not_break_the_profile(self):
+        # A leaky backtest can return p = 0 (z = 37 after clipping). It used to
+        # stretch the histogram bins until the fit failed, crashing the profile.
+        pvalues, _ = _correlated_pvalues(300, 0, 0.0, seed=5000)
+        pvalues.iloc[0] = 0.0
+        lfdr = evidence_profile(pvalues)["lfdr"]
+        assert lfdr.notna().all()
+        assert lfdr.loc[pvalues.index[0]] < 0.01
+
+    @pytest.mark.parametrize("extreme_p", [stats.norm.sf(15.0), 0.0], ids=["z=15", "p=0"])
+    def test_one_extreme_candidate_leaves_the_others_alone(self, extreme_p):
+        # One candidate at z = 15 used to raise the planted five's median lfdr
+        # from 0.03 to 0.23; one at p = 0 failed 98 of 100 fits. Now moving that
+        # one null candidate out to the extreme shifts the five by at most 0.03.
+        shifts = []
+        for seed in range(5000, 5020):
+            clean = local_fdr(self._planted_five(seed)).iloc[:5].median()
+            extreme = local_fdr(self._planted_five(seed, extreme_p)).iloc[:5].median()
+            shifts.append(extreme - clean)
+        assert np.median(np.abs(shifts)) < 0.01
+        assert np.max(np.abs(shifts)) < 0.05
+
+    def test_profile_leaves_lfdr_nan_when_there_is_no_null_to_fit(self):
+        # Two clusters and nothing in between: no concave centre, so no null.
+        rng = np.random.default_rng(0)
+        z = np.concatenate([rng.normal(-3, 0.3, 150), rng.normal(3, 0.3, 150)])
+        pvalues = pd.Series(stats.norm.sf(z))
+        with pytest.raises(ValueError, match="concave"):
+            local_fdr(pvalues)
+        with pytest.warns(RuntimeWarning, match="concave"):
+            profile = evidence_profile(pvalues)
+        assert profile["lfdr"].isna().all() and profile["bh"].notna().all()
+
+    def test_on_real_sharpe_pvalues_end_to_end(self):
+        # Correlated strategy returns -> one-sided HAC p-values -> lfdr <= 0.2.
+        # Measured over 10 seeds: FDR 0.0, power 0.97.
+        found, fdps = [], []
+        for seed in range(5):
+            matrix = make_return_matrix(
+                n_obs=750, n_candidates=200, n_real=20, sharpe_real=2.5, rho=0.5, seed=seed
+            )
+            pvalues = pd.Series(
+                {c: sharpe_test(matrix.returns[c]).pvalue_greater for c in matrix.returns.columns}
+            )
+            f, fdp = _selection_scores(pvalues, matrix.truth, local_fdr(pvalues) <= 0.2)
+            found.append(f)
+            fdps.append(fdp)
+        assert np.mean(fdps) <= 0.05
+        assert np.mean(found) >= 0.85
