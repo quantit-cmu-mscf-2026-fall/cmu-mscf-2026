@@ -6,6 +6,7 @@
   "search_years": 31,
   "holdout_years": 5,
   "stage2_years": 7,
+  "design": "split",
   "share_real": [0.0, 0.01, 0.02, 0.05],
   "sharpe_real": [0.5, 1.0, 1.5],
   "seeds": [0, 30],

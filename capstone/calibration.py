@@ -16,10 +16,12 @@ It compares three ways of deciding (#50, Q5):
   search period, then the final holdout test;
 - **baseline:** BH at q on each family's search-adjusted p-value over the
   search period, the rule that decides until the funnel beats it;
-- **funnel:** stage 1 screens families, stage 2 confirms survivors on data
-  stage 1 didn't use, stage 3 (spanning) is a placeholder that passes
-  everything and is reported as not measured, stage 4 tests the survivors on
-  the holdout.
+- **funnel:** stage 1 screens families, stage 2 checks survivors (by default
+  on the same search period, with no gate: the registered design in
+  `docs/validation/framework.md`; "split" confirms on years stage 1 didn't
+  use instead), stage 3 (spanning) is a placeholder that passes everything
+  and is reported as not measured, stage 4 tests the survivors on the
+  holdout.
 
 Each simulated data set is summarised once per hypothesis (`family_statistics`);
 every pipeline and threshold setting is then a cheap filter over that summary,
@@ -143,8 +145,12 @@ def _stage1(
     `p` is each variant's one-sided HAC p-value on `window`. `n_boot=0` skips
     the bootstrap (its column is then NaN), which is most of the cost.
     """
-    sharpe = window.mean() / window.std()
-    best = sharpe.groupby(family).idxmax()
+    sharpe = (window.mean() / window.std()).dropna()
+    # Group only variants with a Sharpe: pandas 3 raises on an all-NaN group.
+    best = sharpe.groupby(family[sharpe.index]).idxmax().reindex(family.unique())
+    if best.isna().any():
+        empty = best[best.isna()].index[0]
+        raise ValueError(f"hypothesis {empty!r} has no variant with data in this window")
     k = family.value_counts()
     rho = pd.Series(
         {h: max(average_correlation(window[cols.index]), 0.0) for h, cols in family.groupby(family)}
@@ -169,11 +175,12 @@ def family_statistics(
 ) -> dict[str, pd.DataFrame]:
     """Everything the pipelines need, per hypothesis, for both stage-2 designs.
 
-    Returns {"split": ..., "reuse": ...}. In "split", stage 1 sees the search
-    period minus its last `stage2_years`, and stage 2 confirms on those years.
-    In "reuse", both stages see the whole search period: the cost of having no
-    fresh data for stage 2 (#50, "Stage 2's fresh data"). The baseline and the
-    naive stack always use the whole search period, so they read "reuse".
+    Returns {"reuse": ..., "split": ...}. In "reuse", the registered design
+    (#50, "Stage 2"), both stages see the whole search period and stage 2 is
+    not a gate. In "split", stage 1 sees the search period minus its last
+    `stage2_years`, and stage 2 confirms on those years; calibration found it
+    costs power. The baseline and the naive stack always use the whole search
+    period, so they read "reuse".
 
     Columns: `best` (the variant carried forward), `p1_<method>` for each
     stage-1 method, `p2` (one-sided HAC p of `best` at stage 2), the holdout
@@ -185,6 +192,15 @@ def family_statistics(
         raise ValueError("stage2_years must leave data for both stages")
     search = fs.search
     first, last = search.iloc[: fs.n_search - n_b], search.iloc[fs.n_search - n_b :]
+    # Every variant is tested in each period the pipelines use; name the first
+    # one that can't be, rather than failing deep inside a Sharpe test.
+    for name, window in (("search", first), ("stage 2", last), ("holdout", fs.holdout)):
+        thin = window.columns[window.notna().sum() < 3]
+        if len(thin):
+            raise ValueError(
+                f"hypothesis {fs.family[thin[0]]!r} has no variant with data in the "
+                f"{name} period ({thin[0]!r} has fewer than 3 values)"
+            )
 
     # Holdout statistics for every variant a pipeline might carry forward.
     holdout_tests = {c: sharpe_test(fs.holdout[c]) for c in fs.returns.columns}
@@ -212,8 +228,10 @@ def family_statistics(
     )
     # The variant the naive stack carries forward: its best that passed.
     full_sharpe = search.mean() / search.std()
-    passed = full_sharpe.where(stacked)
-    naive_best = passed.groupby(fs.family).idxmax().reindex(fs.truth.index)
+    # Group only the variants that passed (pandas 3 raises on an all-NaN
+    # group); families with no pass come back NaN from the reindex.
+    passed = full_sharpe[stacked].dropna()
+    naive_best = passed.groupby(fs.family[passed.index]).idxmax().reindex(fs.truth.index)
 
     out = {}
     windows = {"split": (first, last, _one_sided_p(first)), "reuse": (search, search, p_all)}
@@ -251,20 +269,23 @@ def family_statistics(
 class Thresholds:
     """One threshold setting for the funnel.
 
+    The defaults are the set registered in `docs/validation/framework.md`
+    ("Results"): q1 = 0.10, no stage-2 gate, BH at q4 = 0.30 on the holdout.
+
     q1: BH level across families at stage 1. alpha2: one-sided p cut-off at
-    stage 2. final: the stage-4 gate (#50, Q3 is open), "dsr" (deflated
-    Sharpe >= d4) or "bh" (BH at q4 across the survivors' one-sided holdout
-    p-values). final_trials: for "dsr", the trial count it charges,
-    "searched" (every variant tried, as framework.md currently says) or
-    "survivors" (only the candidates taken to the holdout, which is
-    independent data).
+    stage 2; 1.0 means no gate. final: the stage-4 gate, "bh" (BH at q4
+    across the survivors' one-sided holdout p-values; registered) or "dsr"
+    (deflated Sharpe >= d4). final_trials: for "dsr", the trial count it
+    charges, "survivors" (only the candidates taken to the holdout, which is
+    independent data) or "searched" (every variant tried; calibration found
+    it cuts power to about a sixth).
     """
 
     q1: float = 0.10
-    alpha2: float = 0.10
-    final: str = "dsr"
+    alpha2: float = 1.0
+    final: str = "bh"
     d4: float = 0.95
-    q4: float = 0.10
+    q4: float = 0.30
     final_trials: str = "survivors"
 
 
@@ -367,13 +388,16 @@ def gate_report(stages: pd.DataFrame, truth: pd.Series) -> pd.DataFrame:
 
     For each stage: how many real and null hypotheses enter and pass it, and
     the pass rates among those that entered (in-pipeline power and false-pass
-    rate). Stage 3 is flagged as not measured.
+    rate). Stage 3 is flagged as not measured, and its pass rates are NaN.
     """
     truth = truth.reindex(stages.index).astype(bool)
     entering = pd.Series(True, index=stages.index)
     rows = []
     for stage in stages.columns:
         passed = stages[stage].astype(bool)
+        # Stage 3 passes everything until the spanning test exists; a 1.0
+        # pass rate there would read as a measurement.
+        measured = stage != "stage3"
         real_in, null_in = int((entering & truth).sum()), int((entering & ~truth).sum())
         real_out, null_out = int((passed & truth).sum()), int((passed & ~truth).sum())
         rows.append(
@@ -383,9 +407,9 @@ def gate_report(stages: pd.DataFrame, truth: pd.Series) -> pd.DataFrame:
                 "real_out": real_out,
                 "null_in": null_in,
                 "null_out": null_out,
-                "pass_rate_real": real_out / real_in if real_in else np.nan,
-                "pass_rate_null": null_out / null_in if null_in else np.nan,
-                "measured": stage != "stage3",
+                "pass_rate_real": real_out / real_in if real_in and measured else np.nan,
+                "pass_rate_null": null_out / null_in if null_in and measured else np.nan,
+                "measured": measured,
             }
         )
         entering = passed

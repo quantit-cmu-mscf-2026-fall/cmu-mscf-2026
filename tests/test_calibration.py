@@ -162,6 +162,28 @@ class TestPipelines:
             run_funnel(stats["split"], Thresholds(), stage1="lfdr")
 
 
+class TestRegisteredDefaults:
+    def test_thresholds_default_to_the_registered_set(self):
+        # framework.md "Results": q1 = 0.10, no stage-2 gate, BH at q4 = 0.30.
+        th = Thresholds()
+        assert (th.q1, th.alpha2, th.final, th.q4) == (0.10, 1.0, "bh", 0.30)
+
+    def test_a_hypothesis_with_no_data_in_the_window_is_named(self):
+        fs = make_family_set(4, 2, 0.0, 1.0, seed=0, **SMALL)
+        returns = fs.returns.copy()
+        returns.loc[:, fs.family[fs.family == fs.truth.index[0]].index] = np.nan
+        holed = type(fs)(returns, fs.family, fs.truth, fs.n_search, fs.n_holdout)
+        with pytest.raises(ValueError, match="no variant with data"):
+            family_statistics(holed, stage2_years=2, n_boot=0)
+
+    def test_families_with_no_stacked_pass_come_back_empty(self):
+        # Nothing real: no variant passes the naive stack, so every family's
+        # naive_best is missing. pandas 3 raised here (#68 review).
+        _, stats = _stats(0.0, 1.0, seed=1)
+        assert not stats["reuse"]["naive_pass"].any()
+        assert stats["reuse"]["nv_p"].isna().all()
+
+
 class TestReports:
     def test_score(self):
         truth = pd.Series([True, False, False, True])
@@ -177,6 +199,7 @@ class TestReports:
         stages = run_funnel(stats["split"], Thresholds(q1=0.3, alpha2=0.3, final="bh", q4=0.3))
         report = gate_report(stages, stats["split"]["truth"])
         assert not report.loc["stage3", "measured"]
+        assert report.loc["stage3", ["pass_rate_real", "pass_rate_null"]].isna().all()
         for earlier, later in zip(report.index, report.index[1:], strict=False):
             assert report.loc[later, "real_in"] == report.loc[earlier, "real_out"]
             assert report.loc[later, "null_in"] == report.loc[earlier, "null_out"]

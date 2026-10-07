@@ -25,7 +25,7 @@ Each simulated setting is logged to the ledger as "validation-calibration"
 (tag "synthetic") as soon as its numbers exist, before anything is printed.
 
     python scripts/calibrate_validation.py            # the full grid
-    python scripts/calibrate_validation.py --quick    # 3 seeds, for a smoke test
+    python scripts/calibrate_validation.py --quick    # 3 seeds, smoke test (tagged "smoke")
     python scripts/calibrate_validation.py --params scripts/calibrate_validation_extended.json
 
 `alpha2 = 1.0` in a sweep means no stage-2 gate (every survivor passes).
@@ -126,13 +126,13 @@ def evaluate_setting(p, share, sharpe, seeds, grid, stage1, n_boot=0):
                         **score(stages["stage4"], truth),
                     }
                 )
-                if design == p.get("design", "split"):
+                if design == p.get("design", "reuse"):
                     g = gate_report(stages, truth).reset_index()
                     gates.append(g.assign(**base, thresholds=label(th)))
     return pd.DataFrame(rows), pd.concat(gates, ignore_index=True)
 
 
-def recommend(results: pd.DataFrame, target: float, design: str = "split") -> pd.DataFrame:
+def recommend(results: pd.DataFrame, target: float, design: str = "reuse") -> pd.DataFrame:
     """Funnel threshold sets ranked by mean power, among those whose mean FDR
     is at most `target` in every setting (including nothing-real)."""
     funnel = results[(results["arm"] == "funnel") & (results["design"] == design)]
@@ -154,6 +154,9 @@ def main() -> None:
     p = json.loads(args.params.read_text())
     seeds = range(3) if args.quick else range(*p["seeds"])
     grid = threshold_grid(p["sweep"])
+    # --quick runs are smoke tests of the script: tagged so trial counts can
+    # leave them out (runlog.trial_count(exclude_tags=["smoke"]), #63).
+    tags = ["synthetic", "calibration"] + (["smoke"] if args.quick else [])
 
     all_rows, all_gates = [], []
     for share, sharpe in settings(p):
@@ -176,7 +179,7 @@ def main() -> None:
                 for arm in ("naive", "baseline", "funnel")
                 for m in ("fdr", "power")
             },
-            tags=["synthetic", "calibration"],
+            tags=tags,
         )
         all_rows.append(rows)
         all_gates.append(gates)
@@ -200,7 +203,7 @@ def main() -> None:
             for a in ("baseline", "funnel")
             for k in ("fdr", "power")
         },
-        tags=["synthetic", "calibration"],
+        tags=tags,
     )
 
     results = pd.concat(all_rows, ignore_index=True)
@@ -208,7 +211,7 @@ def main() -> None:
     pd.set_option("display.width", 160)
     pd.set_option("display.max_columns", 20)
 
-    design = p.get("design", "split")
+    design = p.get("design", "reuse")
     ranked = recommend(results, p["target_fdr"], design)
     print(
         f"{len(seeds)} seeds per setting; {p['n_families']} hypotheses x {p['k']} variants "
