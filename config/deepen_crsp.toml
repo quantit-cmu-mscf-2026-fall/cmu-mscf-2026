@@ -1,0 +1,23 @@
+# The deepen move on CRSP, scored by evaluation (capstone.factors.scoring,
+# QUANTIT-114). Read by `scoring.crsp_settings`, on top of config/factors.toml.
+
+[scorer]
+# The one trading spec a child is scored under. Monthly rebalancing without
+# sector neutrality had the smallest cost drag in the first 294-variant run
+# (median net Sharpe -0.27 against -0.64 daily); letting the agent pick the
+# spec from the hypothesis's horizon is QUANTIT-117.
+hold = 21
+neutral = "none"
+
+[memory]
+# Quality is a z-score here, Phi^-1(1 - p) of the one-sided HAC screen
+# p-value, not |ICIR|, so the thresholds are in z units and the sign counts.
+# Proposals, to be calibrated on simulated candidate sets (QUANTIT-115):
+# a child joins the pool if it earns anything after costs (z >= 0), and is
+# high quality at a one-sided 5% before any multiple-testing correction
+# (z >= 1.645). Context bins: q0 loses after costs, q1 0-1, q2 1-1.645,
+# q3 >= 1.645.
+memory_min_quality = 0.0
+memory_high_quality = 1.645
+memory_quality_edges = [0.0, 1.0, 1.645]
+memory_signed_quality = true

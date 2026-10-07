@@ -355,3 +355,74 @@ def test_each_variant_logs_its_screen_pvalue_and_names_its_family(tmp_path, monk
         assert p == pytest.approx(ev.screen_pvalue(matrix[vid]))
         assert summary.loc[vid, "pvalue_screen"] == pytest.approx(p)
     assert list(summary["hypothesis_id"]) == [h1, h2]
+
+
+# ---------------------------------------------------------------------------
+# Evaluation as the deepen move's scorer (QUANTIT-114)
+
+
+def test_the_scorer_gives_the_screen_z_and_the_variants_net_returns(tmp_path, monkeypatch):
+    from scipy import stats
+
+    from capstone.factors.scoring import EvaluationScorer
+
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    panel = build_panel(fake_rows(n_days=500, planted=0.004), data_version="v-test")
+    spec = ev.TradingSpec(hold=5)
+    scorer = EvaluationScorer(panel, spec)
+    good, bad = scorer(parse("volume")), scorer(parse("-volume"))
+    net = factor_returns(parse("volume"), panel, spec).net
+    assert good.quality == pytest.approx(stats.norm.isf(ev.screen_pvalue(net)))
+    assert good.quality > 2.3 and bad.quality < -2.3  # the sign is kept
+    np.testing.assert_array_equal(good.values, net.to_numpy())
+    assert good.params["data_version"] == "v-test" and good.params["spec"]["hold"] == 5
+    assert good.metrics["pvalue_screen"] == pytest.approx(ev.screen_pvalue(net))
+    assert not (tmp_path / "runs.jsonl").exists()  # the scorer never logs; deepen does
+
+
+def test_the_scorer_returns_none_for_a_factor_it_cannot_compute(monkeypatch):
+    from capstone.factors.scoring import EvaluationScorer
+
+    def failing(tree, fields):
+        raise ValueError("cannot compute")
+
+    monkeypatch.setattr(ev, "evaluate", failing)
+    scorer = EvaluationScorer(build_panel(fake_rows(n_stocks=9, n_days=40)), ev.TradingSpec())
+    assert scorer(parse("volume")) is None
+
+
+def test_crsp_settings_put_the_memory_on_the_z_scale(tmp_path):
+    from capstone.factors.llm import load_config
+    from capstone.factors.scoring import crsp_settings
+
+    config, spec = crsp_settings(load_config())
+    assert spec == ev.TradingSpec(hold=21, neutral="none")
+    assert config.memory_signed_quality and config.memory_quality_edges == (0.0, 1.0, 1.645)
+    assert config.memory_min_quality == 0.0 and config.memory_high_quality == 1.645
+    assert load_config().memory_quality_edges == (0.05, 0.10, 0.20)  # the default is untouched
+    bad = tmp_path / "bad.toml"
+    bad.write_text("[memory]\nmemory_min_qualty = 1.0\n")
+    with pytest.raises(ValueError, match="memory_min_qualty"):
+        crsp_settings(load_config(), bad)
+
+
+def test_a_seed_scored_by_evaluation_is_a_logged_trial(tmp_path, monkeypatch):
+    from capstone.factors import store
+    from capstone.factors.deepen import Deepener
+    from capstone.factors.llm import load_config
+    from capstone.factors.scoring import EvaluationScorer, crsp_settings
+
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    con = store.connect(tmp_path / "factors.db")
+    store.add_paper(con, "p", "Paper")
+    hid = store.add_hypothesis(con, store.Hypothesis("p", "o", "k", "j", "s", "f"))
+    fid, _ = store.add_factor(con, parse("volume"), hid)
+    config, spec = crsp_settings(load_config())
+    panel = build_panel(fake_rows(n_days=300, planted=0.004), data_version="v-test")
+    d = Deepener(con, config, EvaluationScorer(panel, spec), None, run_id="r", seed=0)
+    assert d.add_parent(fid)
+    (entry,) = [json.loads(line) for line in (tmp_path / "runs.jsonl").read_text().splitlines()]
+    assert entry["name"] == "deepen" and entry["params"]["role"] == "seed"
+    assert entry["params"]["data_version"] == "v-test"
+    assert entry["params"]["variant_id"] == store.variant_id(fid, spec.as_dict())
+    assert entry["metrics"]["quality"] == pytest.approx(d.pool.quality[fid])
