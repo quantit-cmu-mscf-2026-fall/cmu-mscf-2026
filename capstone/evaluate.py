@@ -50,7 +50,7 @@ def sharpe_pvalue(sharpe: float, n_obs: int, periods_per_year: int = 252) -> flo
 
 
 def expected_max_sharpe(
-    n_trials: int,
+    n_trials: float,
     n_obs: int,
     periods_per_year: int = 252,
     *,
@@ -93,7 +93,7 @@ def expected_max_sharpe(
 
 def deflated_sharpe_ratio(
     sharpe: float,
-    n_trials: int,
+    n_trials: float,
     n_obs: int,
     skew: float = 0.0,
     kurtosis: float = 3.0,
@@ -113,6 +113,7 @@ def deflated_sharpe_ratio(
         sharpe: observed annualised Sharpe ratio.
         n_trials: how many candidates were tried to find this one. Counting
             this honestly is the hard part, and it is not our call to make.
+            May be fractional, as from `implied_independent_trials`.
         n_obs: number of periods in the track record.
         skew: skewness of the strategy's returns. Negative skew makes a given
             Sharpe less impressive.
@@ -335,6 +336,7 @@ class SharpeTest:
     variance: float
     se: float
     pvalue: float
+    pvalue_greater: float
     psr: float
 
 
@@ -350,7 +352,15 @@ def sharpe_test(
 
     Measures skew and kurtosis instead of assuming them and, with the default
     "hac" method, allows for autocorrelation. `pvalue` is two-sided, like
-    `sharpe_pvalue`; `psr` is the one-sided probability that SR > `benchmark`.
+    `sharpe_pvalue`; `pvalue_greater` is one-sided, against SR > `benchmark`;
+    `psr` is the probability that SR > `benchmark`.
+
+    Screen candidates on `pvalue_greater`. Only positive Sharpe ratios are
+    discoveries, and one-sided statistics that are positively correlated, as
+    candidates from one search usually are, are the case in which
+    Benjamini-Hochberg is proven to control the FDR (Benjamini & Yekutieli
+    2001, Theorem 1.2 and Section 3.1, Case 1). Two-sided p-values under
+    correlation are not covered by that theorem.
     """
     clean = returns.dropna()
     variance = sharpe_variance(clean, method=method, lags=lags)
@@ -363,7 +373,9 @@ def sharpe_test(
         skew, kurtosis = m3 / m2**1.5, m4 / m2**2
     else:
         sharpe = skew = kurtosis = float("nan")
-    se = float(np.sqrt(variance / n * periods_per_year))
+    # T - 1, as `probabilistic_sharpe_ratio` and `min_track_record_length` use
+    # (Bailey & Lopez de Prado 2012), so `pvalue_greater` is exactly 1 - `psr`.
+    se = float(np.sqrt(variance / (n - 1) * periods_per_year))
     z = (sharpe - benchmark) / se
     return SharpeTest(
         sharpe=sharpe,
@@ -374,6 +386,7 @@ def sharpe_test(
         variance=variance,
         se=se,
         pvalue=float(2.0 * stats.norm.sf(abs(z))) if np.isfinite(z) else float("nan"),
+        pvalue_greater=float(stats.norm.sf(z)) if np.isfinite(z) else float("nan"),
         psr=probabilistic_sharpe_ratio(
             sharpe, n, benchmark=benchmark, variance=variance, periods_per_year=periods_per_year
         ),
@@ -383,13 +396,19 @@ def sharpe_test(
 def average_correlation(returns: pd.DataFrame) -> float:
     """Equal-weighted average off-diagonal correlation of the trials.
 
-    Bailey & Lopez de Prado (2014), Eq. 8.
+    Bailey & Lopez de Prado (2014), Eq. 8, over the pairs whose correlation is
+    defined.
     """
     m = returns.shape[1]
     if m < 2:
         raise ValueError("need at least 2 trials")
     corr = returns.corr().to_numpy()
-    return float((np.nansum(corr) - np.trace(corr)) / (m * (m - 1)))
+    # A pair with no defined correlation (a constant series, too little
+    # overlap) is left out of the average rather than counted as 0, which
+    # would pull the average toward independence. NaN if no pair is defined.
+    pairs = corr[~np.eye(m, dtype=bool)]
+    pairs = pairs[np.isfinite(pairs)]
+    return float(pairs.mean()) if pairs.size else float("nan")
 
 
 def implied_independent_trials(n_trials: int, avg_correlation: float) -> float:
@@ -460,6 +479,257 @@ def bonferroni(pvalues: pd.Series, alpha: float = 0.05) -> pd.Series:
         return pd.Series(False, index=pvalues.index, dtype=bool)
 
     return (pvalues <= alpha / len(pvalues)).fillna(False)
+
+
+def _check_alpha(alpha: float) -> None:
+    if not 0 < alpha < 1:
+        raise ValueError("alpha must be in (0, 1)")
+
+
+def holm(pvalues: pd.Series, alpha: float = 0.05) -> pd.Series:
+    """Holm's step-down procedure controlling the family-wise error rate.
+
+    Sort the p-values; reject the i-th smallest while p_(i) <= alpha / (m - i + 1)
+    and stop at the first that fails. Same guarantee as Bonferroni (no false
+    rejection with probability 1 - alpha, under any dependence), never fewer
+    rejections. Use it wherever Bonferroni would be used.
+
+    NaN p-values are never rejected and count toward the family size m, as in
+    `bonferroni`: they were trials too.
+    """
+    _check_alpha(alpha)
+    rejected = pd.Series(False, index=pvalues.index)
+    m = len(pvalues)
+    ordered = pvalues.dropna().sort_values()
+    if ordered.empty:
+        return rejected
+    thresholds = alpha / (m - np.arange(len(ordered)))
+    failing = ordered.to_numpy() > thresholds
+    n_rejected = int(np.argmax(failing)) if failing.any() else len(ordered)
+    rejected.loc[ordered.index[:n_rejected]] = True
+    return rejected
+
+
+def benjamini_yekutieli(pvalues: pd.Series, alpha: float = 0.05) -> pd.Series:
+    """Benjamini-Yekutieli: the BH step-up procedure run at alpha / sum(1/i).
+
+    Controls the false-discovery rate at `alpha` under ANY dependence between
+    the tests (Benjamini & Yekutieli 2001, Theorem 1.3). Plain
+    `benjamini_hochberg` already does under positive dependence (PRDS,
+    their Theorem 1.2), which covers one-sided tests on positively correlated
+    candidates; use this one when that cannot be assumed: two-sided p-values,
+    candidates that include mirror images or hedges of each other, or any
+    negative correlation. The price is power: at m = 1000 the level is divided
+    by about 7.5.
+
+    NaN p-values are never rejected and count toward m, as in `bonferroni`.
+    """
+    _check_alpha(alpha)
+    m = len(pvalues)
+    if m == 0:
+        return pd.Series(False, index=pvalues.index, dtype=bool)
+    harmonic = float(np.sum(1.0 / np.arange(1, m + 1)))
+    rejected = pd.Series(False, index=pvalues.index)
+    ordered = pvalues.dropna().sort_values()
+    if ordered.empty:
+        return rejected
+    thresholds = alpha / harmonic * np.arange(1, len(ordered) + 1) / m
+    passing = ordered.to_numpy() <= thresholds
+    if passing.any():
+        cutoff_rank = int(np.max(np.flatnonzero(passing)))
+        rejected.loc[ordered.index[: cutoff_rank + 1]] = True
+    return rejected
+
+
+_LAMBDA_GRID = np.round(np.arange(0.0, 0.951, 0.05), 2)
+
+
+def estimate_pi0(
+    pvalues: pd.Series,
+    lambda_: float | str = 0.5,
+    *,
+    n_boot: int = 200,
+    gamma: float = 0.05,
+    seed: int | None = 0,
+) -> float:
+    """Estimated share of true nulls among the candidates (Storey 2002).
+
+    pi0(lambda) = #{p > lambda} / ((1 - lambda) m): p-values above lambda come
+    almost only from nulls, which are uniform, so their count scales up to the
+    number of nulls (Algorithm 1(b)). Conservative, biased upward, for any
+    lambda. `lambda_=0` gives 1; larger lambda has less bias and more variance.
+    `lambda_="bootstrap"` picks lambda from {0, 0.05, ..., 0.95} by bootstrap
+    mean-squared error of the pFDR estimate at rejection region [0, `gamma`]
+    (Algorithm 3).
+
+    The paper assumes independent p-values throughout, and correlation breaks
+    the estimate, not just its precision: when a shared factor moves every
+    candidate the same way, few p-values land above lambda and pi0 collapses.
+    On all-null sets of 100 candidates with pairwise correlation 0.5 it
+    averaged 0.73 rather than 1, fell below 0.8 in 41% of sets and reached 0
+    (`tests/test_evaluate.py`). Treat it as a description of independent
+    candidates only.
+
+    NaN p-values are dropped.
+    """
+    p = pvalues.dropna().to_numpy(dtype=float)
+    if len(p) == 0:
+        raise ValueError("no usable p-values")
+    if lambda_ == "bootstrap":
+        lambda_ = _bootstrap_lambda(p, gamma=gamma, n_boot=n_boot, seed=seed)
+    if not 0.0 <= lambda_ < 1.0:
+        raise ValueError("lambda_ must be in [0, 1) or 'bootstrap'")
+    return float(min(1.0, _pi0(p, lambda_)))
+
+
+def _pi0(p: np.ndarray, lambda_: float) -> float:
+    return float(np.sum(p > lambda_) / ((1.0 - lambda_) * len(p)))
+
+
+def _pfdr(p: np.ndarray, lambda_: float, gamma: float) -> float:
+    # Storey (2002), Algorithm 1(c), capped at 1 as Section 3 recommends.
+    m = len(p)
+    rejected_share = max(int(np.sum(p <= gamma)), 1) / m
+    value = _pi0(p, lambda_) * gamma / (rejected_share * (1.0 - (1.0 - gamma) ** m))
+    return min(value, 1.0)
+
+
+def _bootstrap_lambda(p: np.ndarray, *, gamma: float, n_boot: int, seed: int | None) -> float:
+    # Storey (2002), Algorithm 3: the plug-in target is the smallest pFDR
+    # estimate over the grid; pick the lambda whose bootstrap estimates sit
+    # closest to it in mean square.
+    rng = np.random.default_rng(seed)
+    estimates = np.array([_pfdr(p, lam, gamma) for lam in _LAMBDA_GRID])
+    target = estimates.min()
+    samples = [p[rng.integers(0, len(p), size=len(p))] for _ in range(n_boot)]
+    mse = [np.mean([(_pfdr(s, lam, gamma) - target) ** 2 for s in samples]) for lam in _LAMBDA_GRID]
+    return float(_LAMBDA_GRID[int(np.argmin(mse))])
+
+
+def storey_qvalues(
+    pvalues: pd.Series, lambda_: float | str = 0.5, *, pfdr: bool = False
+) -> pd.Series:
+    """q-values: the smallest false-discovery rate at which each candidate is called.
+
+    Storey (2002), Algorithm 2: q(p_(m)) = FDR(p_(m)), and moving down the
+    sorted p-values, q(p_(i)) = min(FDR(p_(i)), q(p_(i+1))), with the FDR
+    estimate pi0 * p * m / #{p_j <= p}. That is BH's adjusted p-value times the
+    estimated share of nulls pi0, so it is never weaker than BH and gains when
+    many candidates are real, because BH implicitly assumes pi0 = 1. At
+    `lambda_=0`, pi0 = 1 and the q-values are exactly `bh_adjusted`.
+
+    `pfdr=True` uses Storey's positive-FDR estimate instead, as in the paper.
+    It divides by the chance of making any rejection, so as p goes to 0 it
+    tends to pi0 over the number of discoveries (Eq. 22): with ten real
+    candidates among a hundred no q-value falls much below 0.1, however strong
+    the signal. That is the paper's intent, but it makes pFDR q-values a poor
+    score when real candidates are rare, which is the usual case here.
+
+    Only for independent candidates. Because pi0 collapses under correlation
+    (see `estimate_pi0`), q-values of correlated candidates are too small: on
+    all-null sets with pairwise correlation 0.5, some q fell below 0.05 in 12%
+    of sets, against 4.5% for BH. Never screen or decide on them there; use
+    `bh_adjusted` (positive dependence) or `by_adjusted` (any dependence).
+
+    NaN p-values get NaN q-values and do not count toward m.
+    """
+    usable = pvalues.dropna()
+    q = pd.Series(np.nan, index=pvalues.index)
+    if usable.empty:
+        return q
+    ordered = usable.sort_values()
+    p = ordered.to_numpy(dtype=float)
+    m = len(p)
+    pi0 = estimate_pi0(usable, lambda_)
+    # R(p): p-values at or below each one, so tied p-values share a q-value.
+    counts = np.searchsorted(p, p, side="right")
+    raw = pi0 * p * m / counts
+    if pfdr:
+        # Pr(R > 0) under the null; at p = 0 the ratio tends to pi0 / R
+        # (Storey 2002, Eq. 22), which is what the limit gives here.
+        at_least_one = 1.0 - (1.0 - p) ** m
+        raw = np.where(
+            at_least_one > 0, raw / np.where(at_least_one > 0, at_least_one, 1.0), pi0 / counts
+        )
+    raw = np.minimum(raw, 1.0)
+    q.loc[ordered.index] = np.minimum.accumulate(raw[::-1])[::-1]
+    return q
+
+
+def _adjusted(pvalues: pd.Series, family_size: int, scale, *, step_up: bool) -> pd.Series:
+    # Adjusted p-value of the i-th smallest p: the smallest level at which the
+    # procedure would reject it. Step-down procedures take a running maximum
+    # from the smallest p upward, step-up ones a running minimum from the top.
+    adjusted = pd.Series(np.nan, index=pvalues.index)
+    ordered = pvalues.dropna().sort_values()
+    if ordered.empty:
+        return adjusted
+    ranks = np.arange(1, len(ordered) + 1)
+    raw = np.minimum(scale(ordered.to_numpy(dtype=float), ranks, family_size), 1.0)
+    if step_up:
+        values = np.minimum.accumulate(raw[::-1])[::-1]
+    else:
+        values = np.maximum.accumulate(raw)
+    adjusted.loc[ordered.index] = values
+    return adjusted
+
+
+def holm_adjusted(pvalues: pd.Series) -> pd.Series:
+    """Holm-adjusted p-values: `holm(pvalues, alpha)` rejects exactly those <= alpha.
+
+    A graded score in place of a yes/no: the family-wise error rate at which
+    this candidate would first be called real. NaN stays NaN and counts toward m.
+    """
+    return _adjusted(pvalues, len(pvalues), lambda p, i, m: (m - i + 1) * p, step_up=False)
+
+
+def bh_adjusted(pvalues: pd.Series) -> pd.Series:
+    """BH-adjusted p-values: `benjamini_hochberg(pvalues, alpha)` rejects those <= alpha.
+
+    The false-discovery rate at which this candidate would first be selected.
+    NaN stays NaN and, as in `benjamini_hochberg`, does not count toward m.
+    Equal to `storey_qvalues(pvalues, lambda_=0, pfdr=False)`.
+    """
+    usable = int(pvalues.notna().sum())
+    return _adjusted(pvalues, usable, lambda p, i, m: m * p / i, step_up=True)
+
+
+def by_adjusted(pvalues: pd.Series) -> pd.Series:
+    """BY-adjusted p-values: `benjamini_yekutieli(pvalues, alpha)` rejects those <= alpha.
+
+    BH-adjusted p-values scaled by sum(1/i), m counting NaN, as in
+    `benjamini_yekutieli`: the FDR level valid under any dependence.
+    """
+    m = len(pvalues)
+    harmonic = float(np.sum(1.0 / np.arange(1, m + 1))) if m else 1.0
+    return _adjusted(pvalues, m, lambda p, i, n: harmonic * n * p / i, step_up=True)
+
+
+def evidence_profile(pvalues: pd.Series, *, lambda_: float | str = 0.5) -> pd.DataFrame:
+    """Every correction's graded score for each candidate, side by side.
+
+    One row per candidate, sorted by p-value, with the raw p-value and the level
+    at which each procedure would first call it real: `holm` (family-wise
+    error, any dependence), `by` (FDR, any dependence), `bh` (FDR, positive
+    dependence), and Storey's `q` (estimated pFDR, independence). Lower is
+    stronger in every column; a candidate that is strong only in the right-hand
+    columns is plausible, not established.
+
+    Describing a candidate set is what this is for. A decision still takes one
+    column and one threshold, fixed before the data is scored; choosing the
+    column afterwards is itself a multiple-testing problem. Never decide on
+    `q` for correlated candidates; see `storey_qvalues`.
+    """
+    profile = pd.DataFrame(
+        {
+            "p": pvalues,
+            "holm": holm_adjusted(pvalues),
+            "by": by_adjusted(pvalues),
+            "bh": bh_adjusted(pvalues),
+            "q": storey_qvalues(pvalues, lambda_=lambda_),
+        }
+    )
+    return profile.sort_values("p", na_position="last")
 
 
 def false_discovery_rate(rejected: pd.Series, truth: pd.Series) -> float:
