@@ -23,6 +23,7 @@ from capstone.evaluate import (
     evidence_profile,
     expected_max_sharpe,
     false_discovery_rate,
+    haircut_sharpe,
     holm,
     holm_adjusted,
     implied_independent_trials,
@@ -741,3 +742,487 @@ class TestCorrelationBreaksStorey:
         )
         assert pi0.mean() < 0.85
         assert (pi0 < 0.8).mean() > 0.25
+
+
+# --------------------------------------------------------------------------- #
+# Haircut Sharpe: Harvey & Liu (2015) -- QUANTIT-51, QUANTIT-52
+# --------------------------------------------------------------------------- #
+# `haircut_sharpe` follows the authors' own MATLAB, not a reading of the paper.
+# `scripts/haircut_reference.py` is a literal transcription of `Haircut_SR.m`
+# and `sample_random_multests.m`; the values below were produced by running it
+# at seed 0 with WW = 2000 (`python scripts/haircut_reference.py`).
+#
+# What is exact and what is not:
+#
+#   * `n_monthly_obs`, `pvalue` and everything Bonferroni are CLOSED FORM. They
+#     must agree to floating-point precision; a tolerance there would hide a
+#     convention error.
+#   * Holm and BHY are medians over a simulated family, so they depend on the
+#     random stream. The reference draws a full m_tot x m_tot `mvnrnd` and
+#     slices; `haircut_sharpe` draws the same distribution through its
+#     one-factor representation. Across 30 seeds at WW in {500, 1000, 2000} the
+#     measured spread of the surviving Sharpe is sd <= 0.0003 (Holm) and
+#     <= 0.0045 (BHY), with a total range span under 0.018. HAIRCUT_ATOL = 0.02
+#     clears that on both sides; for scale, the NaN-padding approximation this
+#     replaced was out by 0.12 on the same case, so the tolerance is still an
+#     order of magnitude tighter than the error it has to detect.
+HAIRCUT_ATOL = 0.02
+
+# QUANTIT-52's ledger path needs `runlog.trial_count`, which arrives in its own
+# PR (#33) against `main` and is not in this stack. Skipping is deliberate:
+# vendoring a copy of the reader here would fork the thing the whole team
+# corrects against. These tests come back on their own once #33 lands.
+try:
+    from capstone.runlog import trial_count as _trial_count  # noqa: F401
+
+    HAS_LEDGER_READER = True
+except ImportError:  # pragma: no cover - depends on which PRs are merged
+    HAS_LEDGER_READER = False
+
+requires_ledger_reader = pytest.mark.skipif(
+    not HAS_LEDGER_READER,
+    reason="needs runlog.trial_count (#33), which is not in this stack yet",
+)
+
+# label, kwargs for haircut_sharpe, then the reference's N / p_raw / adjusted
+# Sharpes. `n_trials` is our ledger total; the reference's num_test = n_trials-1.
+HAIRCUT_REFERENCE = [
+    (
+        "monthly, 240 obs, SR 1.0, M=100",
+        {"sharpe": 1.0, "n_obs": 240, "n_trials": 101, "frequency": "monthly"},
+        {
+            "n_monthly_obs": 240,
+            "pvalue": 1.1975058908264558e-05,
+            "pvalue_bonferroni": 0.0011975058908264558,
+            "sharpe_bonferroni": 0.7331736399018519,
+            "sharpe_holm": 0.7372469386728714,
+            "sharpe_bhy": 0.7605725858413966,
+        },
+    ),
+    (
+        "monthly, 240 obs, SR 1.0, M=315",
+        {"sharpe": 1.0, "n_obs": 240, "n_trials": 316, "frequency": "monthly"},
+        {
+            "n_monthly_obs": 240,
+            "pvalue": 1.1975058908264558e-05,
+            "pvalue_bonferroni": 0.0037721435561033356,
+            "sharpe_bonferroni": 0.6541227192699938,
+            "sharpe_holm": 0.6588395495840108,
+            "sharpe_bhy": 0.739384506502619,
+        },
+    ),
+    (
+        "monthly, 120 obs, SR 0.75, M=315",
+        {"sharpe": 0.75, "n_obs": 120, "n_trials": 316, "frequency": "monthly"},
+        {
+            "n_monthly_obs": 120,
+            "pvalue": 0.019310820496796444,
+            "pvalue_bonferroni": 1.0,
+            "sharpe_bonferroni": 0.0,
+            "sharpe_holm": 0.0,
+            "sharpe_bhy": 0.15108679381138554,
+        },
+    ),
+    (
+        "daily, 2520 obs, SR 1.5, M=200",
+        {
+            "sharpe": 1.5,
+            "n_obs": 2520,
+            "n_trials": 201,
+            "frequency": "daily",
+            "avg_correlation": 0.4,
+        },
+        {
+            "n_monthly_obs": 84,
+            "pvalue": 0.00015291570299047486,
+            "pvalue_bonferroni": 0.03058314059809497,
+            "sharpe_bonferroni": 0.8315392511067888,
+            "sharpe_holm": 0.844569644584858,
+            "sharpe_bhy": 0.995820532226379,
+        },
+    ),
+    (
+        "monthly, 240 obs, SR 1.0, M=100, rho=0.1",
+        {
+            "sharpe": 1.0,
+            "n_obs": 240,
+            "n_trials": 101,
+            "frequency": "monthly",
+            "autocorrelation": 0.1,
+        },
+        {
+            "n_monthly_obs": 240,
+            "pvalue": 6.148219093260465e-05,
+            "pvalue_bonferroni": 0.006148219093260465,
+            "sharpe_bonferroni": 0.6181278107351466,
+            "sharpe_holm": 0.6235760885229816,
+            "sharpe_bhy": 0.657764912798989,
+        },
+    ),
+    (
+        "monthly, 240 obs, SR 0.3, M=315",
+        {"sharpe": 0.3, "n_obs": 240, "n_trials": 316, "frequency": "monthly"},
+        {
+            "n_monthly_obs": 240,
+            "pvalue": 0.18098583978783234,
+            "pvalue_bonferroni": 1.0,
+            "sharpe_bonferroni": 0.0,
+            "sharpe_holm": 0.0,
+            "sharpe_bhy": 0.0008803790037889812,
+        },
+    ),
+]
+
+
+def _haircut_ids():
+    return [label for label, _, _ in HAIRCUT_REFERENCE]
+
+
+class TestHaircutReferenceComparison:
+    """`haircut_sharpe` against a literal transcription of the authors' MATLAB."""
+
+    @pytest.mark.parametrize(
+        ("kwargs", "expected"),
+        [(k, e) for _, k, e in HAIRCUT_REFERENCE],
+        ids=_haircut_ids(),
+    )
+    def test_closed_form_quantities_match_exactly(self, kwargs, expected):
+        # Frequency conversion, the two-sided t p-value and Bonferroni involve
+        # no simulation. Any disagreement here is a convention error, not noise.
+        out = haircut_sharpe(seed=0, **kwargs)
+        row = out.iloc[0]
+
+        assert out.attrs["n_monthly_obs"] == expected["n_monthly_obs"]
+        assert row["pvalue"] == pytest.approx(expected["pvalue"], rel=1e-10)
+        assert row["pvalue_bonferroni"] == pytest.approx(expected["pvalue_bonferroni"], rel=1e-10)
+        assert row["sharpe_bonferroni"] == pytest.approx(
+            expected["sharpe_bonferroni"], rel=1e-10, abs=1e-12
+        )
+
+    @pytest.mark.parametrize(
+        ("kwargs", "expected"),
+        [(k, e) for _, k, e in HAIRCUT_REFERENCE],
+        ids=_haircut_ids(),
+    )
+    def test_simulated_adjustments_match_within_monte_carlo_error(self, kwargs, expected):
+        out = haircut_sharpe(seed=0, n_simulations=2000, **kwargs)
+        row = out.iloc[0]
+
+        assert row["sharpe_holm"] == pytest.approx(expected["sharpe_holm"], abs=HAIRCUT_ATOL)
+        assert row["sharpe_bhy"] == pytest.approx(expected["sharpe_bhy"], abs=HAIRCUT_ATOL)
+
+    @pytest.mark.parametrize("seed", [1, 7, 12345])
+    def test_the_match_does_not_depend_on_the_committed_seed(self, seed):
+        # The reference values were produced at seed 0. If they only reproduce
+        # at seed 0, the tolerance is wrong rather than the implementation right.
+        _, kwargs, expected = HAIRCUT_REFERENCE[0]
+        row = haircut_sharpe(seed=seed, n_simulations=2000, **kwargs).iloc[0]
+
+        assert row["sharpe_holm"] == pytest.approx(expected["sharpe_holm"], abs=HAIRCUT_ATOL)
+        assert row["sharpe_bhy"] == pytest.approx(expected["sharpe_bhy"], abs=HAIRCUT_ATOL)
+
+
+class TestHaircutFollowsTheAuthorsConventions:
+    """The conventions that differ from the rest of this module, pinned."""
+
+    def test_the_pvalue_is_two_sided_on_a_t_distribution(self):
+        out = haircut_sharpe(1.0, 240, n_trials=101, frequency="monthly", seed=0)
+        n_monthly = out.attrs["n_monthly_obs"]
+        statistic = 1.0 / np.sqrt(12) * np.sqrt(n_monthly)
+
+        expected = 2.0 * stats.t.sf(statistic, n_monthly - 1)
+        assert out.iloc[0]["pvalue"] == pytest.approx(expected, rel=1e-12)
+
+        # Not the normal, and not one-sided: both would be a different method.
+        assert out.iloc[0]["pvalue"] != pytest.approx(2.0 * stats.norm.sf(statistic), rel=1e-6)
+        assert out.iloc[0]["pvalue"] != pytest.approx(
+            stats.t.sf(statistic, n_monthly - 1), rel=1e-6
+        )
+
+    @pytest.mark.parametrize(
+        ("frequency", "n_obs", "n_monthly"),
+        [
+            ("daily", 2520, 84),  # a 360-day year, not 252 and not 365
+            ("daily", 360, 12),
+            ("weekly", 520, 120),
+            ("monthly", 240, 240),
+            ("quarterly", 80, 240),
+            ("annual", 20, 240),
+        ],
+    )
+    def test_observations_are_converted_to_months_on_a_360_day_year(
+        self, frequency, n_obs, n_monthly
+    ):
+        out = haircut_sharpe(
+            1.0, n_obs, n_trials=101, frequency=frequency, seed=0, n_simulations=200
+        )
+        assert out.attrs["n_monthly_obs"] == n_monthly
+
+    def test_the_360_day_year_stays_inside_this_function(self):
+        # The rest of the module annualises at 252. This is the regression test
+        # for someone "tidying up" the inconsistency in the wrong direction.
+        assert sharpe_pvalue(1.0, 2520) == pytest.approx(
+            2.0 * stats.norm.sf(1.0 / np.sqrt(252) * np.sqrt(2520))
+        )
+
+    def test_a_non_annualised_sharpe_is_annualised_first(self):
+        annual = haircut_sharpe(
+            1.0, 240, n_trials=101, frequency="monthly", seed=0, n_simulations=200
+        )
+        periodic = haircut_sharpe(
+            1.0 / np.sqrt(12),
+            240,
+            n_trials=101,
+            frequency="monthly",
+            annualized=False,
+            seed=0,
+            n_simulations=200,
+        )
+        assert periodic.iloc[0]["sharpe_annualized"] == pytest.approx(
+            annual.iloc[0]["sharpe_annualized"]
+        )
+
+    def test_autocorrelation_shrinks_the_sharpe_before_testing(self):
+        plain = haircut_sharpe(
+            1.0, 240, n_trials=101, frequency="monthly", seed=0, n_simulations=200
+        )
+        serial = haircut_sharpe(
+            1.0,
+            240,
+            n_trials=101,
+            frequency="monthly",
+            autocorrelation=0.1,
+            seed=0,
+            n_simulations=200,
+        )
+        assert serial.iloc[0]["sharpe_annualized"] < plain.iloc[0]["sharpe_annualized"]
+        assert serial.iloc[0]["pvalue"] > plain.iloc[0]["pvalue"]
+
+    def test_autocorrelation_does_nothing_at_annual_frequency(self):
+        # As in the authors' code: the annual branch returns SR untouched.
+        kwargs = {"n_obs": 20, "n_trials": 101, "frequency": "annual", "seed": 0}
+        plain = haircut_sharpe(1.0, n_simulations=200, **kwargs)
+        serial = haircut_sharpe(1.0, autocorrelation=0.4, n_simulations=200, **kwargs)
+        assert serial.iloc[0]["sharpe_annualized"] == pytest.approx(
+            plain.iloc[0]["sharpe_annualized"]
+        )
+
+    def test_all_four_of_the_authors_adjustments_are_reported(self):
+        out = haircut_sharpe(1.0, 240, n_trials=101, frequency="monthly", seed=0, n_simulations=200)
+        for name in ("bonferroni", "holm", "bhy", "average"):
+            for prefix in ("pvalue", "sharpe", "haircut"):
+                assert f"{prefix}_{name}" in out.columns
+
+        row = out.iloc[0]
+        assert row["pvalue_average"] == pytest.approx(
+            (row["pvalue_bonferroni"] + row["pvalue_holm"] + row["pvalue_bhy"]) / 3
+        )
+
+    def test_the_haircut_is_the_share_of_the_sharpe_given_up(self):
+        row = haircut_sharpe(
+            1.0, 240, n_trials=101, frequency="monthly", seed=0, n_simulations=200
+        ).iloc[0]
+        expected = (row["sharpe_annualized"] - row["sharpe_bonferroni"]) / row["sharpe_annualized"]
+        assert row["haircut_bonferroni"] == pytest.approx(expected)
+        assert 0.0 <= row["haircut_bonferroni"] <= 1.0
+
+
+class TestHaircutTrialCountConvention:
+    """QUANTIT-52 and the M / M+1 split, which is where an off-by-one hides."""
+
+    def test_num_test_is_one_less_than_the_ledger_total(self):
+        out = haircut_sharpe(1.0, 240, n_trials=101, frequency="monthly", seed=0, n_simulations=200)
+        assert out.attrs["n_trials"] == 101
+        assert out.attrs["num_test"] == 100
+
+    def test_bonferroni_uses_num_test_not_the_family_size(self):
+        # The authors' `p_BON = min(M*p_val,1)` uses M even though Holm and BHY
+        # use M+1. Reproducing that inconsistency is the point: with n_trials
+        # 101 the multiplier must be 100, not 101.
+        out = haircut_sharpe(1.0, 240, n_trials=101, frequency="monthly", seed=0, n_simulations=200)
+        row = out.iloc[0]
+
+        assert row["pvalue_bonferroni"] == pytest.approx(100 * row["pvalue"], rel=1e-12)
+        assert row["pvalue_bonferroni"] != pytest.approx(101 * row["pvalue"], rel=1e-9)
+
+    def test_one_more_trial_shifts_bonferroni_by_exactly_one_multiplier(self):
+        kwargs = {
+            "n_obs": 240,
+            "frequency": "monthly",
+            "seed": 0,
+            "n_simulations": 200,
+        }
+        small = haircut_sharpe(1.0, n_trials=101, **kwargs).iloc[0]
+        large = haircut_sharpe(1.0, n_trials=102, **kwargs).iloc[0]
+
+        assert large["pvalue_bonferroni"] / small["pvalue_bonferroni"] == pytest.approx(
+            101 / 100, rel=1e-10
+        )
+
+    def test_a_bigger_search_takes_more_off(self):
+        surviving = [
+            haircut_sharpe(
+                1.0,
+                240,
+                n_trials=m,
+                frequency="monthly",
+                seed=0,
+                n_simulations=500,
+            ).iloc[0]["sharpe_bonferroni"]
+            for m in (11, 51, 101, 316, 1001)
+        ]
+        assert surviving == sorted(surviving, reverse=True)
+        assert surviving[0] > surviving[-1]
+
+    @requires_ledger_reader
+    def test_trial_count_is_read_from_the_ledger(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+        from capstone.runlog import log_run
+
+        for seed in range(25):
+            log_run("mom-sweep", params={"lookback": seed}, seed=seed)
+
+        from_ledger = haircut_sharpe(1.0, 240, frequency="monthly", seed=0, n_simulations=200)
+        explicit = haircut_sharpe(
+            1.0, 240, n_trials=25, frequency="monthly", seed=0, n_simulations=200
+        )
+
+        # 25 logged trials: the strategy under test plus 24 others.
+        assert from_ledger.attrs["n_trials"] == 25
+        assert from_ledger.attrs["num_test"] == 24
+        pd.testing.assert_frame_equal(from_ledger, explicit)
+
+    @requires_ledger_reader
+    def test_an_experiment_name_scopes_the_count(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+        from capstone.runlog import log_run
+
+        for seed in range(10):
+            log_run("mom-sweep", seed=seed)
+        for seed in range(4):
+            log_run("carry-sweep", seed=seed)
+
+        kwargs = {"n_obs": 240, "frequency": "monthly", "seed": 0, "n_simulations": 200}
+        assert haircut_sharpe(1.0, **kwargs).attrs["n_trials"] == 14
+        scoped = haircut_sharpe(1.0, experiment="carry-sweep", **kwargs)
+        assert scoped.attrs["n_trials"] == 4
+        assert scoped.attrs["num_test"] == 3
+
+    @requires_ledger_reader
+    def test_an_empty_ledger_raises_instead_of_applying_no_haircut(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+
+        with pytest.raises(LookupError, match="no trials"):
+            haircut_sharpe(1.0, 240, frequency="monthly")
+
+
+class TestHaircutSimulationControls:
+    """The simulated family is reproducible and its size is the caller's choice."""
+
+    def test_the_same_seed_gives_the_same_answer(self):
+        kwargs = {
+            "n_obs": 240,
+            "n_trials": 101,
+            "frequency": "monthly",
+            "n_simulations": 500,
+        }
+        first = haircut_sharpe(1.0, seed=42, **kwargs)
+        second = haircut_sharpe(1.0, seed=42, **kwargs)
+        pd.testing.assert_frame_equal(first, second)
+
+    def test_different_seeds_agree_within_monte_carlo_error(self):
+        kwargs = {
+            "n_obs": 240,
+            "n_trials": 101,
+            "frequency": "monthly",
+            "n_simulations": 1000,
+        }
+        values = [haircut_sharpe(1.0, seed=s, **kwargs).iloc[0]["sharpe_bhy"] for s in range(6)]
+        assert max(values) - min(values) < HAIRCUT_ATOL
+
+    def test_the_repetition_count_is_configurable_and_barely_moves_the_answer(self):
+        kwargs = {"n_obs": 240, "n_trials": 101, "frequency": "monthly", "seed": 0}
+        few = haircut_sharpe(1.0, n_simulations=200, **kwargs)
+        many = haircut_sharpe(1.0, n_simulations=2000, **kwargs)
+
+        assert few.attrs["n_simulations"] == 200
+        assert many.attrs["n_simulations"] == 2000
+        assert few.iloc[0]["sharpe_bhy"] == pytest.approx(
+            many.iloc[0]["sharpe_bhy"], abs=HAIRCUT_ATOL
+        )
+
+    def test_an_unset_seed_still_runs(self):
+        out = haircut_sharpe(
+            1.0, 240, n_trials=101, frequency="monthly", seed=None, n_simulations=200
+        )
+        assert out.attrs["seed"] is None
+        assert np.isfinite(out.iloc[0]["sharpe_bhy"])
+
+    def test_the_average_correlation_selects_the_simulated_distribution(self):
+        kwargs = {
+            "n_obs": 240,
+            "n_trials": 316,
+            "frequency": "monthly",
+            "seed": 0,
+            "n_simulations": 1000,
+        }
+        low = haircut_sharpe(1.0, avg_correlation=0.0, **kwargs)
+        high = haircut_sharpe(1.0, avg_correlation=0.8, **kwargs)
+
+        assert low.attrs["avg_correlation"] == 0.0
+        assert high.attrs["avg_correlation"] == 0.8
+        # Different simulated families, so different BHY medians.
+        assert low.iloc[0]["sharpe_bhy"] != high.iloc[0]["sharpe_bhy"]
+
+
+class TestHaircutMultipleCandidates:
+    def test_several_candidates_share_one_simulated_family(self):
+        sharpes = pd.Series({"strong": 1.2, "fair": 0.8, "weak": 0.35})
+        out = haircut_sharpe(
+            sharpes, 240, n_trials=101, frequency="monthly", seed=0, n_simulations=500
+        )
+
+        assert list(out.index) == ["strong", "fair", "weak"]  # sorted by p-value
+        assert out["pvalue"].is_monotonic_increasing
+        assert (out["sharpe_bonferroni"] <= out["sharpe_annualized"]).all()
+
+    def test_a_non_positive_sharpe_is_not_testable(self):
+        # The authors' p_val = 2*(1 - tcdf(T, N-1)) uses T, not |T|, so it
+        # exceeds 1 for a negative Sharpe and their method has nothing to say.
+        sharpes = pd.Series({"good": 1.0, "flat": 0.0, "bad": -0.4, "missing": np.nan})
+        out = haircut_sharpe(
+            sharpes, 240, n_trials=101, frequency="monthly", seed=0, n_simulations=200
+        )
+
+        for name in ("flat", "bad", "missing"):
+            assert np.isnan(out.loc[name, "pvalue"])
+            assert np.isnan(out.loc[name, "sharpe_bhy"])
+            assert np.isnan(out.loc[name, "haircut_bhy"])
+        assert np.isfinite(out.loc["good", "sharpe_bhy"])
+        assert out.loc["good", "sharpe"] == 1.0  # the input is still reported
+
+
+class TestHaircutGuardrails:
+    def test_rejects_an_unknown_frequency(self):
+        with pytest.raises(ValueError, match="unknown frequency"):
+            haircut_sharpe(1.0, 240, n_trials=101, frequency="fortnightly")
+
+    def test_rejects_a_trial_count_below_two(self):
+        with pytest.raises(ValueError, match="must be at least 2"):
+            haircut_sharpe(1.0, 240, n_trials=1, frequency="monthly")
+
+    def test_rejects_too_few_observations(self):
+        with pytest.raises(ValueError, match="n_obs must be at least 1"):
+            haircut_sharpe(1.0, 0, n_trials=101, frequency="monthly")
+
+    def test_rejects_a_sample_too_short_to_convert_to_two_months(self):
+        with pytest.raises(ValueError, match="needs at least 2"):
+            haircut_sharpe(1.0, 30, n_trials=101, frequency="daily")
+
+    def test_rejects_a_non_positive_simulation_count(self):
+        with pytest.raises(ValueError, match="n_simulations must be at least 1"):
+            haircut_sharpe(1.0, 240, n_trials=101, frequency="monthly", n_simulations=0)
+
+    def test_rejects_an_impossible_autocorrelation(self):
+        with pytest.raises(ValueError, match="autocorrelation must be in"):
+            haircut_sharpe(1.0, 240, n_trials=101, frequency="monthly", autocorrelation=1.0)
