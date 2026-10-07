@@ -50,7 +50,7 @@ def sharpe_pvalue(sharpe: float, n_obs: int, periods_per_year: int = 252) -> flo
 
 
 def expected_max_sharpe(
-    n_trials: int,
+    n_trials: float,
     n_obs: int,
     periods_per_year: int = 252,
     *,
@@ -93,7 +93,7 @@ def expected_max_sharpe(
 
 def deflated_sharpe_ratio(
     sharpe: float,
-    n_trials: int,
+    n_trials: float,
     n_obs: int,
     skew: float = 0.0,
     kurtosis: float = 3.0,
@@ -113,6 +113,7 @@ def deflated_sharpe_ratio(
         sharpe: observed annualised Sharpe ratio.
         n_trials: how many candidates were tried to find this one. Counting
             this honestly is the hard part, and it is not our call to make.
+            May be fractional, as from `implied_independent_trials`.
         n_obs: number of periods in the track record.
         skew: skewness of the strategy's returns. Negative skew makes a given
             Sharpe less impressive.
@@ -372,7 +373,9 @@ def sharpe_test(
         skew, kurtosis = m3 / m2**1.5, m4 / m2**2
     else:
         sharpe = skew = kurtosis = float("nan")
-    se = float(np.sqrt(variance / n * periods_per_year))
+    # T - 1, as `probabilistic_sharpe_ratio` and `min_track_record_length` use
+    # (Bailey & Lopez de Prado 2012), so `pvalue_greater` is exactly 1 - `psr`.
+    se = float(np.sqrt(variance / (n - 1) * periods_per_year))
     z = (sharpe - benchmark) / se
     return SharpeTest(
         sharpe=sharpe,
@@ -393,13 +396,19 @@ def sharpe_test(
 def average_correlation(returns: pd.DataFrame) -> float:
     """Equal-weighted average off-diagonal correlation of the trials.
 
-    Bailey & Lopez de Prado (2014), Eq. 8.
+    Bailey & Lopez de Prado (2014), Eq. 8, over the pairs whose correlation is
+    defined.
     """
     m = returns.shape[1]
     if m < 2:
         raise ValueError("need at least 2 trials")
     corr = returns.corr().to_numpy()
-    return float((np.nansum(corr) - np.trace(corr)) / (m * (m - 1)))
+    # A pair with no defined correlation (a constant series, too little
+    # overlap) is left out of the average rather than counted as 0, which
+    # would pull the average toward independence. NaN if no pair is defined.
+    pairs = corr[~np.eye(m, dtype=bool)]
+    pairs = pairs[np.isfinite(pairs)]
+    return float(pairs.mean()) if pairs.size else float("nan")
 
 
 def implied_independent_trials(n_trials: int, avg_correlation: float) -> float:
