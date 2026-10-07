@@ -31,11 +31,37 @@ capstone. The humans steer; you build. These rules are not optional.
 - See CONTRIBUTING.md for the full workflow (review rotation, squash merge,
   deploy registry).
 
+## Data
+
+- Load CRSP/Compustat only through `capstone.shared_data` (`sd.load(...)`), never
+  by reading files or querying WRDS directly. Select the columns you need. The
+  one exception is the data maintainer refreshing the shared files from WRDS.
+- Pick holdings with `in_universe`; take returns from every row via
+  `sd.daily_returns` (never compound `delret` onto `dlyret`), costs via
+  `sd.quoted_spread`, fundamentals only from `sd.available_from`. Key on
+  `permno`; group by `permco` for company-level signals.
+- Column meanings: `data_dictionary.csv` in `sd.cache_dir()`. Full rules:
+  `docs/shared_data.md`.
+- Record `sd.data_version()` in the params of every `log_run`.
+
 ## Research hygiene
 
 - Prefer `.py` scripts over notebooks; fixed seeds; parameters in files.
 - A procedure that cannot return "nothing here" is not a validation procedure
   — run methods on signal-free data before trusting them.
+
+## Validation
+
+- Judge candidates with the shared methods listed in `docs/validation.md`;
+  don't hand-roll a correction or a significance test inside a strategy.
+- Hand them a performance matrix: dates x candidates, one per-period series
+  per candidate (returns via `backtest.candidate_returns`, or per-date IC).
+  Validation never calls strategy code; strategies call validation.
+- Take the trial count from the ledger (`python -m capstone.runlog stats`),
+  never from a number typed into the call.
+- A new validation method ships with a null-calibration test and a power test
+  on `synth.make_return_matrix` data, including correlated (`rho`) and
+  autocorrelated (`ar1`) nulls.
 
 ## Session capture (by design)
 
