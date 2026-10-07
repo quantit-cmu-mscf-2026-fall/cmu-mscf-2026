@@ -50,7 +50,9 @@ from scipy import stats
 _COMBO_CHUNK = 4096
 
 # C(24, 12) is 2.7 million splits; past that the run stops being interactive and
-# the extra resolution buys nothing. The paper's own examples use 8 to 16.
+# the extra resolution buys nothing. The paper's own examples use 8 to 16. (Its
+# text, pp. 11 and 19, says S = 16 gives 12,780 combinations; C(16, 8) is
+# 12,870, which is what this code produces. The paper has the typo.)
 _MAX_BLOCKS = 24
 
 
@@ -88,6 +90,11 @@ def _sharpe_from_moments(
 
     Returns NaN where the variance is not positive -- a flat strategy has no
     Sharpe, and inventing one would let it win a split.
+
+    The one-pass variance loses precision when the mean is large against the
+    spread: at sd 0.01 the median relative error is about 1e-8 at mean 100,
+    2e-4 at mean 1e4 and of order 1 at mean 1e6. Per-period returns are
+    nowhere near that; don't pass price levels.
     """
     mean = total / n_obs
     variance = (total_sq - n_obs * mean**2) / (n_obs - 1)
@@ -120,11 +127,12 @@ def cscv(
     Returns:
         dict with:
             pbo: share of splits whose IS winner landed below the OOS median,
-                counting a winner exactly on the median as half. NaN when no
-                split produced a usable pair of Sharpes.
+                counting a winner exactly on the median as half. A winner with
+                no OOS Sharpe (flat out of sample) ranks at the bottom and
+                counts as overfit. NaN when no split had a winner.
             n_splits_used: splits that contributed, out of `n_splits`. Lower
-                than `n_splits` means some splits had a winner with no Sharpe
-                on one side; if it is 0, `pbo` is NaN.
+                than `n_splits` means some splits had no column with an
+                in-sample Sharpe, so no winner; if it is 0, `pbo` is NaN.
             degradation_slope: OLS slope of the winner's OOS Sharpe on its IS
                 Sharpe across splits. Read it against its own baseline, which is
                 already negative. Bailey et al. (2015, section 3.2) say "the
@@ -135,8 +143,9 @@ def cscv(
                 not evidence of overfitting.
             degradation_intercept: intercept of that same fit.
             oos_ranks: Series of the winner's relative OOS rank per split, in
-                (0, 1), where 0.5 is the median. This is the distribution PBO
-                summarises; its shape says more than the scalar does.
+                (0, 1), where 0.5 is the median; NaN for a split without a
+                winner. This is the distribution PBO summarises; its shape
+                says more than the scalar does.
             winner_is_sharpe / winner_oos_sharpe: the paired Sharpes behind the
                 regression, one entry per split.
             winner_columns: which strategy won each split, by column name.
@@ -222,10 +231,13 @@ def cscv(
     # Divide by N + 1 so the median maps onto 0.5.
     relative_rank = winner_rank / (n_strategies + 1)
 
-    # A split only carries information about overfitting if the winner has a
-    # Sharpe on both sides. Splits where it does not are dropped from PBO as
-    # well as from the degradation fit, instead of counting as evidence.
-    usable = np.isfinite(winner_is) & np.isfinite(winner_oos)
+    # A split only has a winner if the winner has an in-sample Sharpe; when no
+    # column does, argmax picked one arbitrarily and the split is dropped. A
+    # real winner that has no Sharpe out of sample (it went flat) is the
+    # textbook overfit case: it stays in, ranked at the bottom above, and
+    # counts as overfit. Dropping it would make PBO more reassuring.
+    usable = np.isfinite(winner_is)
+    relative_rank = np.where(usable, relative_rank, np.nan)
     if usable.any():
         ranked = relative_rank[usable]
         # Mid-rank: a winner that lands exactly ON the median neither beat it

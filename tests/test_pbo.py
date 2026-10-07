@@ -346,21 +346,19 @@ class TestMedianTiesAndUnusableSplits:
         assert result["pbo"] == pytest.approx(0.5)
         assert float(result["oos_ranks"].mean()) == pytest.approx(0.5)
 
-    def test_an_odd_candidate_count_is_not_biased_low(self):
-        # With N odd the median rank is attainable, so roughly 1/N of splits sat
-        # exactly on it and were being discarded. Measured over seeds 0-19 the
-        # old strict rule gave 0.471 at N=49 against 0.507 at N=48.
-        values = []
-        for seed in range(20):
-            rng = np.random.default_rng(seed)
-            matrix = pd.DataFrame(rng.normal(0, 0.01, (1000, 49)))
-            values.append(cscv(matrix, n_blocks=10)["pbo"])
-
-        mean_pbo = float(np.mean(values))
-        assert 0.45 < mean_pbo < 0.55, (
-            f"mean PBO {mean_pbo:.3f} on independent nulls with an odd candidate "
-            "count; the no-skill baseline is 0.5 and an odd N must not shift it"
-        )
+    def test_a_winner_on_the_median_at_odd_n_counts_half(self):
+        # With N odd the median rank (N+1)/2 is attainable with distinct ranks,
+        # so some splits land exactly on 0.5. Each must add half a split: the
+        # strict rule dropped them (biasing PBO low by about 1/(2N)), and `<=`
+        # would count them in full (biasing it high). Checked exactly on one
+        # panel rather than as a noisy mean over seeds.
+        rng = np.random.default_rng(0)
+        result = cscv(pd.DataFrame(rng.normal(0, 0.01, (1000, 49))), n_blocks=10)
+        ranks = result["oos_ranks"].to_numpy()
+        on_median = np.isclose(ranks, 0.5)
+        assert on_median.any()  # the case is exercised
+        below = ranks < 0.5
+        assert result["pbo"] == pytest.approx(below.mean() + 0.5 * on_median.mean())
 
     def test_a_panel_with_no_usable_sharpe_reports_nothing_not_zero(self):
         # Every column flat: no Sharpe exists on either side of any split, so
@@ -375,6 +373,25 @@ class TestMedianTiesAndUnusableSplits:
         assert math.isnan(result["pbo"])
         assert result["n_splits_used"] == 0
         assert result["n_splits"] == math.comb(8, 4)
+        # No split had a winner, so no rank either: the ranks can't read 0.5
+        # while PBO is NaN.
+        assert result["oos_ranks"].isna().all()
+
+    def test_a_winner_that_goes_flat_out_of_sample_counts_as_overfit(self):
+        # Lauren's #64 repro: one column earns for 100 days and is flat after,
+        # the textbook overfit pattern. When it wins in-sample but has no OOS
+        # Sharpe, the split must stay in and rank it at the bottom. Dropping
+        # those splits read 0.243 on 35 of 70 splits instead of 0.614.
+        rng = np.random.default_rng(1)
+        matrix = pd.DataFrame(rng.normal(0, 0.01, (800, 6)))
+        burst = np.zeros(800)
+        burst[:100] = rng.normal(0.01, 0.01, 100)
+        matrix["burst"] = burst
+
+        result = cscv(matrix, n_blocks=8)
+
+        assert result["n_splits_used"] == result["n_splits"] == 70
+        assert result["pbo"] > 0.5
 
     def test_usable_splits_are_reported(self):
         result = cscv(coupled_sweep_matrix(n_strategies=10), n_blocks=8)
