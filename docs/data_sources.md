@@ -5,13 +5,14 @@ The agreement between Quantit and Carnegie Mellon limits this project to
 and synthetic data**. We provide no vendor-licensed data, and you are never
 expected to access any.
 
-That constraint is less limiting than it sounds, but it does split the world in
-two, and the split is not "free vs paid" — it is **redistributable vs not**.
+That constraint is less limiting than it sounds, but it does split the world,
+and the split is not "free vs paid" — it is **who may hold a copy**.
 
-| | We can prepare and ship it | You fetch it yourself |
-|---|---|---|
-| Why | the licence permits redistribution | freely accessible, but redistribution is not granted |
-| Examples | SEC EDGAR, Ken French, synthetic panels | CRSP/Compustat via WRDS, most free price APIs |
+| | We can prepare and ship it | Shared inside the team only | You fetch it yourself |
+|---|---|---|---|
+| Why | the licence permits redistribution | every member holds their own WRDS licence through CMU; the copy is never published | freely accessible, but redistribution is not granted |
+| Where | this repo | a Drive folder that only CMU accounts can open | your own machine |
+| Examples | SEC EDGAR, Ken French, synthetic panels | CRSP/Compustat via WRDS (`capstone.shared_data`) | most free price APIs |
 
 ## Fundamentals — SEC EDGAR (we ship this)
 
@@ -48,15 +49,21 @@ Stooq, and most aggregators) are freely *accessible* but do not grant us the
 right to republish a prepared dataset — the underlying exchange data is
 separately licensed regardless of what the aggregator's own terms say. So:
 
-**Preferred: CRSP via WRDS.** CMU subscribes; you register with your CMU email
-and connect through full VPN off campus. CRSP is the academic standard for US
+**Preferred: CRSP via WRDS.** CMU subscribes; you register with your CMU email.
+No VPN is needed — a connection from a residential ISP with no CMU VPN active
+succeeded on 2026-09-21, because WRDS authenticates by credentials rather than
+by network path. CRSP is the academic standard for US
 equity prices — properly adjusted, delisting returns included, and PERMNO
 identifiers that survive ticker changes. It is better than anything free, it is
-already yours, and it is explicitly allowed by the agreement. We supply loader
-code (`capstone.wrds_loader`); the data comes through your own credentials, and
-CRSP-derived artifacts generally may not be published — check before making any
-output public. Setup and the three CRSP conventions that trip everyone once:
-**`docs/wrds_howto.md`**.
+already yours, and it is explicitly allowed by the agreement. Every team member
+registers their own WRDS account. On top of that, the team keeps one shared pull
+(`capstone.shared_data`, `docs/shared_data.md`) so everyone runs on identical
+data: it is a copy among licensed users, kept in a Drive folder only CMU
+accounts can open, never in this public repo, and never shared with anyone
+outside the team, the sponsor included. For a pull of your own, the loader code
+is `capstone.wrds_loader`. Either way, CRSP-derived artifacts generally may not
+be published — check before making any output public. Setup and the three CRSP
+conventions that trip everyone once: **`docs/wrds_howto.md`**.
 
 **No account yet? `capstone.sample_data`.** Six months of daily bars for 40
 large-cap tickers, same frame shape as the CRSP loader output, plus quarterly
@@ -107,8 +114,9 @@ instrument.
 ## Summary
 
 - Fundamentals: **SEC EDGAR**, prepared by us, point-in-time, redistributable.
-- Prices: **CRSP via WRDS** with your own credentials (preferred), or any public
-  API you pull yourself.
+- Prices: **CRSP via WRDS**, preferably the team's shared pull
+  (`capstone.shared_data`, `docs/shared_data.md`), or your own credentials, or
+  any public API you pull yourself.
 - Factors/industries: **Ken French**, already in the kit.
 - Ground truth: **synthetic**, already in the kit.
 - Never: vendor-licensed data. We will not provide it and you do not need it.
