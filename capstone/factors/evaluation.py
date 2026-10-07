@@ -237,15 +237,23 @@ def factor_signal(tree: Node, panel: Panel) -> pd.DataFrame:
 
 def signal_weights(signal: pd.DataFrame, panel: Panel, neutral: str = "none") -> pd.DataFrame:
     """Dollar-neutral weights, gross 1, proportional to the signal demeaned across
-    all universe stocks or, with neutral="sector", within each sector."""
+    all universe stocks or, with neutral="sector", within each sector.
+
+    A day with no signal on any universe stock (a lookback still warming up,
+    say) is a row of NaN, not of zeros, so `returns_from_weights` can tell
+    "no signal" from "a signal that nets to zero weight".
+    """
+    has_signal = signal.notna().any(axis=1)
     if neutral == "sector":
         long = signal.stack()
         sectors = sector_groups(panel).reindex(long.index)
         dates = long.index.get_level_values(0)
         demeaned = long - long.groupby([dates, sectors.values]).transform("mean")
         signal = demeaned.unstack().reindex_like(signal)
-        return to_weights(signal, demean=False, gross=1.0).fillna(0.0)
-    return to_weights(signal, demean=True, gross=1.0).fillna(0.0)
+        weights = to_weights(signal, demean=False, gross=1.0).fillna(0.0)
+    else:
+        weights = to_weights(signal, demean=True, gross=1.0).fillna(0.0)
+    return weights.where(has_signal, axis=0)
 
 
 def factor_weights(tree: Node, panel: Panel, neutral: str = "none") -> pd.DataFrame:
@@ -263,12 +271,21 @@ def returns_from_weights(weights: pd.DataFrame, panel: Panel, hold: int = 1) -> 
     the change in weight pays half that day's quoted spread. Between
     rebalances the weights are held fixed, so the small trades that would
     keep them fixed as prices drift are not charged.
+
+    A row of NaN weights means no signal that day. A day whose book came from
+    such a row, with nothing traded, holds no position: its returns, cost and
+    turnover are NaN, not 0.0, so a lookback's warm-up doesn't count as flat
+    days (the rule `backtest` adopts in #55). A real signal that nets to zero
+    weight still earns 0.0.
     """
     if hold < 1:
         raise ValueError("hold must be at least 1 day")
+    has_signal = weights.notna().any(axis=1).astype(float)
+    weights = weights.fillna(0.0)
     if hold > 1:
-        rebalance = np.arange(len(weights)) % hold == 0
-        weights = weights.where(pd.Series(rebalance, index=weights.index), axis=0).ffill()
+        rebalance = pd.Series(np.arange(len(weights)) % hold == 0, index=weights.index)
+        weights = weights.where(rebalance, axis=0).ffill()
+        has_signal = has_signal.where(rebalance).ffill()
     returns = panel.fields["returns"]
     positions = weights.shift(1)
     gross = (positions * returns).sum(axis=1, min_count=1)
@@ -280,6 +297,11 @@ def returns_from_weights(weights: pd.DataFrame, panel: Panel, hold: int = 1) -> 
     cost = (trades * spread).sum(axis=1).shift(1)  # charged on the day the position is first held
     turnover = trades.sum(axis=1).shift(1)
     gross.iloc[:1] = np.nan
+    # The book held on day t was set at t-1: idle if that came from no signal.
+    idle = (has_signal.shift(1) == 0) & (turnover == 0)
+    gross[idle] = np.nan
+    cost[idle] = np.nan
+    turnover[idle] = np.nan
     net = gross - cost
     return FactorReturns(net.rename("net"), gross.rename("gross"), cost.rename("cost"), turnover)
 
