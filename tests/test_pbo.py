@@ -317,3 +317,79 @@ class TestGuardrails:
         matrix.iloc[5, 2] = np.nan
         result = cscv(matrix, n_blocks=8)
         assert result["n_obs_used"] <= len(matrix) - 2
+
+
+class TestMedianTiesAndUnusableSplits:
+    """A rank exactly ON the OOS median is not evidence of "no overfitting".
+
+    `relative_rank = r/(N+1)` hits 0.5 exactly in two ordinary situations: when
+    candidates tie (a sweep whose variants collapse to the same series), and
+    when N is odd, where `(N+1)/2` is an attainable rank. A strict `<` drops
+    that mass, which biases PBO toward the reassuring end -- and in the fully
+    tied case pins it at 0.000, the best reading the statistic has, for a panel
+    where selection is provably uninformative.
+    """
+
+    @staticmethod
+    def _tied(n_strategies: int, seed: int = 0) -> pd.DataFrame:
+        rng = np.random.default_rng(seed)
+        column = rng.standard_normal((N_DATES, 1)) * 0.01
+        return pd.DataFrame(np.hstack([column] * n_strategies))
+
+    @pytest.mark.parametrize("n_strategies", [2, 4, 8])
+    def test_identical_candidates_score_the_uninformative_half(self, n_strategies):
+        result = cscv(self._tied(n_strategies), n_blocks=8)
+
+        # Every candidate is the same series, so choosing between them says
+        # nothing about OOS. The mean rank already reported 0.5; PBO has to
+        # agree with it rather than reading 0.
+        assert result["pbo"] == pytest.approx(0.5)
+        assert float(result["oos_ranks"].mean()) == pytest.approx(0.5)
+
+    def test_an_odd_candidate_count_is_not_biased_low(self):
+        # With N odd the median rank is attainable, so roughly 1/N of splits sat
+        # exactly on it and were being discarded. Measured over seeds 0-19 the
+        # old strict rule gave 0.471 at N=49 against 0.507 at N=48.
+        values = []
+        for seed in range(20):
+            rng = np.random.default_rng(seed)
+            matrix = pd.DataFrame(rng.normal(0, 0.01, (1000, 49)))
+            values.append(cscv(matrix, n_blocks=10)["pbo"])
+
+        mean_pbo = float(np.mean(values))
+        assert 0.45 < mean_pbo < 0.55, (
+            f"mean PBO {mean_pbo:.3f} on independent nulls with an odd candidate "
+            "count; the no-skill baseline is 0.5 and an odd N must not shift it"
+        )
+
+    def test_a_panel_with_no_usable_sharpe_reports_nothing_not_zero(self):
+        # Every column flat: no Sharpe exists on either side of any split, so
+        # there is no statistic. NaN is the answer; 0.0 would read as "selection
+        # predicts OOS perfectly".
+        flat = pd.DataFrame(np.tile([0.001], (N_DATES, 6)))
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = cscv(flat, n_blocks=8)
+
+        assert math.isnan(result["pbo"])
+        assert result["n_splits_used"] == 0
+        assert result["n_splits"] == math.comb(8, 4)
+
+    def test_usable_splits_are_reported(self):
+        result = cscv(coupled_sweep_matrix(n_strategies=10), n_blocks=8)
+
+        assert result["n_splits_used"] == result["n_splits"]
+        assert 0.0 <= result["pbo"] <= 1.0
+
+    def test_a_flat_candidate_still_never_wins_a_split(self):
+        # Unchanged behaviour, pinned alongside the fix: a zero-variance column
+        # has no Sharpe, so it must not be selectable IS.
+        rng = np.random.default_rng(0)
+        matrix = pd.DataFrame(rng.normal(0, 0.01, (N_DATES, 6)))
+        matrix["cash"] = 0.001
+
+        result = cscv(matrix, n_blocks=8)
+
+        assert "cash" not in set(result["winner_columns"])
+        assert result["n_splits_used"] == result["n_splits"]

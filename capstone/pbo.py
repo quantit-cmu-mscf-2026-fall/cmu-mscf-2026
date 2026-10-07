@@ -26,7 +26,9 @@ sweep, and it is the regime the statistic was built to expose.
 
 PBO near 0 says IS selection genuinely predicts OOS. Confirm it is a real edge
 and not a leaking split before believing it -- a planted-signal panel and an
-IS/OOS split that share rows both score 0 here.
+IS/OOS split that share rows both score 0 here. Candidates that are exact
+duplicates of each other used to score 0 as well, for no better reason than
+every rank tying on the median; `pbo` now splits that mass and reads 0.5.
 
 Input is a T x N matrix of per-period strategy returns, one column per trial.
 `backtest.sweep` produces per-candidate *summaries* rather than this matrix, so
@@ -117,10 +119,20 @@ def cscv(
 
     Returns:
         dict with:
-            pbo: share of splits whose IS winner landed below the OOS median.
+            pbo: share of splits whose IS winner landed below the OOS median,
+                counting a winner exactly on the median as half. NaN when no
+                split produced a usable pair of Sharpes.
+            n_splits_used: splits that contributed, out of `n_splits`. Lower
+                than `n_splits` means some splits had a winner with no Sharpe
+                on one side; if it is 0, `pbo` is NaN.
             degradation_slope: OLS slope of the winner's OOS Sharpe on its IS
-                Sharpe across splits. At or below zero means IS advantage is
-                not merely uninformative about OOS but actively inverted.
+                Sharpe across splits. Read it against its own baseline, which is
+                already negative. Bailey et al. (2015, section 3.2) say "the
+                beta will be negative in most practical cases, due to
+                compensation effects"; measured on independent no-skill sets
+                from `synth.make_return_matrix` the mean slope is about -0.41,
+                against about -1.0 on a coupled sweep. A negative slope alone is
+                not evidence of overfitting.
             degradation_intercept: intercept of that same fit.
             oos_ranks: Series of the winner's relative OOS rank per split, in
                 (0, 1), where 0.5 is the median. This is the distribution PBO
@@ -207,15 +219,29 @@ def cscv(
     winner_oos = np.concatenate(oos_sharpes)
     winner_index = np.concatenate(winners)
 
-    # Divide by N + 1 so the median rank maps exactly onto 0.5 and no split can
-    # sit on the boundary by construction.
+    # Divide by N + 1 so the median maps onto 0.5.
     relative_rank = winner_rank / (n_strategies + 1)
-    pbo = float(np.mean(relative_rank < 0.5))
+
+    # A split only carries information about overfitting if the winner has a
+    # Sharpe on both sides. Splits where it does not are dropped from PBO as
+    # well as from the degradation fit, instead of counting as evidence.
+    usable = np.isfinite(winner_is) & np.isfinite(winner_oos)
+    if usable.any():
+        ranked = relative_rank[usable]
+        # Mid-rank: a winner that lands exactly ON the median neither beat it
+        # nor missed it, so it contributes half. Without this, ties and odd
+        # strategy counts are silently scored as "not overfit" -- identical
+        # candidates read 0.000, the most reassuring value there is, when the
+        # honest answer is 0.5.
+        pbo = float(np.mean(ranked < 0.5) + 0.5 * np.mean(ranked == 0.5))
+    else:
+        pbo = float("nan")
 
     slope, intercept = _degradation_fit(winner_is, winner_oos)
 
     return {
         "pbo": pbo,
+        "n_splits_used": int(usable.sum()),
         "degradation_slope": slope,
         "degradation_intercept": intercept,
         "oos_ranks": pd.Series(relative_rank, name="relative_oos_rank"),
