@@ -46,7 +46,7 @@ def to_weights(signal: pd.DataFrame, *, demean: bool = True, gross: float = 1.0)
     return values.mul(scale, axis=0)
 
 
-def _backtest_components(
+def backtest_components(
     signal: pd.DataFrame,
     returns: pd.DataFrame,
     *,
@@ -54,7 +54,8 @@ def _backtest_components(
     demean: bool,
     gross: float,
 ) -> tuple[pd.Series, pd.Series]:
-    """Shared core of `run_backtest` and `sweep`.
+    """Net returns and turnover for one signal: the core of `run_backtest`, `sweep`
+    and `candidate_returns`.
 
     Aligns signal/returns on their common index and columns, shifts positions
     one period so `signal.loc[t]` earns `returns.loc[t+1]`, and returns both
@@ -106,7 +107,7 @@ def run_backtest(
         `to_weights(signal).shift(1)`, so the first observation is always
         NaN (no prior signal to trade on).
     """
-    net_returns, _turnover = _backtest_components(
+    net_returns, _turnover = backtest_components(
         signal, returns, cost_bps=cost_bps, demean=demean, gross=gross
     )
     return net_returns
@@ -229,7 +230,7 @@ def sweep(panel: SyntheticPanel, *, cost_bps: float = 0.0, freq: str = "daily") 
 
     rows = {}
     for name, signal, is_real in candidate_frames(panel):
-        net_returns, turnover = _backtest_components(
+        net_returns, turnover = backtest_components(
             signal, panel.returns, cost_bps=cost_bps, demean=True, gross=1.0
         )
         summary = summarize(net_returns, freq=freq, turnover=float(turnover.mean()))
@@ -239,4 +240,36 @@ def sweep(panel: SyntheticPanel, *, cost_bps: float = 0.0, freq: str = "daily") 
 
     result = pd.DataFrame.from_dict(rows, orient="index")
     result.index.name = "candidate"
+    return result
+
+
+def candidate_returns(panel: SyntheticPanel, *, cost_bps: float = 0.0) -> pd.DataFrame:
+    """Per-period net returns of every candidate in a `SyntheticPanel`, side by side.
+
+    `sweep` reduces each candidate to one summary row; the validation methods
+    need the series themselves (bootstrap, CSCV, robust Sharpe inference all
+    resample or split time). Each column is exactly what `run_backtest` returns
+    for that candidate, with the same defaults as `sweep`.
+
+    Args:
+        panel: a `capstone.synth.SyntheticPanel`.
+        cost_bps: transaction cost passed to the underlying backtest.
+
+    Returns:
+        dates x candidates DataFrame, columns in `panel.truth` order. The first
+        date is dropped: no candidate holds a position on it, so it is not a
+        period anyone traded, and keeping it would add a zero-return observation
+        to every column.
+    """
+    from capstone.synth import candidate_frames  # lazy import: avoids a circular import
+
+    columns = {}
+    for name, signal, _is_real in candidate_frames(panel):
+        net_returns, _turnover = backtest_components(
+            signal, panel.returns, cost_bps=cost_bps, demean=True, gross=1.0
+        )
+        columns[name] = net_returns
+
+    result = pd.DataFrame(columns).iloc[1:]
+    result.columns.name = "candidate"
     return result
