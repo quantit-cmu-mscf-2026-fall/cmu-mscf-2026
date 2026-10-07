@@ -1,4 +1,5 @@
 data_cache/
+*.parquet
 __pycache__/
 *.pyc
 .venv/

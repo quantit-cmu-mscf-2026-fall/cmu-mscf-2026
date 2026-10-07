@@ -362,16 +362,30 @@ class TestSharpeVariance:
             sharpe_variance(pd.Series([0.01]))
 
     def test_sharpe_test_psr_agrees_with_its_pvalue(self):
-        # The one-sided PSR and the two-sided p-value come from the same z.
+        # The p-values and the PSR use the same sqrt(T - 1) (Lauren's #29
+        # review): with T in one and T - 1 in the other they differed slightly.
         returns = make_return_matrix(n_candidates=1, n_real=1, sharpe_real=0.8, seed=2).returns
+        for benchmark in (0.0, 0.5):
+            result = sharpe_test(returns.iloc[:, 0], benchmark=benchmark)
+            assert result.pvalue_greater == pytest.approx(1 - result.psr, abs=1e-12)
         result = sharpe_test(returns.iloc[:, 0])
         assert result.sharpe > 0
-        assert 1 - result.psr == pytest.approx(result.pvalue / 2, abs=2e-3)
+        assert 1 - result.psr == pytest.approx(result.pvalue / 2, abs=1e-12)
 
 
 class TestTrackRecordAndPSR:
     def test_min_track_record_is_infinite_below_the_benchmark(self):
         assert min_track_record_length(0.5, benchmark=1.0) == float("inf")
+
+    def test_min_track_record_is_nan_when_the_variance_is_not_positive(self):
+        # 1 - skew*SR + (kurtosis-1)/4*SR^2 = 1 - 15 + 4.5 < 0 at SR = 3 per period.
+        sharpe = 3.0 * np.sqrt(252)
+        assert np.isnan(min_track_record_length(sharpe, skew=5.0))
+        assert np.isnan(probabilistic_sharpe_ratio(sharpe, 100, skew=5.0))
+        assert np.isnan(min_track_record_length(1.0, variance=0.0))
+
+    def test_min_track_record_is_nan_for_a_nan_sharpe(self):
+        assert np.isnan(min_track_record_length(float("nan")))
 
     def test_psr_at_min_track_record_is_the_confidence_level(self):
         n = min_track_record_length(1.5, benchmark=0.5, skew=-0.5, kurtosis=6.0)
@@ -393,6 +407,53 @@ class TestIndependentTrials:
     def test_average_correlation_recovers_rho(self):
         returns = make_return_matrix(n_candidates=40, rho=0.4, seed=0).returns
         assert average_correlation(returns) == pytest.approx(0.4, abs=0.05)
+
+    def test_average_correlation_leaves_out_undefined_pairs(self):
+        # A constant trial has no correlation with anything. Counting its pairs
+        # as 0 pulled the average toward independence (Lauren's #29 review).
+        returns = make_return_matrix(n_candidates=10, rho=0.4, seed=0).returns
+        with_constant = returns.assign(flat=0.0)
+        assert average_correlation(with_constant) == pytest.approx(average_correlation(returns))
+        flat = pd.DataFrame({"a": [0.0] * 5, "b": [1.0] * 5})
+        assert np.isnan(average_correlation(flat))
+
+    def test_fractional_trial_counts_are_accepted(self):
+        # implied_independent_trials returns a float; it feeds n_trials.
+        n = implied_independent_trials(100, 0.3)
+        assert n == pytest.approx(70.3)
+        between = expected_max_sharpe(n, 1000)
+        assert expected_max_sharpe(70, 1000) < between < expected_max_sharpe(71, 1000)
+        assert 0 <= deflated_sharpe_ratio(1.5, n, 1000) <= 1
+
+
+class TestDeflatedSharpeNullCalibration:
+    def test_best_of_autocorrelated_nulls_passes_rarely_with_both_corrections(self):
+        # Lauren's #29 review: DSR's null calibration on autocorrelated trials.
+        # 50 AR(1) nulls (coefficient 0.3, T = 1000), 120 sets, seeds 0-119.
+        # By default the IID threshold and IID standard error let the best null
+        # through about 10% of the time; with the HAC variance and the trials'
+        # own Sharpe spread it should pass no more than the 5% the 0.95 cut-off
+        # promises.
+        n_obs, n_trials, sets = 1000, 50, 120
+        default = corrected = 0
+        for seed in range(sets):
+            returns = make_return_matrix(n_obs=n_obs, n_candidates=n_trials, ar1=0.3, seed=seed)
+            x = returns.returns
+            sharpe = x.mean() / x.std(ddof=0) * np.sqrt(252)
+            best = sharpe.idxmax()
+            default += deflated_sharpe_ratio(float(sharpe[best]), n_trials, n_obs) > 0.95
+            corrected += (
+                deflated_sharpe_ratio(
+                    float(sharpe[best]),
+                    n_trials,
+                    n_obs,
+                    variance=sharpe_variance(x[best], method="hac"),
+                    trials_sharpe_variance=float(sharpe.var(ddof=1)),
+                )
+                > 0.95
+            )
+        assert corrected / sets <= 0.05
+        assert default / sets > corrected / sets
 
 
 def _correlated_pvalues(
