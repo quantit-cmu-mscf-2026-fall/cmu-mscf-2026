@@ -562,3 +562,31 @@ def test_evidence_table_lists_every_edit_once():
     assert table.splitlines()[0].startswith("edit | tried")
     assert len(table.splitlines()) == 2 + len(PRODUCIBLE_MOTIFS)
     assert all(m in table for m in PRODUCIBLE_MOTIFS) and "untried" in table
+
+
+@pytest.mark.parametrize(
+    ("quality", "band"),
+    [(-3.0, "q0"), (-0.01, "q0"), (0.0, "q1"), (0.99, "q1"), (1.0, "q2"), (1.645, "q3")],
+)
+def test_signed_quality_bins_put_losers_at_the_bottom(quality, band):
+    # The evaluation scorer's z: negative loses after costs, so it can't share
+    # a bin with a winner the way a negative ICIR does.
+    key = parent_context(
+        parse("returns"),
+        quality=quality,
+        times_selected=0,
+        quality_edges=(0.0, 1.0, 1.645),
+        signed_quality=True,
+    )
+    assert key.split("|")[1] == band
+
+
+def test_quality_edges_must_increase():
+    from dataclasses import replace
+
+    from capstone.factors.llm import load_config
+
+    with pytest.raises(ValueError, match="strictly increasing"):
+        replace(load_config(), memory_quality_edges=(0.1, 0.1, 0.2))
+    with pytest.raises(ValueError, match="strictly increasing"):
+        replace(load_config(), memory_quality_edges=())

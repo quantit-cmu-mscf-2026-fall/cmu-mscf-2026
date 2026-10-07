@@ -6,7 +6,15 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from capstone.backtest import BacktestSummary, run_backtest, summarize, to_weights
+from capstone.backtest import (
+    BacktestSummary,
+    candidate_returns,
+    run_backtest,
+    summarize,
+    sweep,
+    to_weights,
+)
+from capstone.synth import make_panel
 
 
 def _random_panel(n_dates: int = 10, n_assets: int = 5, seed: int = 0) -> pd.DataFrame:
@@ -74,6 +82,32 @@ def test_lookahead_discrimination():
     assert foresight_mean > 20 * abs(contemporaneous_mean)
 
 
+def _constant_book(n_dates: int = 80) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Long A / short B every day, on flat prices: the only P&L is trading cost."""
+    dates = pd.bdate_range("2020-01-01", periods=n_dates)
+    signal = pd.DataFrame({"A": 1.0, "B": -1.0}, index=dates)
+    returns = pd.DataFrame(0.0, index=dates, columns=["A", "B"])
+    return signal, returns
+
+
+def test_first_period_is_nan_not_a_zero_return():
+    # Nothing is held on the first date, so it is not a period with a return.
+    signal, returns = _constant_book()
+    strategy = run_backtest(signal, returns)
+    assert np.isnan(strategy.iloc[0])
+    assert not strategy.iloc[1:].isna().any()
+    assert summarize(strategy).n_obs == len(signal) - 1
+
+
+def test_building_the_book_is_charged():
+    # Opening a gross-1.0 book is 1.0 of turnover, paid once, when the position
+    # is first held; holding it unchanged costs nothing after that.
+    signal, returns = _constant_book()
+    strategy = run_backtest(signal, returns, cost_bps=100.0)
+    assert strategy.iloc[1] == pytest.approx(-0.01)
+    assert (strategy.iloc[2:] == 0.0).all()
+
+
 def test_summarize_short_series_raises():
     returns = pd.Series(np.random.default_rng(0).standard_normal(30) * 0.01)
     with pytest.raises(ValueError):
@@ -109,3 +143,29 @@ def test_cost_bps_reduces_mean_return():
     costly = run_backtest(signal, returns, cost_bps=50.0)
 
     assert costly.dropna().mean() < free.dropna().mean()
+
+
+class TestCandidateReturns:
+    def test_each_column_is_that_candidates_backtest(self):
+        panel = make_panel(n_dates=80, n_assets=6, n_candidates=4, n_real=1, seed=0)
+        matrix = candidate_returns(panel, cost_bps=5.0)
+        assert list(matrix.columns) == list(panel.truth.index)
+        for name in panel.truth.index:
+            expected = run_backtest(panel.signals[name], panel.returns, cost_bps=5.0)
+            pd.testing.assert_series_equal(
+                matrix[name], expected.iloc[1:], check_names=False, check_freq=False
+            )
+
+    def test_drops_the_untraded_first_date_and_leaves_no_gaps(self):
+        panel = make_panel(n_dates=80, n_assets=6, n_candidates=3, seed=0)
+        matrix = candidate_returns(panel)
+        assert matrix.index[0] == panel.returns.index[1]
+        assert len(matrix) == 79
+        assert not matrix.isna().any().any()
+
+    def test_agrees_with_sweep(self):
+        panel = make_panel(n_dates=120, n_assets=6, n_candidates=3, seed=0)
+        sharpe = candidate_returns(panel).apply(lambda col: summarize(col).sharpe)
+        swept = sweep(panel)["sharpe"]
+        # sweep keeps the zero first row; the difference is one observation.
+        np.testing.assert_allclose(sharpe.to_numpy(), swept.to_numpy(), rtol=0.05)

@@ -133,6 +133,11 @@ def _entries(path):
     return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
 
+def _child_entries(path):
+    """Ledger entries for scored children; seeds' scores are logged too, as role "seed"."""
+    return [e for e in _entries(path) if e["params"].get("role") != "seed"]
+
+
 # ---------------------------------------------------------------------------
 # One round
 
@@ -153,10 +158,26 @@ def test_a_round_records_move_lineage_events_and_one_ledger_trial_per_score(con,
     events = memory_events(con, "test")
     assert len(events) == 4 and {e["motif_intended"] for e in events} == {motif}
     scored = [o for o in outcomes if o.quality is not None]
-    entries = _entries(ledger)
+    entries = _child_entries(ledger)
     assert scored and len(entries) == len(scored)  # one trial per score, no more
     assert {e["params"]["factor_id"] for e in entries} == {o.factor_id for o in scored}
     assert all(e["tags"] == ["learned-memory-search", "deepen"] for e in entries)
+
+
+def test_seed_scores_are_trials_and_carry_the_scorers_numbers(con, ledger):
+    class DetailedScorer(FakeScorer):
+        def __call__(self, tree):
+            s = super().__call__(tree)
+            return replace(s, params={"data_version": "v-test"}, metrics={"pvalue": 0.2})
+
+    d = deepener(con, ScriptedEditor(["log(cap)"]), DetailedScorer(), children=1)
+    seeds = _entries(ledger)
+    assert len(seeds) == len(SEEDS) and all(e["params"]["role"] == "seed" for e in seeds)
+    assert {e["params"]["factor_id"] for e in seeds} == {factor_id(parse(e)) for e in SEEDS}
+    d.step()
+    for e in _entries(ledger):
+        assert e["params"]["data_version"] == "v-test" and e["metrics"]["pvalue"] == 0.2
+        assert e["params"]["run_id"] == "test"  # the scorer's params never override deepen's
 
 
 def test_screening_rejections_are_not_scored(con, ledger):
@@ -167,7 +188,7 @@ def test_screening_rejections_are_not_scored(con, ledger):
     calls_before = scorer.calls
     outcomes = d.step()
     assert all(o.status == "rejected" and "not original" in o.reason for o in outcomes)
-    assert scorer.calls == calls_before and _entries(ledger) == []
+    assert scorer.calls == calls_before and _child_entries(ledger) == []
 
 
 def test_pool_decisions_set_the_memory_status(con, ledger):
@@ -180,7 +201,7 @@ def test_pool_decisions_set_the_memory_status(con, ledger):
     assert low.status == "rejected" and "Q 0.050" in low.reason
     assert by_expr["ts_max(cap, 5)"].status == "invalid"
     assert factor_id(parse("log(cap)")) in d.pool.quality  # a future parent
-    assert len(_entries(ledger)) == 2  # the unscorable child is not a trial
+    assert len(_child_entries(ledger)) == 2  # the unscorable child is not a trial
 
 
 def test_an_admitted_child_carries_its_lineage(con, ledger):

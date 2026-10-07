@@ -75,6 +75,11 @@ memory_veto_failure_rate = 0.7
 # the best. Each deepen round asks Opus for memory_children_per_parent edits.
 memory_min_quality = 0.10
 memory_high_quality = 0.20
+# A parent's quality bin in its context key (q0..q3), in the scorer's units.
+# |ICIR| here, so the sign is ignored; config/deepen_crsp.toml sets the
+# evaluation scorer's units (a net-of-cost z, where the sign matters).
+memory_quality_edges = [0.05, 0.10, 0.20]
+memory_signed_quality = false
 memory_max_correlation = 0.70
 memory_pool_capacity = 50
 memory_children_per_parent = 5
