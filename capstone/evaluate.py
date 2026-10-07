@@ -937,7 +937,9 @@ def local_fdr(
     the upper tail is underfitted: with 300 candidates and five planted at
     z = +4, adding five at z = -4 (what a sign-symmetric search produces) cut
     the planted five's call rate at lfdr <= 0.2 from 0.80 to 0.19 over 100
-    sets. Don't feed it both a signal and its sign-flipped twin; keep one
+    sets, and when the negatives sit tightly together (all five at exactly
+    -4, planted five at exactly +4) from 1.00 to 0.00: the loss can be total.
+    Don't feed it both a signal and its sign-flipped twin; keep one
     orientation per hypothesis.
 
     A few extreme z-scores, such as a p-value of exactly 0 from a leaky
