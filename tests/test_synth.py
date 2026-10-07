@@ -251,3 +251,15 @@ class TestReturnMatrix:
     def test_rejects_invalid_arguments(self, kwargs):
         with pytest.raises(ValueError):
             make_return_matrix(**kwargs)
+
+
+class TestCandidateFrames:
+    def test_yields_all_candidates(self):
+        panel = make_panel(n_dates=100, n_assets=5, n_candidates=10, seed=0)
+        names = [name for name, _, _ in candidate_frames(panel)]
+        assert names == list(panel.truth.index)
+
+    def test_real_flag_matches_truth(self):
+        panel = make_panel(n_dates=100, n_assets=5, n_candidates=10, n_real=4, seed=0)
+        for name, _frame, is_real in candidate_frames(panel):
+            assert is_real == panel.truth[name]

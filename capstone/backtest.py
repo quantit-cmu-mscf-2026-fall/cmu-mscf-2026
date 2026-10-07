@@ -71,10 +71,16 @@ def backtest_components(
     weights = to_weights(signal, demean=demean, gross=gross)
     positions = weights.shift(1)
 
-    turnover = positions.diff().abs().sum(axis=1)
+    # Diff against a flat book, not against the NaN first row: otherwise the
+    # turnover of building the first position is NaN and `.sum` counts it as 0.
+    turnover = positions.fillna(0.0).diff().abs().sum(axis=1)
     gross_returns = (positions * returns).sum(axis=1)
     costs = cost_bps / 10000.0 * turnover
     net_returns = gross_returns - costs
+    # Nothing is held on the first date: no return and no trade, rather than a
+    # zero that `summarize` would count as an observation.
+    net_returns.iloc[:1] = np.nan
+    turnover.iloc[:1] = np.nan
     return net_returns, turnover
 
 
