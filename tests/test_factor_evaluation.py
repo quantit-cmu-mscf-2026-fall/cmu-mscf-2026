@@ -95,8 +95,13 @@ def test_costs_match_the_backtest_when_every_spread_is_the_same():
     net, turnover = backtest_components(
         signal, panel.fields["returns"], cost_bps=10.0, demean=True, gross=1.0
     )  # half of a 20 bps spread is 10 bps per unit traded
-    np.testing.assert_allclose(result.net.iloc[1:], net.iloc[1:], rtol=1e-9, atol=1e-12)
-    np.testing.assert_allclose(result.turnover.iloc[1:], turnover.iloc[1:], rtol=1e-9)
+    # Same returns and turnover on every day a position is held. During the
+    # 5-day warm-up this module reports NaN; the backtest here still reports
+    # 0.0, which #55 changes to NaN too.
+    held = result.net.notna()
+    np.testing.assert_allclose(result.net[held], net[held], rtol=1e-9, atol=1e-12)
+    np.testing.assert_allclose(result.turnover[held], turnover[held], rtol=1e-9)
+    assert (net.iloc[1:][~held.iloc[1:]] == 0.0).all() and (~held).sum() == 5
 
 
 def test_a_planted_factor_earns_and_its_opposite_loses():
@@ -355,3 +360,34 @@ def test_each_variant_logs_its_screen_pvalue_and_names_its_family(tmp_path, monk
         assert p == pytest.approx(ev.screen_pvalue(matrix[vid]))
         assert summary.loc[vid, "pvalue_screen"] == pytest.approx(p)
     assert list(summary["hypothesis_id"]) == [h1, h2]
+
+
+def test_a_lookback_warming_up_is_not_counted_as_flat_days():
+    # Before ts_mean(returns, 63) has a value there is no position: those days
+    # are NaN, not 0.0, so they don't pad the series and pull its Sharpe to 0.
+    panel = build_panel(fake_rows(n_stocks=20, n_days=200))
+    for hold in (1, 5, 21):
+        result = factor_returns(parse("ts_mean(returns, 63)"), panel, hold)
+        first_signal = ev.factor_weights(parse("ts_mean(returns, 63)"), panel).notna().any(axis=1)
+        start = int(np.argmax(first_signal.to_numpy()))
+        assert start > 50
+        assert result.net.iloc[: start + 1].isna().all(), hold
+        assert result.net.iloc[start + 1 :].notna().any(), hold
+        assert result.turnover.iloc[: start + 1].isna().all(), hold
+
+
+def test_a_real_signal_with_zero_net_weight_still_earns_zero():
+    # #25's rule: idleness comes from a missing signal, not from zero weights.
+    panel = build_panel(fake_rows(n_stocks=10, n_days=30))
+    weights = ev.factor_weights(parse("volume"), panel)
+    weights.iloc[10:15] = 0.0  # a signal that is there but flat
+    result = ev.returns_from_weights(weights, panel)
+    assert (result.gross.iloc[12:16] == 0.0).all()
+
+
+def test_the_warm_up_is_left_out_under_sector_neutrality_too():
+    panel = build_panel(fake_rows(n_stocks=30, n_days=150))
+    tree = parse("ts_mean(returns, 63)")
+    plain = factor_returns(tree, panel, ev.TradingSpec(hold=5))
+    sector = factor_returns(tree, panel, ev.TradingSpec(hold=5, neutral="sector"))
+    assert plain.net.isna().sum() == sector.net.isna().sum() > 60
