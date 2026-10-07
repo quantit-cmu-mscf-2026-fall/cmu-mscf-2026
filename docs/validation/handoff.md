@@ -28,51 +28,47 @@ The validation code lands in two ways. For what has merged since this page
 was written, check the
 [pull request list](https://github.com/quantit-cmu-mscf-2026-fall/cmu-mscf-2026/pulls?q=is%3Apr).
 
-**A stack of PRs.** Each one's base is the branch of the PR below it, and a
-reviewed follow-up merges into the branch it builds on, so the top branch,
-`vincal848/graded-evidence`, has all of it. The stack reaches `main` from the
-bottom up:
+**On `main`:**
 
-| PR | Branch | Adds |
-|---|---|---|
-| #28 | `vincal848/validation-harness` | `backtest.candidate_returns`, `synth.make_return_matrix`, `docs/validation.md`; with #29 merged in, `sharpe_variance` / `sharpe_test` (HAC), PSR, MinTRL |
-| #31 | `vincal848/fdr-dependence` | `holm`, `benjamini_yekutieli`, `storey_qvalues` |
-| #32 | `vincal848/graded-evidence` | adjusted p-values (`holm_adjusted`, `by_adjusted`, `bh_adjusted`), `evidence_profile`, the stages of the calibrated validation funnel; with #59 merged in, the Sharpe follow-ups from #29's review |
+| PR | Adds |
+|---|---|
+| #28 | `backtest.candidate_returns`, `synth.make_return_matrix`, `docs/validation.md`; with #29 merged in, `sharpe_variance` / `sharpe_test` (HAC), PSR, MinTRL |
+| #34 | Lauren's purged k-fold CV, `cv.py` |
+| #26 | the shared-data loader, `shared_data.py` |
+| #30 | the backtest's first-period fix |
+
+**One PR left in the stack:** #31 (`vincal848/fdr-dependence`), open against
+`main`. It adds `holm`, `benjamini_yekutieli` and `storey_qvalues`, and #32
+merged into it, so it also has the adjusted p-values (`holm_adjusted`,
+`by_adjusted`, `bh_adjusted`), `evidence_profile`, the stages of the calibrated
+validation funnel, and (#59) the Sharpe follow-ups from #29's review. `main`
+is merged into it, so that branch has everything above too.
 
 **Separate PRs against `main`.** Each one's reviewer is the person who builds
-on it. Already on `main`: Lauren's purged k-fold CV, `cv.py` (#34); the
-shared-data loader, `shared_data.py` (#26); and the backtest's first-period
-fix (#30). Still open when this was written:
+on it. Still open when this was written:
 
 | PR | Adds | Reviewer |
 |---|---|---|
 | #33 | `runlog.read_entries()`, `runlog.trial_count()` | Pin-Hua |
 | #35 | CSCV / probability of backtest overfitting (`pbo.py`) | Pin-Hua |
 
-So until the stack reaches `main`, neither branch has everything: the stack
-branch has `make_return_matrix` and the Sharpe and multiple-testing code but
-not `cv.py` or `shared_data.py`, and `main` has those but not the stack.
-
 **Which branch to start from:**
 
-- Your work uses the stack (`make_return_matrix`, `sharpe_test`, the adjusted
-  p-values): branch from `origin/vincal848/graded-evidence` and set your PR's
-  base to that branch. Once #32 is in `main`, change the base to `main` and
-  rebase.
-- Your work needs only what's on `main`: branch from `origin/main`.
-- It needs both (for example `cv.py` with `make_return_matrix`): branch from
-  `origin/vincal848/graded-evidence` and run `git merge origin/main`. If git
-  reports a conflict in `tests/test_synth.py`, both sides added tests at the
-  end of the file; keep both. Until the stack is on `main`, your PR's diff
-  against the stack branch also shows `main`'s changes, so say so in the PR
-  description.
+- Your work needs only what's on `main` (`make_return_matrix`, `sharpe_test`,
+  `cv.py`, `shared_data.py`): branch from `origin/main`.
+- It uses #31's multiple testing or the adjusted p-values: branch from
+  `origin/vincal848/fdr-dependence` and set your PR's base to that branch.
+  When #31 merges, GitHub moves your PR's base to `main`. #31 is
+  squash-merged, so your branch may then show conflicts that aren't real:
+  merge `origin/main` into it, and ask for help if git can't resolve them.
 
 Name branches `<name>/<topic>`, and put the Jira key in the PR title (for
 example `QUANTIT-37: stationary bootstrap resampler`).
 
 ## The contract, in code
 
-Everything below is on `vincal848/graded-evidence`.
+Everything below is on `vincal848/fdr-dependence` (#31), and on `main` once
+#31 merges; the harness and Sharpe code (#28) is on `main` already.
 
 **Input.** Every method takes a performance matrix: a `pd.DataFrame`, dates x
 candidates, one per-period series per candidate, higher is better. Methods

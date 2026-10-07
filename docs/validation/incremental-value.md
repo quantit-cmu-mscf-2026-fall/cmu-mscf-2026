@@ -31,14 +31,12 @@ ff5 = load_french("factors5_daily")   # daily Fama–French 5, decimal returns
 ```
 
 Available datasets: `factors_daily`, `factors_monthly`, `factors5_daily`,
-`industry49_daily`, `industry12_daily`. **Momentum is not there yet.** Adding
-the daily momentum file means adding it to `FRENCH_DATASETS` and checking the
-parser handles its layout. The other option is WRDS, through the shared-data
-loader, `capstone/shared_data.py` (#26). It is on `main` but not on the stack
-branch, so to use it with `make_return_matrix`, merge `origin/main` into your
-branch as [handoff.md](handoff.md) describes. Decide which, match
-the frequency of the candidates' returns, and write the decision into
-`docs/validation.md`.
+`industry49_daily`, `industry12_daily`. **Momentum is not on `main` yet:**
+#75 adds `momentum_daily` to `FRENCH_DATASETS` and `load_ff5_momentum()`, and
+records the choice of the public Ken French files in `docs/validation.md`. The
+other option was WRDS, through the shared-data loader,
+`capstone/shared_data.py` (#26). That loader and `make_return_matrix` are both
+on `main`, so a branch from `origin/main` has them together.
 
 ## Design notes (QUANTIT-49)
 
