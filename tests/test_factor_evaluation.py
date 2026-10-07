@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 
 from capstone import shared_data as sd
-from capstone.backtest import _backtest_components
+from capstone.backtest import backtest_components
 from capstone.factors import evaluation as ev
 from capstone.factors.evaluation import (
     HoldoutError,
@@ -92,7 +92,7 @@ def test_costs_match_the_backtest_when_every_spread_is_the_same():
     panel = build_panel(rows)
     result = factor_returns(parse("ts_mean(returns, 5)"), panel)
     signal = ev.evaluate(parse("ts_mean(returns, 5)"), panel.fields)
-    net, turnover = _backtest_components(
+    net, turnover = backtest_components(
         signal, panel.fields["returns"], cost_bps=10.0, demean=True, gross=1.0
     )  # half of a 20 bps spread is 10 bps per unit traded
     # Same returns and turnover on every day a position is held. During the
@@ -305,6 +305,61 @@ def test_a_correction_excludes_entries_without_deleting_them(tmp_path, monkeypat
     )
     assert ev.trial_count() == 1
     assert len(_read_entries()) == 5  # nothing deleted
+
+
+# ---------------------------------------------------------------------------
+# The screen statistic
+
+
+def test_the_screen_pvalue_is_one_sided():
+    panel = build_panel(fake_rows(n_days=500, planted=0.004))
+    assert ev.screen_pvalue(factor_returns(parse("volume"), panel).net) < 0.01
+    assert ev.screen_pvalue(factor_returns(parse("-volume"), panel).net) > 0.99
+
+
+@pytest.mark.parametrize("ar1", [0.0, 0.3])
+def test_the_screen_pvalue_holds_its_size_on_signal_free_returns(ar1):
+    # 400 zero-mean series of 1,000 days: about 5% should fall below 0.05, with
+    # autocorrelated returns too, since the variance is HAC.
+    rng = np.random.default_rng(7)
+    shocks = rng.standard_t(5, (1000, 400)) * 0.01
+    returns = np.empty_like(shocks)
+    returns[0] = shocks[0]
+    for t in range(1, len(shocks)):
+        returns[t] = ar1 * returns[t - 1] + shocks[t]
+    p = np.array([ev.screen_pvalue(pd.Series(returns[:, j])) for j in range(400)])
+    assert 0.02 <= np.mean(p < 0.05) <= 0.09
+    assert 0.4 <= np.median(p) <= 0.6
+
+
+def test_the_screen_pvalue_is_nan_without_variance():
+    assert np.isnan(ev.screen_pvalue(pd.Series([0.0] * 50)))
+    assert np.isnan(ev.screen_pvalue(pd.Series([np.nan, 0.01])))
+
+
+def test_each_variant_logs_its_screen_pvalue_and_names_its_family(tmp_path, monkeypatch):
+    from capstone.factors import store
+
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    con = store.connect(tmp_path / "factors.db")
+    store.add_paper(con, "p", "Paper")
+    h1 = store.add_hypothesis(con, store.Hypothesis("p", "volume", "k", "j", "s", "f"))
+    h2 = store.add_hypothesis(con, store.Hypothesis("p", "reversal", "k", "j", "s", "f"))
+    f1, _ = store.add_factor(con, parse("volume"), h1)
+    f2, _ = store.add_factor(con, parse("ts_mean(returns, 5)"), h2)
+    store.add_factor(con, parse("volume"), h2)  # proposed again: a duplicate, stays in h1
+    families = {fid: ev.hypothesis_of(con, fid) for fid in (f1, f2)}
+    assert families == {f1: h1, f2: h2}
+
+    panel = build_panel(fake_rows(n_stocks=12, n_days=80))
+    trees = {f1: parse("volume"), f2: parse("ts_mean(returns, 5)")}
+    matrix, summary = evaluate_factors(trees, panel, families=families)
+    entries = [json.loads(line) for line in (tmp_path / "runs.jsonl").read_text().splitlines()]
+    for entry, vid in zip(entries, matrix.columns, strict=True):
+        p = entry["metrics"]["pvalue_screen"]
+        assert p == pytest.approx(ev.screen_pvalue(matrix[vid]))
+        assert summary.loc[vid, "pvalue_screen"] == pytest.approx(p)
+    assert list(summary["hypothesis_id"]) == [h1, h2]
 
 
 def test_a_lookback_warming_up_is_not_counted_as_flat_days():

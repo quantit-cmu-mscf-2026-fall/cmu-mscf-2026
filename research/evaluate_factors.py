@@ -26,7 +26,7 @@ from pathlib import Path
 import pandas as pd
 
 from capstone.factors import store
-from capstone.factors.evaluation import evaluate_factors, grid, load_panel
+from capstone.factors.evaluation import evaluate_factors, grid, hypothesis_of, load_panel
 from capstone.factors.tree import parse
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -60,9 +60,11 @@ def main() -> None:
         con = store.connect(args.store)
     else:
         con = sqlite3.connect(f"file:{args.store.as_posix()}?mode=ro", uri=True)
+        con.row_factory = sqlite3.Row
     trees = stored_factors(con)
     if args.limit:
         trees = dict(list(trees.items())[: args.limit])
+    families = {fid: hypothesis_of(con, fid) for fid in trees}
     t0 = time.time()
     panel = load_panel()
     shape = panel.fields["returns"].shape
@@ -76,7 +78,7 @@ def main() -> None:
     first = dict(list(trees.items())[:3])
     extra = {"store": args.store.name}
     variant_con = con if args.record_variants else None
-    run = dict(specs=specs, con=variant_con, extra_params=extra)
+    run = dict(specs=specs, con=variant_con, families=families, extra_params=extra)
     matrix, summary = evaluate_factors(first, panel, **run)
     if len(first) and summary.empty:
         raise SystemExit("the first factors all failed: check the code before spending more trials")
@@ -95,7 +97,14 @@ def main() -> None:
     failed = len(trees) * len(specs) - len(summary)
     print(f"\n{len(summary)} evaluated, {failed} failed, {elapsed:.0f}s; wrote {out}")
     if not summary.empty:
-        cols = ["hold", "neutral", "sharpe_gross", "sharpe_net", "sharpe_net_full_spread"]
+        cols = [
+            "hold",
+            "neutral",
+            "sharpe_gross",
+            "sharpe_net",
+            "pvalue_screen",
+            "sharpe_net_full_spread",
+        ]
         best = summary.sort_values("sharpe_net", ascending=False)
         print(best[[*cols, "expression"]].head(25).to_string(max_colwidth=50))
 
