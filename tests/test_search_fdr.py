@@ -23,6 +23,8 @@ from capstone.evaluate import (
     sharpe_test,
 )
 from capstone.search_fdr import (
+    block_length_rule,
+    bootstrap_family_pvalues,
     familywise_errors,
     fdr,
     fdr_by_search_intensity,
@@ -405,6 +407,172 @@ class TestMaxOfMixtureFit:
             fit_max_of_mixture([0.1, 0.2], 3)
         with pytest.raises(ValueError):
             fit_max_of_mixture(np.arange(10.0), 0)
+
+
+def _family_matrix(n_fam, k, r, seed, *, n_real_fam=0, sharpe_real=1.5, n_obs=1000, **kwargs):
+    """Families of k variants with within-family correlation r, built from
+    `make_return_matrix` so every defect option applies: each variant is
+    sqrt(r) x its family's series + sqrt(1 - r) x its own. A real family's
+    series carries `sharpe_real`, so its variants carry sqrt(r) x that."""
+    f = make_return_matrix(
+        n_obs=n_obs,
+        n_candidates=n_fam,
+        n_real=n_real_fam,
+        sharpe_real=sharpe_real,
+        seed=seed,
+        **kwargs,
+    )
+    e = make_return_matrix(n_obs=n_obs, n_candidates=n_fam * k, seed=seed + 10_000, **kwargs)
+    columns, family = {}, {}
+    for i, h in enumerate(f.returns.columns):
+        for j in range(k):
+            name = f"{h}_v{j}"
+            columns[name] = (
+                np.sqrt(r) * f.returns[h].to_numpy()
+                + np.sqrt(1 - r) * e.returns.iloc[:, i * k + j].to_numpy()
+            )
+            family[name] = h
+    return pd.DataFrame(columns, index=f.returns.index), pd.Series(family), f.truth
+
+
+class TestBootstrapFamilyPvalues:
+    """The stage-1 gate's input (#50, Q2), adapted from Carl's branch."""
+
+    def test_output_with_unequal_families(self):
+        rng = np.random.default_rng(0)
+        returns = pd.DataFrame(rng.normal(0, 0.01, (500, 4)), columns=["a1", "b1", "a2", "a3"])
+        returns["a2"] += 0.003  # the clear best of family a
+        family = pd.Series({"a1": "A", "a2": "A", "a3": "A", "b1": "B"})
+        out = bootstrap_family_pvalues(returns, family, n_boot=199)
+        assert list(out.index) == ["A", "B"]
+        assert out.loc["A", "k"] == 3 and out.loc["B", "k"] == 1
+        assert out.loc["A", "best"] == "a2"
+        assert out.loc["A", "pvalue"] == pytest.approx(1 / 200)
+        assert ((out["pvalue"] >= 1 / 200) & (out["pvalue"] <= 1)).all()
+
+    def test_copies_do_not_count_as_search(self):
+        # Rules 1 and 3: five identical copies of one series are one variant.
+        # A per-column resampling would break the copies apart and charge for
+        # five; the shared draw doesn't.
+        rng = np.random.default_rng(1)
+        x = rng.normal(0.0005, 0.01, 1000)
+        one = bootstrap_family_pvalues(pd.DataFrame({"c0": x}), pd.Series({"c0": "H"}), seed=3)
+        copies = pd.DataFrame({f"c{i}": x for i in range(5)})
+        five = bootstrap_family_pvalues(copies, pd.Series("H", index=copies.columns), seed=3)
+        assert five.loc["H", "pvalue"] == pytest.approx(one.loc["H", "pvalue"])
+
+    def test_agrees_with_the_exact_formula_for_even_correlation(self):
+        # IID normal returns, five variants at correlation 0.9: the bootstrap
+        # and the equicorrelated formula estimate the same probability.
+        returns, family, _ = _family_matrix(40, 5, 0.9, seed=2, n_obs=2000)
+        boot = bootstrap_family_pvalues(returns, family, seed=2)["pvalue"]
+        best = (
+            pd.Series({c: sharpe_test(returns[c], method="normal").pvalue_greater for c in returns})
+            .groupby(family)
+            .min()
+        )
+        exact = search_adjusted_pvalue(best, 5, rho=0.9)
+        assert np.corrcoef(boot, exact)[0, 1] > 0.97
+        assert (boot - exact).abs().median() < 0.03
+
+    @pytest.mark.parametrize(
+        "kwargs", [{"ar1": 0.3}, {"ar1": 0.3, "t_df": 5, "garch": (0.05, 0.9)}]
+    )
+    def test_null_calibration(self, kwargs):
+        # 20 families of 5 near-copies (r = 0.9), 4 years, nothing real.
+        # Measured over 200 seeds: each family is called real at 0.05 in
+        # 0.054 / 0.060 of cases, and BH makes any discovery in 0.045 / 0.090
+        # (0.040 for both at 10 years). The excess with fat tails and GARCH is
+        # the studentised block bootstrap's finite-sample bias, as Carl measured.
+        size, any_discovery = [], []
+        for seed in range(30):
+            returns, family, _ = _family_matrix(20, 5, 0.9, seed, **kwargs)
+            p = bootstrap_family_pvalues(returns, family, n_boot=999, seed=seed)["pvalue"]
+            size.append((p < 0.05).mean())
+            any_discovery.append(benjamini_hochberg(p, 0.05).any())
+        assert np.mean(size) == pytest.approx(0.05, abs=0.025)
+        assert np.mean(any_discovery) <= 0.2
+
+    def test_power_beats_the_independent_formula_on_near_copies(self):
+        # 20 families of 20 near-copies (r = 0.9), 4 real, 10 years. Over 6
+        # seeds at three ranges, family Sharpe 1.0: bootstrap 0.67-1.0,
+        # independent formula 0.54-0.92. (With AR(1) 0.3 and HAC p-values over
+        # 20 seeds at Sharpe 1.5: bootstrap 0.86, equicorrelated formula 0.88,
+        # independent formula 0.70.)
+        boot, independent = [], []
+        for seed in range(6):
+            returns, family, truth = _family_matrix(
+                20, 20, 0.9, seed, n_real_fam=4, sharpe_real=1.0, n_obs=2520
+            )
+            p = bootstrap_family_pvalues(returns, family, n_boot=999, seed=seed)["pvalue"]
+            best = (
+                pd.Series(
+                    {c: sharpe_test(returns[c], method="normal").pvalue_greater for c in returns}
+                )
+                .groupby(family)
+                .min()
+            )
+            boot.append(power(benjamini_hochberg(p, 0.05), truth))
+            independent.append(
+                power(benjamini_hochberg(search_adjusted_pvalue(best, 20), 0.05), truth)
+            )
+        assert np.mean(boot) >= 0.5
+        assert np.mean(boot) > np.mean(independent)
+
+    def test_rejects_bad_inputs(self):
+        returns = pd.DataFrame({"a": np.zeros(50) + 0.01, "b": np.ones(50)})
+        with pytest.raises(TypeError):
+            bootstrap_family_pvalues(returns.to_numpy(), pd.Series({"a": "A"}))
+        with pytest.raises(ValueError, match="missing"):
+            bootstrap_family_pvalues(returns, pd.Series({"a": "A"}))
+        family = pd.Series({f"c{i}": f"H{i}" for i in range(200)})
+        wide = pd.DataFrame(np.random.default_rng(0).normal(size=(50, 200)), columns=family.index)
+        with pytest.raises(ValueError, match="resolve"):
+            bootstrap_family_pvalues(wide, family, n_boot=3998)
+        # 4,000 draws resolve 0.05 / 200 exactly; that is enough.
+        assert len(bootstrap_family_pvalues(wide, family, n_boot=3999)) == 200
+
+    def test_a_late_start_keeps_its_own_dates_and_cuts_no_one_else(self):
+        # One variant of family A starts 300 days late (a longer warm-up).
+        # Family B's p-value must not change: the shared resampling is the
+        # same, and B's columns keep all their dates.
+        rng = np.random.default_rng(4)
+        returns = pd.DataFrame(
+            rng.normal(0.0003, 0.01, (1000, 4)), columns=["a1", "a2", "b1", "b2"]
+        )
+        family = pd.Series({"a1": "A", "a2": "A", "b1": "B", "b2": "B"})
+        full = bootstrap_family_pvalues(returns, family, n_boot=499)
+        late = returns.copy()
+        late.iloc[:300, 0] = np.nan
+        out = bootstrap_family_pvalues(late, family, n_boot=499)
+        assert out.loc["B", "pvalue"] == full.loc["B", "pvalue"]
+        assert out.loc["B", "t"] == pytest.approx(full.loc["B", "t"])
+        # Family A's late variant is scored on its own 700 dates.
+        own = returns["a1"].iloc[300:]
+        t_a1 = np.sqrt(len(own)) * own.mean() / own.std()
+        t_a2 = np.sqrt(1000) * returns["a2"].mean() / returns["a2"].std()
+        assert out.loc["A", "t"] == pytest.approx(max(t_a1, t_a2))
+
+    def test_no_missing_values_gives_the_same_answer_as_before(self):
+        # With complete data the masked arithmetic must reduce to the plain one.
+        rng = np.random.default_rng(5)
+        returns = pd.DataFrame(rng.normal(0.0005, 0.01, (400, 3)), columns=["x", "y", "z"])
+        family = pd.Series({"x": "X", "y": "X", "z": "Z"})
+        out = bootstrap_family_pvalues(returns, family, n_boot=199, seed=1)
+        t = np.sqrt(400) * returns.mean() / returns.std()
+        assert out.loc["X", "t"] == pytest.approx(max(t["x"], t["y"]))
+        assert out.loc["Z", "t"] == pytest.approx(t["z"])
+
+    def test_a_column_with_too_little_data_raises(self):
+        returns = pd.DataFrame(
+            {"a": [np.nan] * 48 + [0.01, 0.02], "b": np.linspace(-0.01, 0.01, 50)}
+        )
+        with pytest.raises(ValueError, match="at least 3"):
+            bootstrap_family_pvalues(returns, pd.Series({"a": "A", "b": "B"}), n_boot=199)
+
+    def test_block_length_rule(self):
+        assert block_length_rule(500) == 16
+        assert block_length_rule(1000) == 20
 
 
 class TestSearchIntensity:
