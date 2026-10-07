@@ -219,3 +219,18 @@ def test_an_entry_without_a_name_is_counted_but_matches_no_name(tmp_path, monkey
 
     assert runlog.trial_count() == 2
     assert runlog.trial_count("alpha") == 1
+
+
+def test_ledger_path_is_the_file_log_run_writes(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    assert runlog.ledger_path() == tmp_path / "runs.jsonl"
+    runlog.log_run("alpha", seed=0)
+    assert runlog.ledger_path().exists()
+
+
+def test_a_repeated_trial_counts_twice(tmp_path, monkeypatch):
+    # Each entry was logged before its result was seen, so a re-run is a trial too.
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    for _ in range(3):
+        runlog.log_run("sweep", params={"lookback": 20}, seed=0)
+    assert runlog.trial_count("sweep") == 3

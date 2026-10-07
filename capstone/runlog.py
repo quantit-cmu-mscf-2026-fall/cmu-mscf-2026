@@ -29,13 +29,23 @@ def _ledger_dir() -> Path:
 
     `CAPSTONE_LEDGER_DIR` overrides the default so tests (and anyone running
     throwaway experiments) can point the ledger elsewhere without touching the
-    shared file. The default lives at the repo root, not the package, so it is
-    visible in the top-level tree and gets committed.
+    shared file. The default is `experiments/` at the repo root. The ledger
+    file there is gitignored: it is synced to the team's private archive and
+    never committed to this public repo.
     """
     env = os.environ.get("CAPSTONE_LEDGER_DIR")
     if env:
         return Path(env)
     return Path(__file__).resolve().parent.parent / "experiments"
+
+
+def ledger_path() -> Path:
+    """The ledger file that `log_run` writes and `read_entries` reads.
+
+    Honours `CAPSTONE_LEDGER_DIR`, so code reading the ledger can say which
+    file its trial count came from.
+    """
+    return _ledger_dir() / LEDGER_FILENAME
 
 
 def _git_sha() -> str:
@@ -125,7 +135,7 @@ def read_entries() -> list[dict]:
     is a trial that silently vanishes from the count, which under-corrects every
     downstream test and invents discoveries.
     """
-    path = _ledger_dir() / LEDGER_FILENAME
+    path = ledger_path()
     if not path.exists():
         return []
     entries = []
@@ -174,7 +184,11 @@ def trial_count(
     Returns:
         The number of matching entries. Entries written without a `name` are
         counted by `trial_count()` but match no `name` filter, so the per-name
-        counts need not sum to the total.
+        counts need not sum to the total. A repeat counts: the same `name`,
+        `params` and `seed` logged twice (a re-run after a crash, say) is two
+        entries, because each was logged before its result was seen. That
+        errs conservative; a duplicate that should not count is marked by a
+        later entry, never deleted.
 
     Raises:
         LookupError: if nothing matches. A correction run against zero trials
@@ -198,7 +212,7 @@ def trial_count(
         unwanted = set(exclude_tags)
         entries = [e for e in entries if not unwanted & set(e.get("tags") or ())]
     if not entries:
-        where = _ledger_dir() / LEDGER_FILENAME
+        where = ledger_path()
         scope = f"named {name!r} " if name is not None else ""
         filters = []
         if include_tags is not None:
