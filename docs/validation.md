@@ -110,6 +110,9 @@ of its own. Thresholds are tuned on simulated candidate sets to a chosen ratio
 of missed discoveries to false ones (Harvey & Liu 2020), not left at textbook
 defaults.
 
+Which method is the gate at each stage, and which only inform it:
+[`validation/framework.md`](validation/framework.md) (proposed).
+
 ## Decisions the stages depend on
 
 Proposed 2026-09-29; holdout dates fixed 2026-10-05. These are fixed before any
