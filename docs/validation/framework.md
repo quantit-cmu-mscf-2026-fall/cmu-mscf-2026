@@ -82,9 +82,9 @@ Known weaknesses are measured ones, from the PRs cited.
 
 ## The funnel, with roles assigned
 
-The stages are the ones in [`../validation.md`](../validation.md). Each stage
-looks at dates the earlier stages never used; that is what makes a loose screen
-safe.
+The stages are the ones in [`../validation.md`](../validation.md). Stages 1–3
+work on the search period and stage 4 on a holdout that nothing before it has
+seen; that untouched holdout is what makes a loose screen safe.
 
 | Stage | Data | Gate | Graded scores reported | Batch diagnostics |
 |---|---|---|---|---|
