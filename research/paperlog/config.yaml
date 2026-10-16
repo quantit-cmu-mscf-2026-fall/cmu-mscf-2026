@@ -1,0 +1,180 @@
+# ---------------------------------------------------------------------------
+# paperlog configuration for the Quantit x CMU MSCF capstone: agentic alpha
+# discovery with statistical validation. Everything here is meant to be edited.
+# ---------------------------------------------------------------------------
+# --- collection: a run targets a VOLUME of new papers, not a fixed date window.
+# It starts with the normal window and escalates only if it falls short. Everything
+# is deduplicated against the log first, so widening never re-screens known papers.
+collection:
+  target_new_papers: 150      # stop escalating once this many NEW papers are found
+  lookback_days_first_run: 60
+  overlap_days: 7             # normal window = last run date - this
+  max_lookback_days: 365      # escalation floor
+  max_window_doublings: 4
+  min_yield_per_level: 5      # a level adding fewer new papers than this ends escalation
+
+# Broad queries used only at the exploration level (noisier by design).
+exploration:
+  arxiv:
+    - 'all:"language model" AND (all:economics OR all:"asset pricing" OR all:forecasting)'
+    - 'all:agentic AND (all:research OR all:"scientific discovery" OR all:workflow)'
+  openalex:
+    - automated scientific discovery large language model
+    - LLM agent financial decision making
+    - symbolic regression alpha factors
+    - 大模型 金融 应用
+
+arxiv:
+  enabled: true
+  max_results_per_query: 100   # per query per level (multiplied at deeper levels)
+  # Raw arXiv query syntax: https://info.arxiv.org/help/api/user-manual.html
+  queries:
+    # generation: LLMs and agents that propose signals, factors or hypotheses
+    - '(all:"large language model" OR all:LLM OR all:agent) AND (all:"alpha mining" OR all:"factor mining" OR all:"formulaic alpha" OR all:"alpha factor")'
+    - '(all:"large language model" OR all:LLM OR all:agentic) AND (all:"hypothesis generation" OR all:"hypothesis discovery") AND (all:finance OR all:"asset pricing" OR all:economics)'
+    - '(cat:q-fin.PM OR cat:q-fin.TR OR cat:q-fin.ST OR cat:q-fin.CP OR cat:q-fin.GN) AND (all:"language model" OR all:LLM OR all:agent)'
+    # validation: deciding which of many candidates are real
+    - '(all:"multiple testing" OR all:"false discovery" OR all:"data snooping" OR all:"backtest overfitting") AND (all:finance OR all:returns OR all:trading OR all:"asset pricing")'
+    - '(cat:q-fin.ST OR cat:q-fin.PM OR cat:stat.ME) AND (all:"Sharpe ratio" OR all:"cross-validation" OR all:overfitting)'
+    # findings: return predictability, anomalies and finance ML (rubric v2)
+    - '(cat:q-fin.PR OR cat:q-fin.ST OR cat:q-fin.PM OR cat:q-fin.GN) AND (all:anomaly OR all:"cross-section" OR all:"return predictability" OR all:"expected returns" OR all:momentum)'
+    - '(cat:q-fin.ST OR cat:q-fin.PM OR cat:stat.ML) AND (all:"machine learning" OR all:"neural network") AND (all:"stock returns" OR all:"asset pricing")'
+
+openalex:
+  enabled: true
+  max_pages_per_query: 2       # 200 results per page, cursor-paginated
+  # English and Chinese queries all feed the same set
+  queries:
+    - large language model alpha factor mining
+    - large language model hypothesis generation asset pricing
+    - agentic quantitative investment research
+    - multiple testing factor zoo
+    - backtest overfitting Sharpe ratio
+    - data snooping trading strategies
+    - stock return anomaly
+    - cross-section of expected stock returns
+    - stock return predictability
+    - momentum reversal stock returns
+    - machine learning empirical asset pricing
+    - factor zoo anomalies replication
+    - 大模型 因子挖掘
+    - 大语言模型 量化投资
+    - 智能体 量化研究
+    - 多重检验 因子
+  # Extra query run against these labs' output, to catch work keyword search misses
+  institution_query: large language model alpha factor
+  institutions:
+    - Tsinghua University
+    - Peking University
+    - Shanghai Jiao Tong University
+    - Fudan University
+    - Zhejiang University
+    - Chinese Academy of Sciences
+    - Renmin University of China
+    - Southwestern University of Finance and Economics
+    - Shanghai University of Finance and Economics
+    - Hong Kong University of Science and Technology
+    - Chinese University of Hong Kong
+
+semantic_scholar:
+  enabled: true
+  max_citations_per_anchor: 2000
+  max_references: 200          # references pulled from each newly adopted paper
+  adopted_as_anchors: true     # every adopted paper becomes a citation anchor
+  max_adopted_anchors: 25
+  # Papers central to this project: anything newly citing them gets pulled in.
+  # Titles are resolved to IDs automatically. From docs/reading_list.md and the
+  # paper-round issues on GitHub.
+  anchors:
+    - "Alpha-GPT: Human-AI Interactive Alpha Mining for Quantitative Investment"
+    - "Can AI Do Financial Research? LLM-Guided Hypothesis Discovery in Asset Pricing"
+    - "Literature Meets Data: A Synergistic Approach to Hypothesis Generation"
+    - "...and the Cross-Section of Expected Returns"
+    - "The Probability of Backtest Overfitting"
+    - "The Deflated Sharpe Ratio: Correcting for Selection Bias, Backtest Overfitting, and Non-Normality"
+
+prefilter:
+  # A routing hint, not a gate: rejected papers keep their abstracts and are
+  # revisited whenever this version number or the mode changes.
+  # v2: the gate is relaxed. With mode: either, a paper passes on ANY term from
+  # either list, so only papers with nothing finance- or method-related are
+  # skipped. Relevance is decided by the screener's score instead, and a
+  # cutoff is to be set later from data (your review ratings, and which
+  # papers' factors survive validation), not guessed now. Screening costs
+  # about half a cent per paper. Bumping `version` makes paperlog revisit
+  # everything the v1 prefilter rejected.
+  # `agent_terms` holds the CONTRIBUTION terms: LLM/agent and validation
+  # methods, and return-predictability topics.
+  version: 2
+  mode: either
+  agent_terms: [agent, agentic, "language model", llm, gpt, "foundation model",
+                "machine learning", "multiple testing", "false discovery", "data snooping",
+                "data-snooping", overfitting, backtest, "sharpe ratio", "cross-validation",
+                "alpha mining", "factor mining", "symbolic regression", "genetic programming",
+                hypothes,
+                # v2: return-predictability topics, the source of market hypotheses
+                "expected return", "cross-section", "cross section", predictab, anomal,
+                momentum, reversal, "factor model", "risk premi", mispric, "investor sentiment",
+                liquidity, turnover, "trading volume", volatility, "earnings announcement",
+                "post-earnings", accrual, "value premium", "size effect", "limits to arbitrage",
+                "return forecast", "neural network", "gradient boost", "random forest",
+                "deep learning", "stock return", "returns on stocks", "returns to buying",
+                "risk factor", "book-to-market", "market efficiency", "abnormal return",
+                "holding period", winners, losers, "excess return", "stock market",
+                智能体, 大模型, 语言模型, 多智能体, 代理, 因子挖掘, 多重检验, 过拟合, 机器学习]
+  finance_terms: [stock, equit, financ, trading, portfolio, invest, earnings, analyst,
+                  valuation, market, asset, fund, factor, anomal, alpha, "asset pricing",
+                  "cross-section", 股票, 金融, 投资, 量化, 证券, 基金, 资产, 因子, 收益]
+
+screening:
+  model: claude-haiku-4-5            # cheapest current Claude model
+  budget_per_run: 300                # hard cost cap per run
+  digest_threshold: 3                # digest only; nothing is dropped below it
+  # Who the screener is screening for; it appears in the screening prompt.
+  team_description: >-
+    a team building an agentic alpha-discovery system: LLM agents propose trading
+    signals, factors and economic hypotheses, and a statistical validation layer
+    decides which survive (multiple testing, backtest overfitting, robust Sharpe
+    inference, purged cross-validation). Research is on US equities. The team
+    draws its market hypotheses from decades of asset-pricing, anomaly and
+    finance-ML research, which matters as much as the agent literature; a paper
+    can be valuable for its methods or for its findings about returns.
+  # Bump rubric_version whenever you edit the rubric: papers scored under an older
+  # version are rescored automatically when there's budget left over.
+  rubric_version: 2
+  rescreen_when_rubric_changes: true
+  # Two kinds of value share one scale: METHODS (how to generate or validate)
+  # and FINDINGS (documented behaviour of stock returns, the source of
+  # testable market hypotheses). Score whichever is higher; publication year
+  # does not matter.
+  rubric: |
+    5 = METHODS: LLM/agentic generation or mining of trading signals, factors or economic hypotheses; or a validation method for many-candidate search (multiple testing, backtest overfitting, deflated or haircut Sharpe, purged cross-validation) that we could adopt. FINDINGS: documented cross-sectional or time-series predictability of US stock returns (an anomaly, factor or risk premium) with a stated mechanism, testable with daily or monthly price, volume, return, shares or market-cap data
+    4 = METHODS: LLM/agentic finance research workflows (automation, reproducibility, evaluating LLM strategies including look-ahead leakage), or statistical inference for strategy evaluation (Sharpe inference, bootstrap, FDR under dependence) applied to finance, or finance ML for return prediction (trees, neural networks, latent factor models). FINDINGS: return predictability that needs data we may add (fundamentals, analyst forecasts), or evidence about anomalies as a group (replication, publication decay, transaction costs, factor zoos)
+    3 = general agent methods (tool use, memory, planning, self-correction, schema-gated execution, automated science) or general multiple-testing / ML validation methods clearly transferable to our pipeline; return predictability in other asset classes or markets with a mechanism that could transfer to US equities
+    2 = finance research without return-predictability content (corporate finance, macro, microstructure without a cross-sectional signal), or agent work only loosely applicable
+    1 = tangential
+    0 = irrelevant
+  taxonomy:
+    - hypothesis_generation
+    - alpha_factor_mining
+    - agent_architecture
+    - research_automation
+    - reproducibility_and_provenance
+    - multiple_testing
+    - backtest_overfitting
+    - sharpe_inference
+    - cross_validation
+    - leakage_and_lookahead
+    - data_and_universe
+    - transaction_costs
+    - portfolio_construction
+    - evaluation_benchmark
+    - survey
+    - return_anomaly
+    - factor_models
+    - finance_ml
+
+embeddings:
+  enabled: false                 # needs pip install -e ".[embeddings]" (~2 GB model)
+  model: BAAI/bge-m3             # multilingual; links Chinese and English versions of a paper
+  cross_language_dup_threshold: 0.90

@@ -8,3 +8,8 @@ __pycache__/
 *.egg-info/
 .sessions/
 experiments/runs.jsonl
+
+# paperlog working data (keep it out of this public repo; see research/paperlog/README.md)
+papers.db
+papers.csv
+/digests/
