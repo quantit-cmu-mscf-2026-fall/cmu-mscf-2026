@@ -17,7 +17,7 @@ It compares three ways of deciding (#50, Q5):
 - **baseline:** BH at q on each family's search-adjusted p-value over the
   search period, the rule that decides until the funnel beats it;
 - **funnel:** stage 1 screens families, stage 2 checks survivors (by default
-  on the same search period, with no gate: the registered design in
+  on the same search period, with no gate: the design chosen in
   `docs/validation/framework.md`; "split" confirms on years stage 1 didn't
   use instead), stage 3 (spanning) is a placeholder that passes everything
   and is reported as not measured, stage 4 tests the survivors on the
@@ -186,7 +186,7 @@ def family_statistics(
 ) -> dict[str, pd.DataFrame]:
     """Everything the pipelines need, per hypothesis, for both stage-2 designs.
 
-    Returns {"reuse": ..., "split": ...}. In "reuse", the registered design
+    Returns {"reuse": ..., "split": ...}. In "reuse", the chosen design
     (#50, "Stage 2"), both stages see the whole search period and stage 2 is
     not a gate. In "split", stage 1 sees the search period minus its last
     `stage2_years`, and stage 2 confirms on those years; calibration found it
@@ -287,12 +287,15 @@ def family_statistics(
 class Thresholds:
     """One threshold setting for the funnel.
 
-    The defaults are the set registered in `docs/validation/framework.md`
-    ("Results"): q1 = 0.10, no stage-2 gate, BH at q4 = 0.30 on the holdout.
+    The defaults are the best set from the method's synthetic test runs
+    (q1 = 0.10, no stage-2 gate, BH at q4 = 0.30; formula p-values at stage
+    1): a starting point, not registered thresholds. The values used on real
+    candidates come from running the calibration for the real generator and
+    are registered in `docs/validation/framework.md`.
 
     q1: BH level across families at stage 1. alpha2: one-sided p cut-off at
     stage 2; 1.0 means no gate. final: the stage-4 gate, "bh" (BH at q4
-    across the survivors' one-sided holdout p-values; registered) or "dsr"
+    across the survivors' one-sided holdout p-values; the chosen gate) or "dsr"
     (deflated Sharpe >= d4). final_trials: for "dsr", the trial count it
     charges, "survivors" (only the candidates taken to the holdout, which is
     independent data) or "searched" (every variant tried; calibration found

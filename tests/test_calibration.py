@@ -162,9 +162,9 @@ class TestPipelines:
             run_funnel(stats["split"], Thresholds(), stage1="lfdr")
 
 
-class TestRegisteredDefaults:
-    def test_thresholds_default_to_the_registered_set(self):
-        # framework.md "Results": q1 = 0.10, no stage-2 gate, BH at q4 = 0.30.
+class TestDefaults:
+    def test_thresholds_default_to_the_test_runs_best_set(self):
+        # The best set from the synthetic test runs, a starting point (not registered).
         th = Thresholds()
         assert (th.q1, th.alpha2, th.final, th.q4) == (0.10, 1.0, "bh", 0.30)
 
