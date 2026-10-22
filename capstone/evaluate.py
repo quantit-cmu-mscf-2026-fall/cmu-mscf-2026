@@ -583,6 +583,11 @@ def estimate_pi0(
 
 
 def _pi0(p: np.ndarray, lambda_: float) -> float:
+    # At lambda = 0 every candidate counts as a possible null, so pi0 = 1:
+    # #{p > 0} would drop p-values of exactly 0 (a strong series underflows
+    # to 0 in `sharpe_test`) and break `storey_qvalues(lambda_=0) == bh_adjusted`.
+    if lambda_ == 0:
+        return 1.0
     return float(np.sum(p > lambda_) / ((1.0 - lambda_) * len(p)))
 
 
