@@ -138,7 +138,12 @@ def _one_sided_p(returns: pd.DataFrame) -> pd.Series:
 
 
 def _stage1(
-    window: pd.DataFrame, p: pd.Series, family: pd.Series, n_boot: int, seed: int | None
+    window: pd.DataFrame,
+    p: pd.Series,
+    family: pd.Series,
+    n_boot: int,
+    seed: int | None,
+    q: float = 0.05,
 ) -> pd.DataFrame:
     """Each family's best variant on `window` and its family p-value, three ways.
 
@@ -162,7 +167,7 @@ def _stage1(
             "p1_independent": search_adjusted_pvalue(best_p, k),
             "p1_rho": search_adjusted_pvalue(best_p, k, rho=rho),
             "p1_bootstrap": (
-                bootstrap_family_pvalues(window, family, n_boot=n_boot, seed=seed)["pvalue"]
+                bootstrap_family_pvalues(window, family, n_boot=n_boot, seed=seed, q=q)["pvalue"]
                 if n_boot
                 else np.nan
             ),
@@ -171,7 +176,13 @@ def _stage1(
 
 
 def family_statistics(
-    fs: FamilySet, *, stage2_years: float = 7.0, n_boot: int = 1999, seed: int = 0
+    fs: FamilySet,
+    *,
+    stage2_years: float = 7.0,
+    n_boot: int = 1999,
+    seed: int = 0,
+    q: float = 0.05,
+    designs: tuple[str, ...] = ("split", "reuse"),
 ) -> dict[str, pd.DataFrame]:
     """Everything the pipelines need, per hypothesis, for both stage-2 designs.
 
@@ -234,9 +245,16 @@ def family_statistics(
     naive_best = passed.groupby(fs.family[passed.index]).idxmax().reindex(fs.truth.index)
 
     out = {}
-    windows = {"split": (first, last, _one_sided_p(first)), "reuse": (search, search, p_all)}
+    # `q` is the smallest stage-1 BH level the caller will use (it sets how
+    # many bootstrap draws are enough). Computing only the designs asked for
+    # halves the bootstrap's cost when one design is being calibrated.
+    if "reuse" not in designs or not set(designs) <= {"split", "reuse"}:
+        raise ValueError("designs must include 'reuse' and contain only 'split' or 'reuse'")
+    windows = {"reuse": (search, search, p_all)}
+    if "split" in designs:
+        windows["split"] = (first, last, _one_sided_p(first))
     for design, (window1, window2, p1) in windows.items():
-        s = _stage1(window1, p1, fs.family, n_boot, seed)
+        s = _stage1(window1, p1, fs.family, n_boot, seed, q)
         s["p2"] = (
             p_all.reindex(s["best"]).to_numpy()
             if design == "reuse"

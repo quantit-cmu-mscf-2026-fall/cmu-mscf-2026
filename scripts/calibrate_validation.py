@@ -93,7 +93,14 @@ def evaluate_setting(p, share, sharpe, seeds, grid, stage1, n_boot=0):
             seed=seed,
             **{k: tuple(v) if isinstance(v, list) else v for k, v in p["defects"].items()},
         )
-        stats = family_statistics(fs, stage2_years=p["stage2_years"], n_boot=n_boot, seed=seed)
+        stats = family_statistics(
+            fs,
+            stage2_years=p["stage2_years"],
+            n_boot=n_boot,
+            seed=seed,
+            q=min([*p["sweep"]["q1"], p["baseline_q"]]),
+            designs=tuple(p.get("designs", ["split", "reuse"])),
+        )
         truth = stats["reuse"]["truth"]
         base = {"share_real": share, "sharpe_real": sharpe, "seed": seed}
         rows.append(
@@ -115,7 +122,7 @@ def evaluate_setting(p, share, sharpe, seeds, grid, stage1, n_boot=0):
                     **score(run_naive_stack(stats["reuse"], th), truth),
                 }
             )
-            for design in ("split", "reuse"):
+            for design in p.get("designs", ["split", "reuse"]):
                 stages = run_funnel(stats[design], th, stage1=stage1)
                 rows.append(
                     {
@@ -160,7 +167,9 @@ def main() -> None:
 
     all_rows, all_gates = [], []
     for share, sharpe in settings(p):
-        rows, gates = evaluate_setting(p, share, sharpe, seeds, grid, p["stage1"])
+        rows, gates = evaluate_setting(
+            p, share, sharpe, seeds, grid, p["stage1"], n_boot=p.get("n_boot", 0)
+        )
         log_run(
             "validation-calibration",
             params={
@@ -184,27 +193,32 @@ def main() -> None:
         all_rows.append(rows)
         all_gates.append(gates)
 
-    bc = p["bootstrap_check"]
-    boot_seeds = range(2) if args.quick else range(*bc["seeds"])
-    boot_rows = []
-    for share in bc["share_real"]:
-        for method, n_boot in (("rho", 0), ("bootstrap", bc["n_boot"])):
-            r, _ = evaluate_setting(
-                p, share, bc["sharpe_real"], boot_seeds, grid, method, n_boot=n_boot
-            )
-            boot_rows.append(r.assign(stage1=method))
-    boot = pd.concat(boot_rows, ignore_index=True)
-    log_run(
-        "validation-calibration",
-        params={"bootstrap_check": bc, "seed_range": [boot_seeds.start, boot_seeds.stop]},
-        metrics={
-            f"{m}_{a}_{k}": float(boot.loc[(boot["stage1"] == m) & (boot["arm"] == a), k].mean())
-            for m in ("rho", "bootstrap")
-            for a in ("baseline", "funnel")
-            for k in ("fdr", "power")
-        },
-        tags=tags,
-    )
+    bc = p.get("bootstrap_check")
+    boot = None
+    if bc:
+        bc = p["bootstrap_check"]
+        boot_seeds = range(2) if args.quick else range(*bc["seeds"])
+        boot_rows = []
+        for share in bc["share_real"]:
+            for method, n_boot in (("rho", 0), ("bootstrap", bc["n_boot"])):
+                r, _ = evaluate_setting(
+                    p, share, bc["sharpe_real"], boot_seeds, grid, method, n_boot=n_boot
+                )
+                boot_rows.append(r.assign(stage1=method))
+        boot = pd.concat(boot_rows, ignore_index=True)
+        log_run(
+            "validation-calibration",
+            params={"bootstrap_check": bc, "seed_range": [boot_seeds.start, boot_seeds.stop]},
+            metrics={
+                f"{m}_{a}_{k}": float(
+                    boot.loc[(boot["stage1"] == m) & (boot["arm"] == a), k].mean()
+                )
+                for m in ("rho", "bootstrap")
+                for a in ("baseline", "funnel")
+                for k in ("fdr", "power")
+            },
+            tags=tags,
+        )
 
     results = pd.concat(all_rows, ignore_index=True)
     gates = pd.concat(all_gates, ignore_index=True)
@@ -274,8 +288,8 @@ def main() -> None:
         .str.extract(r"final=(\S+ \(\w+\))")[0]
         .str.replace(r">=\S+|@\S+", "", regex=True)
     )
-    for design in ("split", "reuse"):
-        d = funnel[funnel["design"] == design]
+    for each in p.get("designs", ["split", "reuse"]):
+        d = funnel[funnel["design"] == each]
         by = d.groupby(["final", "thresholds", "share_real", "sharpe_real"])[
             ["fdr", "power"]
         ].mean()
@@ -291,19 +305,24 @@ def main() -> None:
             .groupby("final")
             .head(1)
         )
-        print(f"stage 2 {design}:")
+        print(f"stage 2 {each}:")
         print(best.round(3).to_string() if not best.empty else "  nothing meets the target", "\n")
-    print(f"stage-1 method (Sharpe {bc['sharpe_real']}, seeds {list(boot_seeds)}):")
-    bsel = boot[
-        (boot["arm"] == "baseline")
-        | ((boot["arm"] == "funnel") & (boot["design"] == design) & (boot["thresholds"] == chosen))
-    ]
-    cols = ["fdr", "power", "any_false"]
-    print(bsel.groupby(["share_real", "stage1", "arm"])[cols].mean().round(3).to_string(), "\n")
+    if boot is not None:
+        print(f"stage-1 method (Sharpe {bc['sharpe_real']}, seeds {list(boot_seeds)}):")
+        bsel = boot[
+            (boot["arm"] == "baseline")
+            | (
+                (boot["arm"] == "funnel")
+                & (boot["design"] == design)
+                & (boot["thresholds"] == chosen)
+            )
+        ]
+        cols = ["fdr", "power", "any_false"]
+        print(bsel.groupby(["share_real", "stage1", "arm"])[cols].mean().round(3).to_string(), "\n")
 
     print("4. Best threshold sets (worst-setting FDR <= target)")
     print(ranked.head(8).round(3).to_string())
-    n_logged = len(settings(p)) + 1
+    n_logged = len(settings(p)) + (1 if bc else 0)
     print(f"\nlogged {n_logged} runs to the ledger as 'validation-calibration'")
 
 
