@@ -92,23 +92,25 @@ than twice as often as BH does (`tests/test_evaluate.py`).
 
 ## A staged funnel
 
-Strictness is spent where a mistake costs money, not at the first look. Loose
-early stages are safe only because later ones look at data the earlier ones
-never touched.
+Strictness is spent where a mistake costs money, not at the first look. A
+loose early stage is safe because the final stage tests the survivors on a
+holdout that nothing before it has seen. Stages 1–3 share the search period
+(#43); the holdout is what protects the end-to-end result.
 
-| Stage | Question | Strictness |
+| Stage | Question | Gate (proposed in [`validation/framework.md`](validation/framework.md)) |
 |---|---|---|
-| 1. Screen | Worth a closer look? | Loose and graded: `bh` or local FDR around 0.10-0.20 |
-| 2. Robustness | Does it survive other periods, lags, costs and cross-validation? Is the search overfit? | Medium |
-| 3. Incremental value | Does it add anything beyond known factors and signals already held? | Medium |
-| 4. Final decision | Allocate capital? | Strict: deflated or haircut Sharpe with the full ledger trial count, on a holdout looked at once |
+| 1. Screen | Worth a closer look? | BH across hypothesis families on each family's search-adjusted p-value |
+| 2. Robustness | Does it survive other lags, costs and sub-periods? Is the search overfit? | None: graded checks only |
+| 3. Incremental value | Does it add anything beyond known factors and signals already held? | Spanning alpha (not built yet) |
+| 4. Final decision | Allocate capital? | BH across the survivors' holdout p-values, the holdout looked at once |
 | 5. Incubation | Does it work live? | Small live or paper capital |
 
 Every stage's score and threshold is fixed before the candidates are scored.
 Choosing the procedure or threshold after seeing results is multiple testing
-of its own. Thresholds are tuned on simulated candidate sets to a chosen ratio
-of missed discoveries to false ones (Harvey & Liu 2020), not left at textbook
-defaults.
+of its own. Thresholds are set by simulating the whole pipeline on candidate
+sets with known truth, to a flat 10% end-to-end false-discovery rate (#50,
+Q5), not left at textbook defaults. `validation/framework.md` gives each
+method its role and records the thresholds and the evidence for them.
 
 ## Decisions the stages depend on
 
