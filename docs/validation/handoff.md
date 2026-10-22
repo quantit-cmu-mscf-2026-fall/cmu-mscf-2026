@@ -24,27 +24,49 @@ plugs into the same input; the only shared dependency is the stack below.
 
 ## Where the code is today
 
-Nothing from the validation work is on `main` yet. Four PRs are open, stacked:
+The validation code lands in two ways. For what has merged since this page
+was written, check the
+[pull request list](https://github.com/quantit-cmu-mscf-2026-fall/cmu-mscf-2026/pulls?q=is%3Apr).
+
+**A stack of PRs.** Each one's base is the branch of the PR below it, and a
+reviewed follow-up merges into the branch it builds on, so the top branch,
+`vincal848/graded-evidence`, has all of it. The stack reaches `main` from the
+bottom up:
 
 | PR | Branch | Adds |
 |---|---|---|
-| #28 | `vincal848/validation-harness` | `backtest.candidate_returns`, `synth.make_return_matrix`, `docs/validation.md` |
-| #29 | `vincal848/sharpe-inference` | `sharpe_variance` / `sharpe_test` (HAC), PSR, MinTRL |
+| #28 | `vincal848/validation-harness` | `backtest.candidate_returns`, `synth.make_return_matrix`, `docs/validation.md`; with #29 merged in, `sharpe_variance` / `sharpe_test` (HAC), PSR, MinTRL |
 | #31 | `vincal848/fdr-dependence` | `holm`, `benjamini_yekutieli`, `storey_qvalues` |
-| #32 | `vincal848/graded-evidence` | adjusted p-values, `evidence_profile`, the staged funnel |
+| #32 | `vincal848/graded-evidence` | adjusted p-values (`holm_adjusted`, `by_adjusted`, `bh_adjusted`), `evidence_profile`, the stages of the calibrated validation funnel; with #59 merged in, the Sharpe follow-ups from #29's review |
 
-Three more are open against `main` directly, independent of the stack. Each
-one's reviewer is the person who builds on it:
+**Separate PRs against `main`.** Each one's reviewer is the person who builds
+on it. Already on `main`: Lauren's purged k-fold CV, `cv.py` (#34); the
+shared-data loader, `shared_data.py` (#26); and the backtest's first-period
+fix (#30). Still open when this was written:
 
 | PR | Adds | Reviewer |
 |---|---|---|
 | #33 | `runlog.read_entries()`, `runlog.trial_count()` | Pin-Hua |
-| #34 | Lauren's purged k-fold CV (`cv.py`) | Lauren, Eunice |
 | #35 | CSCV / probability of backtest overfitting (`pbo.py`) | Pin-Hua |
 
-**Branch from `origin/vincal848/graded-evidence`** (the top of the stack) so
-you have everything. If you open a PR before the stack is merged, set its base
-to that branch; once #32 is in `main`, change the base to `main` and rebase.
+So until the stack reaches `main`, neither branch has everything: the stack
+branch has `make_return_matrix` and the Sharpe and multiple-testing code but
+not `cv.py` or `shared_data.py`, and `main` has those but not the stack.
+
+**Which branch to start from:**
+
+- Your work uses the stack (`make_return_matrix`, `sharpe_test`, the adjusted
+  p-values): branch from `origin/vincal848/graded-evidence` and set your PR's
+  base to that branch. Once #32 is in `main`, change the base to `main` and
+  rebase.
+- Your work needs only what's on `main`: branch from `origin/main`.
+- It needs both (for example `cv.py` with `make_return_matrix`): branch from
+  `origin/vincal848/graded-evidence` and run `git merge origin/main`. If git
+  reports a conflict in `tests/test_synth.py`, both sides added tests at the
+  end of the file; keep both. Until the stack is on `main`, your PR's diff
+  against the stack branch also shows `main`'s changes, so say so in the PR
+  description.
+
 Name branches `<name>/<topic>`, and put the Jira key in the PR title (for
 example `QUANTIT-37: stationary bootstrap resampler`).
 
@@ -111,8 +133,15 @@ and the multiple-testing tests):
   seeds before committing**, not only the committed seed. In #28 one test
   passed at seed 0 by luck and failed on others.
 - Write down in the test's docstring or comment what range you measured.
-- Keep the suite fast (it runs in about 12 s now). Put long sweeps in a script
-  and report the numbers in the PR description.
+- Keep the suite fast. Put long sweeps in a script and report the numbers in
+  the PR description.
+
+## The data split
+
+Real-data runs use the fixed CRSP data, 1990–2025 (the shared-data loader on
+`main`). Search, including every fit, screen and choice of parameters, uses
+**1990–2020** only. **2021–2025 is the holdout**: never used in search, and
+looked at once, at the final decision.
 
 ## What we already know (don't re-learn it)
 
@@ -133,10 +162,19 @@ and the multiple-testing tests):
   of one idea. Measured on `make_return_matrix` nulls: about 0.47 on average,
   but anywhere from 0.06 to 0.78 for a single set
   ([pbo-and-haircut.md](pbo-and-haircut.md)).
-- **Use the ledger's registered trial count as it is.** Don't replace it with
-  an "effective" number of independent trials to allow for correlation. Allow
-  for correlation in the method instead (BY, Holm, or a bootstrap that keeps
-  the correlation between candidates).
+- **Correct p-values with the ledger's registered trial count as it is.**
+  Holm, BY, the haircut Sharpe and the search adjustment take the full count.
+  Don't shrink it to an "effective" number of independent trials to allow for
+  correlation: #51's review found that anti-conservative for the search
+  adjustment (size 0.058–0.071 at a nominal 0.05). Allow for correlation in
+  the method instead (BY, Holm, or a bootstrap that keeps the correlation
+  between candidates).
+- **The deflated Sharpe is the one exception, as the code says.**
+  `expected_max_sharpe` and `deflated_sharpe_ratio` count independent trials
+  and accept a fractional count from `implied_independent_trials` (Bailey &
+  López de Prado's rough correction). If you pass one, report the ledger count
+  next to it, and use the full ledger count for the final decision
+  (`docs/validation.md`, stage 4).
 
 ## Trial counts and the ledger
 
@@ -153,8 +191,8 @@ m = trial_count("mom-sweep")    # only trials logged under one experiment name
 
 It raises `LookupError` instead of returning 0 when nothing matches, because
 a correction against zero trials applies no correction. It arrives in its own
-small PR, #33, against `main` and separate from the stack. Until
-that's merged, the command line gives the same number:
+small PR, #33, against `main` and separate from the stack. If it isn't on
+your branch yet, the command line gives the same number:
 `python -m capstone.runlog stats`. Tests must set `CAPSTONE_LEDGER_DIR` to a
 temporary directory and never touch `experiments/runs.jsonl`.
 
