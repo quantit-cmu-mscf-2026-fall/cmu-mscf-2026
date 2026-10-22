@@ -150,6 +150,209 @@ def search_intensity(hypothesis_ids: Iterable) -> pd.Series:
 
 
 # ---------------------------------------------------------------------------
+# Bootstrapping a family's best variant (adapted from Carl Cui's
+# `carl/validation1-hypothesis-fdr`, paper_validation/.../bootstrap.py)
+# ---------------------------------------------------------------------------
+
+
+def block_length_rule(n_obs: int) -> int:
+    """Default circular block length, ceil(2 · n_obs^(1/3)): 16 at 500, 28 at 2,520.
+
+    Carl's calibration at n_obs = 500 (P(p <= 0.01) against a target of 0.010,
+    AR(1) coefficient phi):
+
+        block:        8        16        25        50
+        phi=0.0    0.0121    0.0132    0.0159    0.0227
+        phi=0.2    0.0141    0.0144    0.0169    0.0234
+        phi=0.5    0.0198    0.0172    0.0189    0.0245
+
+    Short blocks cut serial dependence at their edges; long blocks leave too
+    few distinct blocks. The minimum sits near 16, which this rule gives. A
+    1.3-1.7x excess at the 1% level remains at every length: a finite-sample
+    property of the studentised block bootstrap.
+    """
+    return max(1, int(np.ceil(2.0 * n_obs ** (1.0 / 3.0))))
+
+
+def bootstrap_family_pvalues(
+    returns: pd.DataFrame,
+    family: pd.Series,
+    *,
+    n_boot: int = 1999,
+    block_length: int | None = None,
+    seed: int | None = 0,
+    batch_size: int = 64,
+    q: float = 0.05,
+    min_blocks: int = 10,
+) -> pd.DataFrame:
+    """p-value of each hypothesis's best variant, by a block bootstrap of the maximum.
+
+    The stage-1 gate's input (`docs/validation/framework.md`, Q2): for each
+    hypothesis, how often the best of *its* variants would look this good in
+    a world where none of them is real, with the variants' actual correlation,
+    autocorrelation and tails. Unlike `search_adjusted_pvalue`, it needs no
+    assumption about how the variants are correlated, at the cost of
+    resampling.
+
+    Three rules make it correct (Carl's design, kept as he wrote it):
+
+    1. **One resampling for everyone.** Each replication draws one set of
+       circular blocks of dates and applies it to every column, so the
+       correlation between variants and between hypotheses survives.
+    2. **The null comes from centring.** The bootstrap statistic is
+       sqrt(T)(mean* - mean) / sd*, so the resampled world has no real variant
+       while keeping everything else about the data.
+    3. **The search is redone inside each replication.** The family maximum
+       is retaken every time, so the reference is the best of a search of this
+       size and this correlation.
+
+    The statistic is the one-sided t of the mean, sqrt(n) · mean / sd, where n
+    is the number of dates the variant has data for. Missing values are
+    allowed: candidates with different warm-ups (#55 leaves dates with no
+    position NaN) keep their own dates, and every replication still resamples
+    one shared set of dates; each column uses whichever of its own values
+    fall in the resampled blocks. Dropping every row with any missing value
+    would instead cut every candidate to the longest warm-up.
+
+    **Resolution.** A bootstrap p-value can't go below 1 / (n_boot + 1). BH
+    across H hypotheses at level q tests its most extreme rank at q / H, so
+    n_boot + 1 must reach H / q, or the strongest hypotheses can't be told
+    apart and power collapses silently (Carl measured exactly that). This
+    raises if it doesn't, for the smallest BH level `q` the caller will use.
+
+    **Short columns.** A column with data on only a few blocks' worth of dates
+    is badly calibrated: on fewer than about 10 blocks the studentised t is
+    liberal, and a column that a replication can't score drops out of that
+    replication's maximum but not the observed one. Alone in its family, a
+    20-date column was called real 19% of the time at 5% (#67 review). So
+    every column needs at least `min_blocks` blocks of non-missing values.
+
+    Args:
+        returns: performance matrix, dates x candidates, higher is better.
+        family: hypothesis label per column of `returns` (a Series indexed by
+            column name). Families may differ in size.
+        n_boot: bootstrap replications.
+        block_length: circular block length; `block_length_rule` if omitted.
+        seed: seed for the resampling.
+        batch_size: replications per vectorised pass; memory only, never the
+            result (each replication's blocks are drawn in one call, so the
+            random stream doesn't depend on how replications are batched).
+        q: the smallest BH level the p-values will be used at, for the
+            resolution check.
+        min_blocks: blocks of non-missing data every column needs.
+
+    Raises on non-finite values (inf would give its family the smallest
+    possible p-value), on a column with too little data, and on too few
+    replications for `q`. Hypothesis labels keep their type.
+
+    Returns:
+        DataFrame indexed by hypothesis: `pvalue`, `k` (variants), `best`
+        (the column with the largest t) and `t` (its t-statistic).
+    """
+    if not isinstance(returns, pd.DataFrame) or not isinstance(family, pd.Series):
+        raise TypeError("returns must be a DataFrame and family a Series")
+    missing = returns.columns.difference(family.dropna().index)
+    if len(missing):
+        raise ValueError(f"family is missing for {len(missing)} columns, e.g. {missing[0]!r}")
+    if not 0 < q < 1:
+        raise ValueError("q must be in (0, 1)")
+    values = returns.to_numpy(dtype=np.float64)
+    if np.isinf(values).any():
+        bad = returns.columns[np.isinf(values).any(axis=0)][0]
+        raise ValueError(f"column {bad!r} has an infinite value")
+    data = returns.dropna(how="all")
+    n_obs = len(data)
+    block = block_length if block_length is not None else block_length_rule(n_obs)
+    if not 1 <= block <= n_obs:
+        raise ValueError("block_length must be between 1 and the number of dated rows")
+    counts = data.notna().sum()
+    need = max(3, min_blocks * block)
+    if (counts < need).any():
+        short = counts[counts < need].index[0]
+        raise ValueError(
+            f"column {short!r} has {int(counts[short])} non-missing values; every column "
+            f"needs at least {need} ({min_blocks} blocks of {block})"
+        )
+
+    # Lay the columns out family by family, so each family is one slice.
+    # factorize keeps each label's own type (1 and "1" stay apart).
+    codes, uniques = pd.factorize(family.reindex(data.columns), sort=False)
+    order = np.argsort(codes, kind="stable")
+    data = data.iloc[:, order]
+    codes = codes[order]
+    starts_at = np.flatnonzero(np.r_[True, codes[1:] != codes[:-1]])
+    hypotheses = uniques[codes[starts_at]]
+    n_hyp = len(hypotheses)
+    # Carl's condition: 1 / (n_boot + 1) <= q / H, i.e. n_boot + 1 >= H / q.
+    if n_boot + 1 < n_hyp / q:
+        raise ValueError(
+            f"n_boot={n_boot} can't resolve BH at {q} across {n_hyp} hypotheses; "
+            f"use n_boot >= {int(np.ceil(n_hyp / q)) - 1}"
+        )
+
+    x = data.to_numpy(dtype=np.float64)
+    present = ~np.isnan(x)
+    x = np.where(present, x, 0.0)
+    count = present.sum(axis=0)
+    mean = x.sum(axis=0) / count
+    sd = np.sqrt(np.maximum(((x - mean) ** 2 * present).sum(axis=0) / (count - 1), 1e-300))
+    t_obs = np.sqrt(count) * mean / sd
+    best_obs = np.maximum.reduceat(t_obs, starts_at)
+
+    # A circular block sum is a difference of prefix sums over the doubled
+    # series, so each replication moves n_blocks x N numbers, not T x N. The
+    # count prefix sum gives each column its own number of resampled values.
+    def prefix(values: np.ndarray) -> np.ndarray:
+        out = np.zeros((2 * n_obs + 1, values.shape[1]))
+        np.cumsum(np.concatenate([values, values], axis=0), axis=0, out=out[1:])
+        return out
+
+    p0, p1, p2 = prefix(present.astype(np.float64)), prefix(x), prefix(x**2)
+    n_full, remainder = divmod(n_obs, block)
+
+    rng = np.random.default_rng(seed)
+    exceed = np.zeros(n_hyp, dtype=np.int64)
+    done = 0
+    while done < n_boot:
+        size = min(batch_size, n_boot - done)
+        # rule 1: one shared draw per replication, full blocks and the short
+        # tail block together, so batching doesn't change the random stream.
+        draws = rng.integers(0, n_obs, size=(size, n_full + (1 if remainder else 0)))
+        starts = draws[:, :n_full]
+        s0 = (p0[starts + block] - p0[starts]).sum(axis=1)
+        s1 = (p1[starts + block] - p1[starts]).sum(axis=1)
+        s2 = (p2[starts + block] - p2[starts]).sum(axis=1)
+        if remainder:
+            tail = draws[:, n_full:]
+            s0 += (p0[tail + remainder] - p0[tail]).sum(axis=1)
+            s1 += (p1[tail + remainder] - p1[tail]).sum(axis=1)
+            s2 += (p2[tail + remainder] - p2[tail]).sum(axis=1)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            mean_star = s1 / s0
+            var_star = np.maximum((s2 - s0 * mean_star**2) / (s0 - 1), 1e-300)
+            t_star = np.sqrt(s0) * (mean_star - mean) / np.sqrt(var_star)  # rule 2
+        # A resample with fewer than 3 of a column's values can't score it.
+        t_star = np.where(s0 >= 3, t_star, -np.inf)
+        best_star = np.maximum.reduceat(t_star, starts_at, axis=1)  # rule 3
+        exceed += (best_star >= best_obs).sum(axis=0)
+        done += size
+
+    best_col = [
+        data.columns[i + int(np.argmax(t_obs[i:j]))]
+        for i, j in zip(starts_at, [*starts_at[1:], len(t_obs)], strict=True)
+    ]
+    return pd.DataFrame(
+        {
+            "pvalue": (1.0 + exceed) / (n_boot + 1.0),
+            "k": np.diff([*starts_at, len(t_obs)]),
+            "best": best_col,
+            "t": best_obs,
+        },
+        index=pd.Index(hypotheses, name="hypothesis"),
+    )
+
+
+# ---------------------------------------------------------------------------
 # The FDR implied by a threshold under search (paper Section 4)
 # ---------------------------------------------------------------------------
 
