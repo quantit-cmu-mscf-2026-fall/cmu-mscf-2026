@@ -526,11 +526,13 @@ class TestBootstrapFamilyPvalues:
         with pytest.raises(ValueError, match="missing"):
             bootstrap_family_pvalues(returns, pd.Series({"a": "A"}))
         family = pd.Series({f"c{i}": f"H{i}" for i in range(200)})
-        wide = pd.DataFrame(np.random.default_rng(0).normal(size=(50, 200)), columns=family.index)
+        wide = pd.DataFrame(np.random.default_rng(0).normal(size=(400, 200)), columns=family.index)
         with pytest.raises(ValueError, match="resolve"):
             bootstrap_family_pvalues(wide, family, n_boot=3998)
         # 4,000 draws resolve 0.05 / 200 exactly; that is enough.
         assert len(bootstrap_family_pvalues(wide, family, n_boot=3999)) == 200
+        # At BH 0.10 half as many draws resolve the same family.
+        assert len(bootstrap_family_pvalues(wide, family, n_boot=1999, q=0.10)) == 200
 
     def test_a_late_start_keeps_its_own_dates_and_cuts_no_one_else(self):
         # One variant of family A starts 300 days late (a longer warm-up).
@@ -567,8 +569,64 @@ class TestBootstrapFamilyPvalues:
         returns = pd.DataFrame(
             {"a": [np.nan] * 48 + [0.01, 0.02], "b": np.linspace(-0.01, 0.01, 50)}
         )
-        with pytest.raises(ValueError, match="at least 3"):
+        with pytest.raises(ValueError, match="needs at least"):
             bootstrap_family_pvalues(returns, pd.Series({"a": "A", "b": "B"}), n_boot=199)
+
+    def test_a_short_column_alone_in_its_family_is_refused(self):
+        # #67 review: 20 of 1,000 dates, alone in its family, was called real
+        # 19% of the time at 5%. Below 10 blocks of data it is refused.
+        x = np.random.default_rng(0).normal(0, 0.01, (1000, 2))
+        x[:980, 0] = np.nan
+        returns = pd.DataFrame(x, columns=["short", "full"])
+        family = pd.Series({"short": "S", "full": "L"})
+        with pytest.raises(ValueError, match="'short' has 20 non-missing"):
+            bootstrap_family_pvalues(returns, family, n_boot=499)
+        # Exactly 10 blocks (block 20 at 1,000 rows) is accepted.
+        x[:800, 0] = np.nan
+        x[800:, 0] = np.random.default_rng(1).normal(0, 0.01, 200)
+        assert (
+            len(
+                bootstrap_family_pvalues(
+                    pd.DataFrame(x, columns=["short", "full"]), family, n_boot=499
+                )
+            )
+            == 2
+        )
+
+    @pytest.mark.parametrize("bad", [np.inf, -np.inf])
+    def test_an_infinite_value_raises(self, bad):
+        # #67 review: one -inf gave its family p = 1/(n_boot+1).
+        returns = pd.DataFrame(
+            np.random.default_rng(0).normal(0, 0.01, (1000, 3)), columns=["a1", "a2", "b1"]
+        )
+        returns.iloc[10, 0] = bad
+        with pytest.raises(ValueError, match="infinite"):
+            bootstrap_family_pvalues(returns, pd.Series({"a1": "A", "a2": "A", "b1": "B"}))
+
+    def test_batch_size_never_changes_the_result(self):
+        # #67 review: with a short tail block (1,020 rows, block 21) the tail
+        # was drawn once per batch, so the batch size moved the p-values.
+        returns = pd.DataFrame(
+            np.random.default_rng(2).normal(0, 0.01, (1020, 4)), columns=list("wxyz")
+        )
+        family = pd.Series({"w": "A", "x": "A", "y": "B", "z": "B"})
+        runs = [
+            bootstrap_family_pvalues(returns, family, n_boot=299, seed=7, batch_size=b)["pvalue"]
+            for b in (1, 64, 1000)
+        ]
+        pd.testing.assert_series_equal(runs[0], runs[1])
+        pd.testing.assert_series_equal(runs[0], runs[2])
+
+    def test_labels_keep_their_type(self):
+        # #67 review: integer labels came back as strings, and 1 and "1" merged.
+        returns = pd.DataFrame(
+            np.random.default_rng(3).normal(0, 0.01, (500, 3)), columns=["a", "b", "c"]
+        )
+        out = bootstrap_family_pvalues(returns, pd.Series({"a": 1, "b": 10, "c": 1}), n_boot=199)
+        assert sorted(out.index) == [1, 10]
+        assert out.loc[1, "k"] == 2
+        mixed = bootstrap_family_pvalues(returns, pd.Series({"a": 1, "b": "1", "c": 1}), n_boot=199)
+        assert len(mixed) == 2
 
     def test_block_length_rule(self):
         assert block_length_rule(500) == 16

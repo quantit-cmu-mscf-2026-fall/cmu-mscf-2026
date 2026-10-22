@@ -182,6 +182,8 @@ def bootstrap_family_pvalues(
     block_length: int | None = None,
     seed: int | None = 0,
     batch_size: int = 64,
+    q: float = 0.05,
+    min_blocks: int = 10,
 ) -> pd.DataFrame:
     """p-value of each hypothesis's best variant, by a block bootstrap of the maximum.
 
@@ -214,9 +216,16 @@ def bootstrap_family_pvalues(
 
     **Resolution.** A bootstrap p-value can't go below 1 / (n_boot + 1). BH
     across H hypotheses at level q tests its most extreme rank at q / H, so
-    n_boot + 1 must exceed H / q, or the strongest hypotheses can't be told
+    n_boot + 1 must reach H / q, or the strongest hypotheses can't be told
     apart and power collapses silently (Carl measured exactly that). This
-    raises if it doesn't.
+    raises if it doesn't, for the smallest BH level `q` the caller will use.
+
+    **Short columns.** A column with data on only a few blocks' worth of dates
+    is badly calibrated: on fewer than about 10 blocks the studentised t is
+    liberal, and a column that a replication can't score drops out of that
+    replication's maximum but not the observed one. Alone in its family, a
+    20-date column was called real 19% of the time at 5% (#67 review). So
+    every column needs at least `min_blocks` blocks of non-missing values.
 
     Args:
         returns: performance matrix, dates x candidates, higher is better.
@@ -226,7 +235,15 @@ def bootstrap_family_pvalues(
         block_length: circular block length; `block_length_rule` if omitted.
         seed: seed for the resampling.
         batch_size: replications per vectorised pass; memory only, never the
-            result.
+            result (each replication's blocks are drawn in one call, so the
+            random stream doesn't depend on how replications are batched).
+        q: the smallest BH level the p-values will be used at, for the
+            resolution check.
+        min_blocks: blocks of non-missing data every column needs.
+
+    Raises on non-finite values (inf would give its family the smallest
+    possible p-value), on a column with too little data, and on too few
+    replications for `q`. Hypothesis labels keep their type.
 
     Returns:
         DataFrame indexed by hypothesis: `pvalue`, `k` (variants), `best`
@@ -237,26 +254,40 @@ def bootstrap_family_pvalues(
     missing = returns.columns.difference(family.dropna().index)
     if len(missing):
         raise ValueError(f"family is missing for {len(missing)} columns, e.g. {missing[0]!r}")
+    if not 0 < q < 1:
+        raise ValueError("q must be in (0, 1)")
+    values = returns.to_numpy(dtype=np.float64)
+    if np.isinf(values).any():
+        bad = returns.columns[np.isinf(values).any(axis=0)][0]
+        raise ValueError(f"column {bad!r} has an infinite value")
     data = returns.dropna(how="all")
     n_obs = len(data)
-    if (data.notna().sum() < 3).any():
-        raise ValueError("every column needs at least 3 non-missing values")
     block = block_length if block_length is not None else block_length_rule(n_obs)
     if not 1 <= block <= n_obs:
         raise ValueError("block_length must be between 1 and the number of dated rows")
+    counts = data.notna().sum()
+    need = max(3, min_blocks * block)
+    if (counts < need).any():
+        short = counts[counts < need].index[0]
+        raise ValueError(
+            f"column {short!r} has {int(counts[short])} non-missing values; every column "
+            f"needs at least {need} ({min_blocks} blocks of {block})"
+        )
 
     # Lay the columns out family by family, so each family is one slice.
-    labels = family.reindex(data.columns)
-    order = np.argsort(labels.to_numpy().astype(str), kind="stable")
+    # factorize keeps each label's own type (1 and "1" stay apart).
+    codes, uniques = pd.factorize(family.reindex(data.columns), sort=False)
+    order = np.argsort(codes, kind="stable")
     data = data.iloc[:, order]
-    labels = labels.iloc[order]
-    hypotheses, starts_at = np.unique(labels.to_numpy().astype(str), return_index=True)
+    codes = codes[order]
+    starts_at = np.flatnonzero(np.r_[True, codes[1:] != codes[:-1]])
+    hypotheses = uniques[codes[starts_at]]
     n_hyp = len(hypotheses)
     # Carl's condition: 1 / (n_boot + 1) <= q / H, i.e. n_boot + 1 >= H / q.
-    if n_boot + 1 < n_hyp / 0.05:
+    if n_boot + 1 < n_hyp / q:
         raise ValueError(
-            f"n_boot={n_boot} can't resolve BH at 0.05 across {n_hyp} hypotheses; "
-            f"use n_boot >= {int(np.ceil(n_hyp / 0.05)) - 1}"
+            f"n_boot={n_boot} can't resolve BH at {q} across {n_hyp} hypotheses; "
+            f"use n_boot >= {int(np.ceil(n_hyp / q)) - 1}"
         )
 
     x = data.to_numpy(dtype=np.float64)
@@ -284,12 +315,15 @@ def bootstrap_family_pvalues(
     done = 0
     while done < n_boot:
         size = min(batch_size, n_boot - done)
-        starts = rng.integers(0, n_obs, size=(size, n_full))  # rule 1: shared draw
+        # rule 1: one shared draw per replication, full blocks and the short
+        # tail block together, so batching doesn't change the random stream.
+        draws = rng.integers(0, n_obs, size=(size, n_full + (1 if remainder else 0)))
+        starts = draws[:, :n_full]
         s0 = (p0[starts + block] - p0[starts]).sum(axis=1)
         s1 = (p1[starts + block] - p1[starts]).sum(axis=1)
         s2 = (p2[starts + block] - p2[starts]).sum(axis=1)
         if remainder:
-            tail = rng.integers(0, n_obs, size=(size, 1))
+            tail = draws[:, n_full:]
             s0 += (p0[tail + remainder] - p0[tail]).sum(axis=1)
             s1 += (p1[tail + remainder] - p1[tail]).sum(axis=1)
             s2 += (p2[tail + remainder] - p2[tail]).sum(axis=1)
