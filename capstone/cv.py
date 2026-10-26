@@ -20,6 +20,21 @@ folds, or the two are measuring different things.
 Convention: the label at date t is realised over the returns on dates
 t+1 .. t1 (t1 = t + horizon observations), i.e. the half-open interval (t, t1].
 With horizon 1, no two labels share a return, so every weight is 1.
+
+Which splitter:
+
+- `PurgedKFold` when data is short and the model has no memory of time: every
+  date is tested once, and training may use dates on both sides of the test
+  fold, made safe by purging and the embargo.
+- `WalkForward` when the strategy must only ever learn from the past, or to
+  simulate how it would be refitted live: each test window follows its
+  training window, which either expands (all the past) or rolls (a fixed
+  look-back). It uses fewer test dates, and the early windows train on less.
+
+Either way the out-of-fold returns are what go into the performance matrix
+that validation judges (`docs/validation.md`); validation never calls a
+splitter. A strategy with nothing fitted needs neither. PBO's combinatorial
+splits (`pbo.py`) answer a different question and are kept separate.
 """
 
 from __future__ import annotations
@@ -101,6 +116,90 @@ class PurgedKFold:
             in_test[fold] = True
             train = labelled[~(overlaps | embargoed | in_test)]
             yield train, test_dates
+
+
+class WalkForward:
+    """Train only on the past, test on the next window, then step forward.
+
+    The last `n_splits * test_size` labelled dates form `n_splits` consecutive
+    test windows. Each window's training dates end where their labels stop
+    touching the window: a label at t covers (t, t1], so a training label must
+    be realised by the window's first date. That drops the `horizon` dates
+    just before the window, plus `gap` more if asked. Nothing after the test
+    window trains, so no embargo is needed.
+
+    Args:
+        n_splits: number of test windows (>= 1).
+        test_size: labelled dates per test window. Default:
+            n_labelled // (n_splits + 1), so the first window has at least as
+            much history before it as one test window.
+        train_size: None for an expanding window (all eligible past dates), or
+            a rolling window of at most this many labelled dates. Early
+            windows with less history use what exists; set `min_train_size`
+            to require a full window.
+        horizon: label horizon in observations (see module docstring).
+        gap: extra labelled dates dropped between training and test, beyond
+            the purge, for features that look back further than the label.
+        min_train_size: raise if any training window has fewer dates.
+    """
+
+    def __init__(
+        self,
+        n_splits: int = 5,
+        *,
+        test_size: int | None = None,
+        train_size: int | None = None,
+        horizon: int = 1,
+        gap: int = 0,
+        min_train_size: int = 1,
+    ) -> None:
+        for name, value, low in (
+            ("n_splits", n_splits, 1),
+            ("horizon", horizon, 1),
+            ("gap", gap, 0),
+            ("min_train_size", min_train_size, 1),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < low:
+                raise ValueError(f"{name} must be an int >= {low}, got {value!r}")
+        for name, value in (("test_size", test_size), ("train_size", train_size)):
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int) or value < 1
+            ):
+                raise ValueError(f"{name} must be None or an int >= 1, got {value!r}")
+        self.n_splits = n_splits
+        self.test_size = test_size
+        self.train_size = train_size
+        self.horizon = horizon
+        self.gap = gap
+        self.min_train_size = min_train_size
+
+    def split(self, dates: pd.DatetimeIndex) -> Iterator[tuple[pd.DatetimeIndex, pd.DatetimeIndex]]:
+        """Yield `(train_dates, test_dates)` for each window, in chronological order."""
+        dates = pd.DatetimeIndex(dates)
+        if not (dates.is_monotonic_increasing and dates.is_unique):
+            raise ValueError("dates must be unique and increasing")
+        labelled = label_end_times(dates, self.horizon).index
+        n = len(labelled)
+        test_size = self.test_size if self.test_size is not None else n // (self.n_splits + 1)
+        first_test = n - self.n_splits * test_size
+        if test_size < 1 or first_test < 1:
+            raise ValueError(
+                f"too few labelled dates ({n}) for {self.n_splits} windows of {test_size}"
+            )
+        for k in range(self.n_splits):
+            start = first_test + k * test_size
+            # Label i (a position in `labelled`, equal to its position in
+            # `dates`) is realised at position i + horizon; it may train only
+            # if i + horizon <= start, and `gap` drops more before the window.
+            train_end = start - self.horizon - self.gap  # inclusive
+            train_start = 0 if self.train_size is None else max(0, train_end - self.train_size + 1)
+            n_train = train_end - train_start + 1
+            if n_train < self.min_train_size:
+                raise ValueError(
+                    f"window {k} has {max(n_train, 0)} training dates; "
+                    f"min_train_size is {self.min_train_size}"
+                )
+            yield labelled[train_start : train_end + 1], labelled[start : start + test_size]
 
 
 def average_uniqueness(t1: pd.Series, dates: pd.DatetimeIndex) -> pd.Series:
