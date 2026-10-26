@@ -15,8 +15,8 @@ alpha).
 
 | Jira | Task | Blocked by |
 |---|---|---|
-| QUANTIT-48 | Decide on factor data | nothing (a decision; can start now) |
-| QUANTIT-49 | Alpha test against known factors | QUANTIT-48, #28 (QUANTIT-23) |
+| QUANTIT-48 | Decide on factor data | choice documented in open #75; not yet on `main` |
+| QUANTIT-49 | Alpha test against known factors | QUANTIT-48 / #75; #28 (QUANTIT-23) is on `main` |
 | QUANTIT-50 | Incremental value over accepted signals | QUANTIT-49 |
 
 New module: `capstone/spanning.py`, with `tests/test_spanning.py`.

@@ -24,6 +24,9 @@ plugs into the same input; the only shared dependency is the stack below.
 
 ## Where the code is today
 
+Status checked 2026-10-25. A PR merged into another feature branch is not
+available on `main` until that branch lands.
+
 The validation code lands in two ways. For what has merged since this page
 was written, check the
 [pull request list](https://github.com/quantit-cmu-mscf-2026-fall/cmu-mscf-2026/pulls?q=is%3Apr).
@@ -37,12 +40,12 @@ was written, check the
 | #26 | the shared-data loader, `shared_data.py` |
 | #30 | the backtest's first-period fix |
 
-**One PR left in the stack:** #31 (`vincal848/fdr-dependence`), open against
-`main`. It adds `holm`, `benjamini_yekutieli` and `storey_qvalues`, and #32
-merged into it, so it also has the adjusted p-values (`holm_adjusted`,
-`by_adjusted`, `bh_adjusted`), `evidence_profile`, the stages of the calibrated
-validation funnel, and (#59) the Sharpe follow-ups from #29's review. `main`
-is merged into it, so that branch has everything above too.
+**#31 is now on `main`:** it adds `holm`,
+`benjamini_yekutieli`, `estimate_pi0` and `storey_qvalues`. #32 merged into
+it, so the adjusted p-values (`holm_adjusted`, `by_adjusted`, `bh_adjusted`)
+and `evidence_profile` reached `main` through #31, together with #59's Sharpe
+follow-ups. #84 was integrated before #31's squash merge and fixes
+`estimate_pi0(lambda_=0)` and its BH identity when a p-value is exactly zero.
 
 **Separate PRs against `main`.** Each one's reviewer is the person who builds
 on it. Still open when this was written:
@@ -52,23 +55,32 @@ on it. Still open when this was written:
 | #33 | `runlog.read_entries()`, `runlog.trial_count()` | Pin-Hua |
 | #35 | CSCV / probability of backtest overfitting (`pbo.py`) | Pin-Hua |
 
+Other validation work is implemented in open PRs, rather than available on
+`main`: local FDR (#54), haircut Sharpe (#65), and FF5 plus momentum data
+(#75). The proposed framework and its implementations form the stack
+**#50 -> #51 -> #67**: framework docs, search-adjusted FDR, then bootstrap
+family p-values and the calibration harness (#68 merged into #67). Their
+methods and thresholds are still under review; no funnel threshold values
+are registered. Check each PR's current base before building on that stack.
+
 **Which branch to start from:**
 
-- Your work needs only what's on `main` (`make_return_matrix`, `sharpe_test`,
-  `cv.py`, `shared_data.py`): branch from `origin/main`.
-- It uses #31's multiple testing or the adjusted p-values: branch from
-  `origin/vincal848/fdr-dependence` and set your PR's base to that branch.
-  When #31 merges, GitHub moves your PR's base to `main`. #31 is
-  squash-merged, so your branch may then show conflicts that aren't real:
-  merge `origin/main` into it, and ask for help if git can't resolve them.
+- New validation work, including #31's multiple testing and adjusted
+  p-values, branches from `origin/main`; it now has `make_return_matrix`,
+  `sharpe_test`, `cv.py` and `shared_data.py` together.
+- Existing branches based on #31 should target `main`. #31 was
+  squash-merged, so merge `origin/main` into the branch and resolve any
+  history-related conflicts, keeping the lambda-zero fix and both sides'
+  intended changes. Check the resulting diff before pushing. The #50 ->
+  #51 -> #67 stack keeps its internal bases until its author rebases it.
 
 Name branches `<name>/<topic>`, and put the Jira key in the PR title (for
 example `QUANTIT-37: stationary bootstrap resampler`).
 
 ## The contract, in code
 
-Everything below is on `vincal848/fdr-dependence` (#31), and on `main` once
-#31 merges; the harness and Sharpe code (#28) is on `main` already.
+Everything in the reuse table below is on `main` after #31's merge. The
+ledger reader `trial_count` is still a separate, open PR (#33).
 
 **Input.** Every method takes a performance matrix: a `pd.DataFrame`, dates x
 candidates, one per-period series per candidate, higher is better. Methods

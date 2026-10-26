@@ -16,7 +16,7 @@ workstream provides, and the acceptance gate depends on it.
 
 | Jira | Task | Blocked by |
 |---|---|---|
-| QUANTIT-37 | Stationary bootstrap resampler | #28 (QUANTIT-23) |
+| QUANTIT-37 | Stationary bootstrap resampler | nothing: #28 (QUANTIT-23) is on `main` |
 | QUANTIT-38 | Block-length selection | QUANTIT-37 |
 | QUANTIT-39 | Bootstrap Sharpe confidence intervals | QUANTIT-37, 38 |
 | QUANTIT-40 | White's Reality Check | QUANTIT-37 |
@@ -25,6 +25,12 @@ workstream provides, and the acceptance gate depends on it.
 
 New modules: `capstone/bootstrap.py` and `capstone/snooping.py`, with
 `tests/test_bootstrap.py` and `tests/test_snooping.py`.
+
+#67 implements the family-maximum bootstrap in `capstone/search_fdr.py`,
+adapted from Carl's branch, and remains open on top of #51 and #50. It uses
+circular blocks; it does not complete the general stationary resampler or
+the snooping tests in this brief. Carl's review keeps the stationary-bootstrap
+and block-length improvements as follow-up work.
 
 ## Design notes
 

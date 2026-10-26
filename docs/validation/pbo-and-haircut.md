@@ -18,7 +18,7 @@ robustness and final-decision stages of the calibrated validation funnel in
 | QUANTIT-46 | Review PR #35 (CSCV / PBO) | nothing |
 | QUANTIT-12 | Check the PBO statistic against the paper (in #35) | nothing |
 | QUANTIT-47 | PBO calibration tests on `make_return_matrix`, and docs | #35, #28 |
-| QUANTIT-51 | Harvey–Liu haircut Sharpe | #32 (`holm_adjusted`, `by_adjusted`) |
+| QUANTIT-51 | Harvey–Liu haircut Sharpe (implemented in open #65) | nothing: #31, including #32's adjusted p-values, is on `main` |
 | QUANTIT-52 | Use the ledger's trial count in the haircut | QUANTIT-51, #33 |
 
 You're the requested reviewer on **#33** (the ledger reader your haircut
@@ -85,7 +85,12 @@ So:
 - Watch the number of combinations: C(16, 8) = 12,870 splits. Keep
   `n_blocks` modest in tests.
 
-## Haircut Sharpe
+## Haircut Sharpe: implemented in open PR #65
+
+#65 (`pinhua/pbo-haircut`) contains `haircut_sharpe` and now targets `main`
+after #31's merge. Its branch still needs to incorporate the new base. The
+adjusted p-values originated in #32 and reached `main` through #31. The design notes below
+describe the work, rather than a claim that it is already on `main`.
 
 Harvey & Liu (2015), "Backtesting", *Journal of Portfolio Management*. Turn
 each Sharpe into a p-value, adjust it for the number of trials, and convert
