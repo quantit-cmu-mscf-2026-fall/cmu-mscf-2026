@@ -62,19 +62,61 @@ Every correction depends on how many candidates were tried. That number comes
 from the run ledger (`capstone.runlog`), not from an argument someone typed:
 log every trial before looking at its result.
 
+## Graded evidence, not one yes/no
+
+A candidate is not "real" because one procedure said so. Every correction here
+also returns a graded score, the level at which it would first call the
+candidate real, and `evaluate.evidence_profile` puts them side by side:
+
+| Column | Level at which it is called real | Valid when |
+|---|---|---|
+| `holm` | family-wise error (any false call) | any dependence |
+| `by` | false-discovery rate | any dependence |
+| `bh` | false-discovery rate | positive dependence: one-sided p-values of positively correlated candidates |
+| `q` (Storey) | estimated false-discovery rate | independent candidates only |
+
+Lower is stronger in every column. Feed it one-sided p-values
+(`sharpe_test(...).pvalue_greater`): only positive Sharpe ratios are
+discoveries, and one-sided tests are the case BH's guarantee covers. Never
+decide on `q` for correlated candidates; the share-of-nulls estimate behind it
+collapses when candidates move together, and it calls false discoveries more
+than twice as often as BH does (`tests/test_evaluate.py`).
+
+## A staged funnel
+
+Strictness is spent where a mistake costs money, not at the first look. Loose
+early stages are safe only because later ones look at data the earlier ones
+never touched.
+
+| Stage | Question | Strictness |
+|---|---|---|
+| 1. Screen | Worth a closer look? | Loose and graded: `bh` or local FDR around 0.10-0.20 |
+| 2. Robustness | Does it survive other periods, lags, costs and cross-validation? Is the search overfit? | Medium |
+| 3. Incremental value | Does it add anything beyond known factors and signals already held? | Medium |
+| 4. Final decision | Allocate capital? | Strict: deflated or haircut Sharpe with the full ledger trial count, on a holdout looked at once |
+| 5. Incubation | Does it work live? | Small live or paper capital |
+
+Every stage's score and threshold is fixed before the candidates are scored.
+Choosing the procedure or threshold after seeing results is multiple testing
+of its own. Thresholds are tuned on simulated candidate sets to a chosen ratio
+of missed discoveries to false ones (Harvey & Liu 2020), not left at textbook
+defaults.
+
 ## What exists
 
 | Module | Methods | Status |
 |---|---|---|
 | `synth`, `backtest` | `make_return_matrix`, `candidate_returns` | done |
 | `evaluate` | `sharpe_variance` / `sharpe_test` (normal, non-normal, autocorrelation-robust), PSR, MinTRL, implied independent trials | done |
-| `evaluate` | Holm, Benjamini–Yekutieli, Storey q-values | planned |
+| `evaluate` | `holm`, `benjamini_yekutieli`, `estimate_pi0`, `storey_qvalues`; adjusted p-values and `evidence_profile`; one-sided `pvalue_greater` | done |
+| `evaluate` | local false-discovery rate and empirical null (Efron): a per-candidate probability of being real that allows for correlation | planned |
 | `bootstrap` | stationary bootstrap, block-length selection | planned |
 | `snooping` | White's Reality Check, Romano–Wolf step-down | planned |
 | `cv` | purged k-fold with embargo (from the Alpha-GPT work), walk-forward | planned |
 | `pbo` | CSCV / probability of backtest overfitting | planned |
+| `spanning` | incremental value over known factors and accepted signals | planned |
 | `evaluate` | Harvey–Liu haircut Sharpe | planned |
-| `gate` | pre-registered acceptance decision, trial count from the ledger | planned |
+| `gate` | staged, pre-registered scorecard; trial count from the ledger; holdout looked at once | planned |
 
 Already in `evaluate`: `benjamini_hochberg`, `bonferroni`,
 `deflated_sharpe_ratio`, `expected_max_sharpe`, and `false_discovery_rate` /
