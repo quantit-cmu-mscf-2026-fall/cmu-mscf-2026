@@ -82,6 +82,32 @@ def test_lookahead_discrimination():
     assert foresight_mean > 20 * abs(contemporaneous_mean)
 
 
+def _constant_book(n_dates: int = 80) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Long A / short B every day, on flat prices: the only P&L is trading cost."""
+    dates = pd.bdate_range("2020-01-01", periods=n_dates)
+    signal = pd.DataFrame({"A": 1.0, "B": -1.0}, index=dates)
+    returns = pd.DataFrame(0.0, index=dates, columns=["A", "B"])
+    return signal, returns
+
+
+def test_first_period_is_nan_not_a_zero_return():
+    # Nothing is held on the first date, so it is not a period with a return.
+    signal, returns = _constant_book()
+    strategy = run_backtest(signal, returns)
+    assert np.isnan(strategy.iloc[0])
+    assert not strategy.iloc[1:].isna().any()
+    assert summarize(strategy).n_obs == len(signal) - 1
+
+
+def test_building_the_book_is_charged():
+    # Opening a gross-1.0 book is 1.0 of turnover, paid once, when the position
+    # is first held; holding it unchanged costs nothing after that.
+    signal, returns = _constant_book()
+    strategy = run_backtest(signal, returns, cost_bps=100.0)
+    assert strategy.iloc[1] == pytest.approx(-0.01)
+    assert (strategy.iloc[2:] == 0.0).all()
+
+
 def test_summarize_short_series_raises():
     returns = pd.Series(np.random.default_rng(0).standard_normal(30) * 0.01)
     with pytest.raises(ValueError):

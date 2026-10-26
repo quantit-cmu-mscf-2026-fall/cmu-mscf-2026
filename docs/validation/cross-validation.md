@@ -19,7 +19,7 @@ the matrix. Validation methods never call strategy code or CV splitters.
 | Jira | Task | Blocked by |
 |---|---|---|
 | QUANTIT-43 | Review PR #34 (your `cv.py`, brought to `main`) | done: #34 is on `main` |
-| QUANTIT-44 | Purged k-fold: leakage tests on the performance matrix | nothing, but needs `cv.py` (`main`) and `make_return_matrix` (#28, on the stack) together; see below |
+| QUANTIT-44 | Purged k-fold: leakage tests on the performance matrix | nothing: `cv.py` and `make_return_matrix` are both on `main` |
 | QUANTIT-45 | Walk-forward splitter and CV docs | nothing (`cv.py` is on `main`) |
 
 ## Most of this already exists: `cv.py` on `main`
@@ -35,7 +35,7 @@ unchanged and with you as the commit author. It has:
 - `average_uniqueness(t1, dates)` sample weights (López de Prado 2018, ch. 4)
 
 **Checked 2026-09-27, and again in the review of this brief.** The full suite
-passes on `main` with #34, and also on the validation stack (#32).
+passes on `main` with #34, and also on the validation stack (#32 at the time).
 `PurgedKFold.split` works directly on the index of a `make_return_matrix`
 matrix (a `DatetimeIndex`). With 5 folds on 1,000 dates and horizons of 1, 5
 and 21, no training label's return window, (t, t1], overlaps any test label's
@@ -53,22 +53,14 @@ So:
 
 ## Getting `cv.py` and `make_return_matrix` together
 
-Until the validation stack reaches `main`, they live on different branches:
-`cv.py` is on `main`, and `make_return_matrix` is on the stack (#28, and so on
-`vincal848/graded-evidence`). QUANTIT-44 needs both, and so does the optional
-null test below. Branch from `origin/vincal848/graded-evidence` and merge
-`main` into it:
+Both are on `main` now (`cv.py` from #34, `make_return_matrix` from #28), so
+QUANTIT-44 and the optional null test below branch from `main` with no merging:
 
 ```
-git switch -c laurenli/<topic> origin/vincal848/graded-evidence
-git merge origin/main
+git switch -c laurenli/<topic> origin/main
 ```
 
-If git reports a conflict in `tests/test_synth.py`, both sides added tests at
-the end of the file; keep both. Set the PR's base to
-`vincal848/graded-evidence`, and say in the description that its diff also
-shows `main`'s changes until the stack is merged. See
-[handoff.md](handoff.md) for the general rule.
+See [handoff.md](handoff.md) if your work also needs #31's multiple testing.
 
 When checking leakage yourself, use the same convention as `cv.py`: a label at
 date t covers the returns in (t, t1], so a training label ending exactly on the
