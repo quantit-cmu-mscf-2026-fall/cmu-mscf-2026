@@ -46,6 +46,7 @@ Full workflow, including what a reviewer is actually looking for:
 | `capstone/data.py` | Loads public factor and price data, with an on-disk cache |
 | `capstone/sample_data.py` | Six-month synthetic panel — work before WRDS access arrives |
 | `capstone/wrds_loader.py` | CRSP prices through your own CMU credentials |
+| `capstone/shared_data.py` | The team's shared CRSP/Compustat files, synced, verified and loaded; missing-value rules |
 | `capstone/synth.py` | Generates panels whose true signal set is known by construction |
 | `capstone/backtest.py` | Cross-sectional backtest: weights → returns → summary statistics |
 | `capstone/evaluate.py` | Multiple-testing corrections and the deflated Sharpe ratio |
@@ -86,16 +87,21 @@ ranking.
 
 ## Data sources
 
-All public. No account, no licence, no credentials.
+The sources below are public: no account, no licence, no credentials. The team's
+licensed CRSP and Compustat data is shared separately, never through this repo:
+see **`docs/shared_data.md`**.
 
 | Source | Contents | Notes |
 |---|---|---|
 | Ken French Data Library | Daily/monthly factor returns, industry and characteristic portfolios | Fetched over HTTPS, no key |
 | Open Source Asset Pricing (OSAP) | ~200 published cross-sectional predictors | Large download; see `data.py` docstring |
 
-For single-name prices there are two routes, and the full picture is in
-**`docs/data_sources.md`** (what we can redistribute vs what you fetch yourself):
+For single-name prices, the full picture is in **`docs/data_sources.md`** (what
+we can redistribute vs what you fetch yourself):
 
+- **Shared team data** — CRSP daily for every S&P 500 member 1990–2025 plus
+  Compustat, pulled once and synced to each teammate through a shared Drive
+  folder. Load it with `capstone.shared_data`; see **`docs/shared_data.md`**.
 - **CRSP via WRDS** — CMU subscribes, so this is already yours and it is the
   right substrate: delisted names included, so a backtest is not quietly
   measuring survivorship. Loader is `capstone.wrds_loader`; setup and the CRSP

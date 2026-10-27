@@ -297,7 +297,7 @@ Recorded 2026-10-05 and 2026-10-06 from the review of #50; updated 2026-10-21.
 | Q1 | #37 and #31 both add BH and BY | Keep #31's functions. #37 is closed; it returns later as a thin wrapper over `evaluate`, bringing its Newey–West p-values from returns |
 | Q2 | Stage-1 gate when families exist | Carl's bootstrap max + BH. Local FDR (#54) is a graded score, and replaces the gate only if the harness shows a real power gain at our base rate |
 | Q3 | Stage-4 gate: deflated Sharpe, Romano–Wolf or SPA | **Proposed from calibration:** BH across the survivors' holdout p-values; the deflated Sharpe becomes a graded score (#68) |
-| Q4 | Where the search is recorded | The factor store, for lineage; the ledger, for trials with computed performance; `shown_to_agent` added in #49 |
+| Q4 | Where the search is recorded | The factor store, for lineage; the ledger, for trials with computed performance. **Not implemented yet:** a per-trial record of whether a result was shown to the agent. Results reach the agent through the deepen scorer (#79), which records no such exposure; that audit is a follow-up |
 | Q5 | Calibration target | A flat 10% end-to-end FDR; the baseline (BH at 10% on the bootstrap family p-values, #67) decides until the funnel beats it |
 | — | Where stage 2's fresh data comes from | **Proposed from calibration:** no separate period; stage 2 reports graded robustness checks and the holdout confirms (#68) |
 | — | Stage 3's gate is the spanning alpha test | **To confirm** with its owner |

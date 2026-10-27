@@ -156,7 +156,9 @@ estimated effective spread from CRSP times turnover, fixed before scoring.
   about half as much after publication (McLean & Pontiff 2016). Adding value
   beyond this set is the test of novelty.
 
-The anomaly portfolios are monthly, so stage 3 runs on monthly returns.
+Stage 3's frequency is an open decision for its owner: the anomaly portfolios
+are monthly, while #75 proposes daily factors to match the candidate returns.
+α₃ is chosen and calibrated only once the frequency is settled.
 
 **Calibration range for the share of real candidates.** Start at 0 to 5% for
 agent-generated candidates. Harvey & Liu (2020) use up to 20% for a curated
