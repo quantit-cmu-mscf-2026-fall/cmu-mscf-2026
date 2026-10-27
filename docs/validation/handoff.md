@@ -181,8 +181,9 @@ looked at once, at the final decision.
   `expected_max_sharpe` and `deflated_sharpe_ratio` count independent trials
   and accept a fractional count from `implied_independent_trials` (Bailey &
   López de Prado's rough correction). If you pass one, report the ledger count
-  next to it, and use the full ledger count for the final decision
-  (`docs/validation.md`, stage 4).
+  next to it. At stage 4 the deflated Sharpe is a graded score, not the gate:
+  the gate is BH across the survivors' holdout p-values
+  ([framework.md](framework.md)).
 
 ## Trial counts and the ledger
 
