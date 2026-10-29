@@ -8,6 +8,8 @@ capstone. The humans steer; you build. These rules are not optional.
 - Tests: `pytest -q -m "not network"` — must be green.
 - Lint: `ruff check . && ruff format .` — must be clean.
 - New behavior ships with a test that fails without the change.
+- Review: run the `review-pr` skill on your branch and fix every Important
+  finding (`REVIEW.md`).
 
 ## The run ledger is sacred
 
