@@ -38,4 +38,6 @@ Input: a PR number, or nothing to review the current branch against `main`.
 
 If this would be the fourth round on the PR, say so and suggest discussing
 the approach rather than reviewing lines again (REVIEW.md, "When a review
-stops").
+stops"). A round is one submitted review, from anyone, that requested changes
+or commented: count the `CHANGES_REQUESTED` and `COMMENTED` entries in
+`gh pr view <n> --json reviews`.
