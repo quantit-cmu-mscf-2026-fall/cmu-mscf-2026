@@ -558,6 +558,14 @@ class TestPi0:
     def test_lambda_zero_is_one(self):
         assert estimate_pi0(_uniform_pvalues(100), lambda_=0.0) == 1.0
 
+    def test_lambda_zero_gives_one_even_with_p_of_exactly_zero(self):
+        # sharpe_test's p-value underflows to 0.0 for a strong series.
+        p = pd.Series([0.0, 0.01, 0.5])
+        assert estimate_pi0(p, lambda_=0.0) == 1.0
+        pd.testing.assert_series_equal(
+            storey_qvalues(p, lambda_=0.0), bh_adjusted(p), check_names=False
+        )
+
     def test_is_capped_at_one(self):
         assert estimate_pi0(pd.Series([0.9, 0.95, 0.99]), lambda_=0.5) == 1.0
 
