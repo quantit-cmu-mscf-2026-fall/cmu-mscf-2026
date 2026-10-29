@@ -46,36 +46,59 @@ def to_weights(signal: pd.DataFrame, *, demean: bool = True, gross: float = 1.0)
     return values.mul(scale, axis=0)
 
 
-def backtest_components(
+def backtest_frame(
     signal: pd.DataFrame,
     returns: pd.DataFrame,
     *,
-    cost_bps: float,
+    cost_bps: float | pd.DataFrame,
     demean: bool,
     gross: float,
-) -> tuple[pd.Series, pd.Series]:
-    """Net returns and turnover for one signal: the core of `run_backtest`, `sweep`
-    and `candidate_returns`.
+    hold: int = 1,
+) -> pd.DataFrame:
+    """Per-period net and gross returns, cost and turnover for one signal.
 
     Aligns signal/returns on their common index and columns, shifts positions
-    one period so `signal.loc[t]` earns `returns.loc[t+1]`, and returns both
-    the net strategy return series and the per-period turnover series (the
-    latter is not part of `run_backtest`'s public return value, but `sweep`
-    needs it to populate `BacktestSummary.turnover`).
+    one period so `signal.loc[t]` earns `returns.loc[t+1]`.
+
+    `cost_bps` is the cost of trading one unit of weight, in basis points:
+    one rate for every asset and date, or a dates x assets table (a stock's
+    half quoted spread that day, say). A trade made at date t's close pays
+    date t's rate. An asset with no rate that day pays that day's median.
+
+    `hold` rebalances every `hold`-th period, counted from the first date,
+    and holds the book in between; `hold=1` rebalances every period. Between
+    rebalances the weights are held fixed, so the trades that would keep them
+    fixed as prices drift are not charged.
+
+    Returns a frame with columns `net`, `gross`, `cost` and `turnover`.
     """
+    if hold < 1:
+        raise ValueError("hold must be at least 1 period")
     dates = signal.index.intersection(returns.index)
     assets = signal.columns.intersection(returns.columns)
     signal = signal.loc[dates, assets]
     returns = returns.loc[dates, assets]
 
     weights = to_weights(signal, demean=demean, gross=gross)
+    no_signal = signal.isna().all(axis=1)
+    if hold > 1:
+        rebalance = pd.Series(np.arange(len(dates)) % hold == 0, index=dates)
+        weights = weights.where(rebalance, axis=0).ffill()
+        no_signal = no_signal.astype(float).where(rebalance).ffill().astype(bool)
     positions = weights.shift(1)
 
     # Diff against a flat book, not against the NaN first row: otherwise the
     # turnover of building the first position is NaN and `.sum` counts it as 0.
-    turnover = positions.fillna(0.0).diff().abs().sum(axis=1)
+    trades = positions.fillna(0.0).diff().abs()
+    turnover = trades.sum(axis=1)
     gross_returns = (positions * returns).sum(axis=1)
-    costs = cost_bps / 10000.0 * turnover
+    if isinstance(cost_bps, pd.DataFrame):
+        rate = cost_bps.reindex(index=dates, columns=assets) / 10000.0
+        rate = rate.where(rate.notna(), rate.median(axis=1), axis=0)
+        # positions[t] - positions[t-1] was traded at date t-1's close.
+        costs = (trades * rate.shift(1)).sum(axis=1)
+    else:
+        costs = cost_bps / 10000.0 * turnover
     net_returns = gross_returns - costs
     # A date whose position comes from no signal at all, and that trades
     # nothing, is not a period with a return: NaN, rather than a zero that
@@ -85,11 +108,29 @@ def backtest_components(
     # weight (e.g. a timing overlay gone flat) is a genuine 0.0 day. The shift
     # matches `positions`: the date-t position comes from the date t-1 signal.
     # A date that only closes the book is kept, since its cost is real.
-    no_signal = signal.isna().all(axis=1).shift(1, fill_value=True)
-    idle = no_signal & (turnover == 0)
-    net_returns[idle] = np.nan
-    turnover[idle] = np.nan
-    return net_returns, turnover
+    idle = no_signal.shift(1, fill_value=True) & (turnover == 0)
+    frame = pd.DataFrame(
+        {"net": net_returns, "gross": gross_returns, "cost": costs, "turnover": turnover}
+    )
+    frame.loc[idle] = np.nan
+    return frame
+
+
+def backtest_components(
+    signal: pd.DataFrame,
+    returns: pd.DataFrame,
+    *,
+    cost_bps: float | pd.DataFrame,
+    demean: bool,
+    gross: float,
+    hold: int = 1,
+) -> tuple[pd.Series, pd.Series]:
+    """Net returns and turnover for one signal: the core of `run_backtest`, `sweep`
+    and `candidate_returns` (`backtest_frame`'s `net` and `turnover`)."""
+    frame = backtest_frame(
+        signal, returns, cost_bps=cost_bps, demean=demean, gross=gross, hold=hold
+    )
+    return frame["net"], frame["turnover"]
 
 
 def run_backtest(
