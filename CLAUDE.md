@@ -52,6 +52,8 @@ capstone. The humans steer; you build. These rules are not optional.
 
 ## Validation
 
+- Picking up a validation task? Read `docs/validation/handoff.md` and your
+  workstream's brief in that folder first.
 - Judge candidates with the shared methods listed in `docs/validation.md`;
   don't hand-roll a correction or a significance test inside a strategy.
 - Hand them a performance matrix: dates x candidates, one per-period series
