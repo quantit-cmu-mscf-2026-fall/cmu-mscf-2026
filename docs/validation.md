@@ -62,6 +62,65 @@ Every correction depends on how many candidates were tried. That number comes
 from the run ledger (`capstone.runlog`), not from an argument someone typed:
 log every trial before looking at its result.
 
+## White's Reality Check
+
+`snooping.white_reality_check` is an early, search-level gate: one p-value for
+the whole family of candidates, before any candidate is judged on its own.
+
+```text
+AI-generated candidate signals
+  -> backtest / candidate return matrix
+  -> White's Reality Check
+  -> factor-adjusted alpha / robust Sharpe / FDR / stability / other candidate-level validation
+```
+
+**Hypothesis.** H0: `max_k E[f_k] <= 0`, where `f_k` is candidate `k`'s
+performance over the benchmark: no candidate in the searched family truly
+outperforms the benchmark. Rejecting H0 is evidence that at least one candidate
+genuinely beats the benchmark after accounting for data snooping. The family
+must be every candidate searched; one left out is a trial the test does not pay
+for.
+
+**Inputs and defaults.**
+
+| Argument | Meaning | Default |
+|---|---|---|
+| `performance` | dates x candidates DataFrame, no NaN or infinite values | required |
+| `benchmark` | a scalar, or a Series on exactly the index of `performance` | `0.0` |
+| `mean_block` | expected stationary-bootstrap block length | `10` trading days |
+| `n_boot` | bootstrap replicates | `1000` |
+| `seed` | bootstrap RNG seed | `0` |
+
+The significance level is 0.05. It is the convention for reading the result, not
+an argument: the function returns the p-value and the caller compares it.
+
+**Outputs.** A `RealityCheckResult` with `statistic` (the observed V), `pvalue`,
+`best_candidate`, `mean_relative_performance` (per candidate) and
+`bootstrap_statistics` (the empirical null distribution).
+
+**Method.**
+
+1. Relative performance is candidate return minus benchmark return:
+   `f[k,t] = candidate_return[k,t] - benchmark[t]`.
+2. The observed statistic is `V = max_k sqrt(n) * mean(f_k)`.
+3. Recentre each candidate under the null:
+   `f_centered[k,t] = f[k,t] - mean(f_k)`.
+4. Resample the dates with the Politis–Romano stationary bootstrap, using the
+   same resampled dates for every candidate column.
+5. In each replicate, recompute all candidate means and take the maximum again,
+   `V_boot = max_k sqrt(n) * bootstrap_mean_k`. These maxima are the empirical
+   null distribution; no Normal approximation is assumed.
+6. `p = (1 + count(V_boot >= V_obs)) / (n_boot + 1)`.
+
+**Choosing `mean_block`.** `mean_block=10` is a practical default for the current
+daily-return pipeline, not an automatically selected optimal block length.
+Null-calibration tests show that autocorrelated data are more sensitive to block
+length. Automatic block-length selection is still pending and is separate future
+work.
+
+**Evidence.** Null calibration is tested under IID returns, cross-candidate
+correlation, AR(1), fat tails and GARCH; power is tested on the same cases with
+planted positive signals (`tests/test_snooping.py`).
 **What counts as a trial:** every candidate whose performance anyone, or any
 agent, has seen. That includes parameter variants, candidates that were
 discarded, and every iteration inside an agent's search. An idea that never
@@ -177,8 +236,10 @@ backtest upward, and no method in this document can correct it.
 | `evaluate` | `sharpe_variance` / `sharpe_test` (normal, non-normal, autocorrelation-robust), PSR, MinTRL, implied independent trials | done |
 | `evaluate` | `holm`, `benjamini_yekutieli`, `estimate_pi0`, `storey_qvalues`; adjusted p-values and `evidence_profile`; one-sided `pvalue_greater` | done |
 | `evaluate` | local false-discovery rate and empirical null (Efron): a per-candidate probability of being real that allows for correlation | planned |
-| `bootstrap` | stationary bootstrap, block-length selection | planned |
-| `snooping` | White's Reality Check, Romano–Wolf step-down | planned |
+| `bootstrap` | stationary bootstrap index generation | done |
+| `bootstrap` | automatic block-length selection | pending |
+| `snooping` | White's Reality Check | done |
+| `snooping` | Romano–Wolf step-down | planned |
 | `cv` | purged k-fold with embargo (from the Alpha-GPT work), walk-forward | planned |
 | `pbo` | CSCV / probability of backtest overfitting | planned |
 | `spanning` | incremental value over known factors and accepted signals | planned |
