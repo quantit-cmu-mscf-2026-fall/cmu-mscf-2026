@@ -89,7 +89,8 @@ def log_run(
         params: configuration that defines the trial (lookbacks, thresholds).
         metrics: outcome numbers (sharpe, hit rate) — the tested quantity.
         seed: RNG seed, so a run can be reproduced exactly.
-        tags: free-form labels for later filtering.
+        tags: free-form labels for later filtering. A bare string is one tag,
+            stored as a one-item list, so `trial_count`'s tag filters see it.
         notes: anything the fields above cannot express.
 
     Returns:
@@ -104,7 +105,7 @@ def log_run(
         "seed": seed,
         "params": params or {},
         "metrics": metrics or {},
-        "tags": tags or [],
+        "tags": [tags] if isinstance(tags, str) else list(tags or []),
         "notes": notes,
     }
     ledger_dir = _ledger_dir()
@@ -117,6 +118,21 @@ def log_run(
     with path.open("a", encoding="utf-8") as fh:
         fh.write(lead + json.dumps(entry) + "\n")
     return entry
+
+
+def _tag_set(tags) -> set[str]:
+    """An entry's tags as a set. A bare string is one tag, not a set of letters.
+
+    `log_run` stores a list, but an entry written with `tags="synthetic"` before
+    it normalised strings holds the string itself, and `set("synthetic")` would
+    match no tag filter: an `include_tags` count would silently drop the entry
+    and under-count the family.
+    """
+    if not tags:
+        return set()
+    if isinstance(tags, str):
+        return {tags}
+    return set(tags)
 
 
 def _ends_mid_line(path: Path) -> bool:
@@ -207,10 +223,10 @@ def trial_count(
         entries = [entry for entry in entries if entry.get("name") == name]
     if include_tags is not None:
         wanted = set(include_tags)
-        entries = [e for e in entries if wanted & set(e.get("tags") or ())]
+        entries = [e for e in entries if wanted & _tag_set(e.get("tags"))]
     if exclude_tags is not None:
         unwanted = set(exclude_tags)
-        entries = [e for e in entries if not unwanted & set(e.get("tags") or ())]
+        entries = [e for e in entries if not unwanted & _tag_set(e.get("tags"))]
     if not entries:
         where = ledger_path()
         scope = f"named {name!r} " if name is not None else ""
