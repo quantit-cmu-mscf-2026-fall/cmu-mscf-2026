@@ -177,6 +177,32 @@ def test_a_bare_string_tag_filter_is_refused(tmp_path, monkeypatch):
     assert runlog.trial_count(exclude_tags=["synthetic"]) == 1
 
 
+def test_a_bare_string_tag_is_one_tag_when_logged(tmp_path, monkeypatch):
+    # The other side of the filter check above: log_run(tags="strategy") used
+    # to store the string, which set() splits into letters, so include_tags
+    # dropped the entry (an under-count) and exclude_tags kept it.
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    entry = runlog.log_run("pbo-calibration", tags="synthetic")
+    runlog.log_run("mom-sweep", tags="strategy")
+    runlog.log_run("carry-sweep", tags=["strategy"])
+
+    assert entry["tags"] == ["synthetic"]
+    assert runlog.read_entries()[0]["tags"] == ["synthetic"]
+    assert runlog.trial_count(include_tags=["strategy"]) == 2
+    assert runlog.trial_count(exclude_tags=["synthetic"]) == 2
+
+
+def test_a_string_tag_already_in_the_ledger_still_filters(tmp_path, monkeypatch):
+    # Entries written before log_run normalised strings hold the bare string.
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    with (tmp_path / runlog.LEDGER_FILENAME).open("w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"name": "old-calibration", "tags": "synthetic"}) + "\n")
+        fh.write(json.dumps({"name": "old-sweep", "tags": "strategy"}) + "\n")
+
+    assert runlog.trial_count(include_tags=["strategy"]) == 1
+    assert runlog.trial_count(exclude_tags=["synthetic"]) == 1
+
+
 def test_blank_lines_are_not_trials(tmp_path, monkeypatch):
     monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
     runlog.log_run("alpha")
