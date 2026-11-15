@@ -47,7 +47,7 @@ def best_by_family(values: pd.Series, family: pd.Series) -> pd.Series:
     labels = family.reindex(values.index)
     present = values.dropna()
     best = present.groupby(labels.reindex(present.index)).idxmax()
-    return best.reindex(pd.unique(labels.dropna()))
+    return best.reindex(pd.unique(family.dropna()))
 
 
 def _one_sided_p(returns: pd.DataFrame) -> pd.Series:

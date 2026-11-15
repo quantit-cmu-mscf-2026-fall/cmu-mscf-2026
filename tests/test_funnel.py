@@ -122,6 +122,17 @@ class TestPandas3Safety:
         assert pd.isna(best["B"])
         assert list(best.index) == ["A", "B"]
 
+    def test_best_by_family_keeps_a_family_absent_from_values(self):
+        # Callers pass filtered values (funnel's naive stack does); every
+        # family in `family` still gets a row, in `family`'s order.
+        values = pd.Series({"b1": 0.2, "a1": 0.1})
+        family = pd.Series({"a1": "A", "b1": "B", "c1": "C"})
+        best = funnel.best_by_family(values, family)
+        assert list(best.index) == ["A", "B", "C"]
+        assert best["A"] == "a1"
+        assert best["B"] == "b1"
+        assert pd.isna(best["C"])
+
     def test_a_null_set_where_nothing_passes_the_naive_stack(self):
         returns, family = _dated(seed=3)
         with warnings.catch_warnings():
