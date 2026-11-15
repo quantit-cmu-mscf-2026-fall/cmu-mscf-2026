@@ -158,6 +158,17 @@ class GateResult:
     accepted: tuple
     loadings: pd.DataFrame = dataclasses.field(default_factory=pd.DataFrame)
 
+    def __post_init__(self) -> None:
+        # `read_report` takes the accepted families from the scorecard, in row
+        # order; refuse a result that would not read back the same.
+        on_card = tuple(self.scorecard.index[self.scorecard["accepted"]])
+        if tuple(self.accepted) != on_card:
+            raise ValueError(
+                f"accepted {tuple(self.accepted)} disagrees with the scorecard's "
+                f"accepted rows {on_card} (same families, in scorecard order)"
+            )
+        object.__setattr__(self, "accepted", on_card)
+
     @property
     def expected_means(self) -> dict:
         """Per accepted family, the per-period mean a live check should expect."""

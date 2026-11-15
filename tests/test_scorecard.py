@@ -157,6 +157,13 @@ class TestReport:
         assert back.header.trial_scope == result.header.trial_scope
         pd.testing.assert_frame_equal(back.loadings, result.loadings)
 
+    @pytest.mark.parametrize("accepted", [("h1", "h0"), ("h0", "h2")])
+    def test_a_result_whose_accepted_disagrees_with_its_scorecard_is_refused(self, accepted):
+        # Caught when the result is built, not when the report is read at deploy.
+        good = _result(accepted=("h0", "h1"))
+        with pytest.raises(ValueError, match="accepted"):
+            dataclasses.replace(good, accepted=accepted)
+
     def test_an_accepted_list_that_disagrees_with_the_scorecard_is_refused(self, tmp_path):
         path = tmp_path / "gate_report.json"
         write_report(_result(accepted=("h0",)), path)
