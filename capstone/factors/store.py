@@ -73,6 +73,7 @@ CREATE TABLE IF NOT EXISTS proposals (
   hypothesis_id TEXT NOT NULL REFERENCES hypotheses(id),
   expression TEXT NOT NULL,
   factor_id TEXT REFERENCES factors(id),
+  proposed_factor_id TEXT,
   parent_factor_id TEXT REFERENCES factors(id),
   edge_type TEXT NOT NULL,
   status TEXT NOT NULL,
@@ -161,9 +162,13 @@ def default_path() -> Path:
     return Path(__file__).resolve().parents[2] / "experiments" / DB_FILENAME
 
 
-def connect(path: str | Path | None = None) -> sqlite3.Connection:
-    """Open the store, creating the file and tables if needed."""
+def connect(path: str | Path | None = None, *, readonly: bool = False) -> sqlite3.Connection:
+    """Open the store; read-only connections never create or migrate it."""
     path = Path(path) if path is not None else default_path()
+    if readonly:
+        con = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+        con.row_factory = sqlite3.Row
+        return con
     path.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(path)
     con.row_factory = sqlite3.Row
@@ -176,6 +181,19 @@ def connect(path: str | Path | None = None) -> sqlite3.Connection:
     for name, kind in ALIGNMENT_COLUMNS:  # a store created before the alignment check
         if name not in columns:
             con.execute(f"ALTER TABLE proposals ADD COLUMN {name} {kind}")
+    if "proposed_factor_id" not in columns:
+        with con:
+            con.execute("ALTER TABLE proposals ADD COLUMN proposed_factor_id TEXT")
+            for row in con.execute("SELECT id, factor_id, expression FROM proposals").fetchall():
+                fid = row["factor_id"]
+                if fid is None:
+                    try:
+                        fid = factor_id(parse(row["expression"]))
+                    except ValueError:
+                        continue  # An unparsed proposal has no factor identity.
+                con.execute(
+                    "UPDATE proposals SET proposed_factor_id = ? WHERE id = ?", (fid, row["id"])
+                )
     return con
 
 
@@ -309,6 +327,11 @@ def add_factor(
     Returns (factor_id, is_new). A factor already in the store is not stored
     again, but the proposal is still recorded, with status "duplicate".
     """
+    hypothesis = con.execute(
+        "SELECT kind FROM hypotheses WHERE id = ?", (hypothesis_id,)
+    ).fetchone()
+    if hypothesis is not None and hypothesis["kind"] != "market":
+        raise ValueError("only a market hypothesis can produce a factor")
     fid = factor_id(node)
     with con:
         is_new = (
@@ -331,6 +354,7 @@ def add_factor(
             hypothesis_id=hypothesis_id,
             expression=expression if expression is not None else _unparse(node),
             factor_id=fid,
+            proposed_factor_id=fid,
             parent_factor_id=parent_factor_id,
             edge_type=edge_type,
             status="stored" if is_new else "duplicate",
@@ -381,6 +405,7 @@ def reject(
             hypothesis_id=hypothesis_id,
             expression=expression,
             factor_id=None,
+            proposed_factor_id=None if node is None else factor_id(node),
             parent_factor_id=parent_factor_id,
             edge_type=edge_type,
             status="rejected",
@@ -466,12 +491,14 @@ def proposals(con: sqlite3.Connection, status: str | None = None) -> list[dict]:
 
 def lineage(con: sqlite3.Connection, fid: str) -> list[dict]:
     """Every proposal of one factor, each with its hypothesis and paper."""
+    columns = {row[1] for row in con.execute("PRAGMA table_info(proposals)")}
+    identity = "proposed_factor_id" if "proposed_factor_id" in columns else "factor_id"
     rows = con.execute(
         "SELECT p.id AS proposal_id, p.status, p.edge_type, p.parent_factor_id, p.expression, "
         "p.rationale, p.model, p.created_at, h.id AS hypothesis_id, h.observation, "
         "h.specification, pa.key AS paper_key, pa.title AS paper_title, pa.url AS paper_url "
         "FROM proposals p JOIN hypotheses h ON h.id = p.hypothesis_id "
-        "JOIN papers pa ON pa.key = h.paper_key WHERE p.factor_id = ? ORDER BY p.id",
+        f"JOIN papers pa ON pa.key = h.paper_key WHERE p.{identity} = ? ORDER BY p.id",
         (fid,),
     )
     return [dict(r) for r in rows]

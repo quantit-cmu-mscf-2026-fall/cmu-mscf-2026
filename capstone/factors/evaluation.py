@@ -130,8 +130,13 @@ def build_panel(daily: pd.DataFrame, data_version: str = "") -> Panel:
 
 
 def _market_return(returns: pd.DataFrame, cap: pd.DataFrame, universe: pd.DataFrame) -> pd.Series:
-    """The universe's return each day, weighted by the previous day's cap."""
-    weight = cap.where(universe).shift(1)
+    """That day's universe's return, each stock weighted by its previous day's cap.
+
+    Membership is the day's own (`tree.py`'s definition of `mkt_return`): a
+    stock that joins on day t counts in `mkt_return[t]`, one that leaves on t
+    does not. Only the weight is lagged.
+    """
+    weight = cap.shift(1).where(universe)
     held = weight.notna() & returns.notna()
     total = weight.where(held).sum(axis=1)
     out = (weight * returns).where(held).sum(axis=1) / total.where(total > 0)
