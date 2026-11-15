@@ -186,13 +186,16 @@ def sharpe_ratio(returns: pd.Series, periods_per_year: int) -> float:
     """Annualised Sharpe ratio of a per-period return series.
 
     The mean over the sample standard deviation (ddof=1) of the non-NaN
-    periods, times sqrt(periods_per_year). NaN when there is no variance or
-    fewer than two periods. `summarize` uses it; anything else that reports a
-    backtest's Sharpe ratio should too, so the number has one definition.
+    periods, times sqrt(periods_per_year). NaN when there is no variance (all
+    periods equal) or fewer than two periods. `summarize` uses it; anything
+    else that reports a backtest's Sharpe ratio should too, so the number has
+    one definition.
     """
     clean = returns.dropna()
     sd = float(clean.std(ddof=1))
-    if not sd > 0:
+    # A constant series can leave a rounding-error sd of about 1e-18, so test
+    # the spread itself, not only the sd.
+    if len(clean) < 2 or not clean.max() > clean.min() or not sd > 0:
         return float("nan")
     # Annualise the mean and the sd separately, as `summarize` reports them.
     return float(clean.mean() * periods_per_year / (sd * np.sqrt(periods_per_year)))
@@ -207,7 +210,7 @@ class BacktestSummary:
         mean: annualised mean return.
         vol: annualised return volatility.
         sharpe: `sharpe_ratio`, the annualised mean over the annualised vol
-            (sample sd, ddof=1); NaN if vol is 0.
+            (sample sd, ddof=1); NaN if the returns are constant.
         max_drawdown: peak-to-trough drawdown on cumulative returns, <= 0.
         hit_rate: share of strictly positive periods among non-NaN periods.
         turnover: mean per-period turnover, if supplied by the caller.

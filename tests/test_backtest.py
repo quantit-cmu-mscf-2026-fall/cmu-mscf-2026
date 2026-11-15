@@ -184,6 +184,15 @@ def test_sharpe_ratio_is_mean_over_sample_sd_annualised():
         assert summary.sharpe == summary.mean / summary.vol
 
 
+@pytest.mark.parametrize("level", [0.01, -0.002, 0.1, 0.003, 1e-4])
+def test_sharpe_ratio_is_nan_for_a_constant_series(level):
+    # Rounding leaves some constant series with an sd near 1e-18, not 0; a
+    # Sharpe ratio of 1e17 would pass into a p-value as near-certain skill.
+    constant = pd.Series([level] * 100)
+    assert np.isnan(sharpe_ratio(constant, 252))
+    assert np.isnan(summarize(constant, freq="daily").sharpe)
+
+
 def test_cost_bps_reduces_mean_return():
     rng = np.random.default_rng(3)
     dates = pd.bdate_range("2020-01-01", periods=150)
