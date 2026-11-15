@@ -11,13 +11,13 @@ Details: the PR descriptions. Each PR in this track adds its rows here.
 ## 2. Contract
 - Adds no statistics: every number comes from `funnel.family_statistics` on `make_family_set` data.
 - Deterministic for a seed. Simulated data only: no real data, no ledger writes.
-- `PowerSpec` raises `ValueError` on a configuration the funnel can't run: a family with fewer than 2 variants, under 10 bootstrap blocks of search data, `n_boot + 1 < families / min(0.05, q1)` with the bootstrap stage 1 (and `null_side` checks the bootstrap at that level), `within_corr < across_corr`, fewer trials than variants.
+- `PowerSpec` raises `ValueError` on a configuration the funnel can't run: a family with fewer than 2 variants, under 10 bootstrap blocks of search data, `n_boot + 1 < families / q` whenever the bootstrap runs (`n_boot > 0`, or a bootstrap stage 1), with q = min(0.05, q1) for a bootstrap stage 1 and 0.05 otherwise (`null_side` checks the bootstrap at that level), `within_corr < across_corr`, fewer trials than variants.
 
 ## 3. How it was vetted
 
 | Check | How | Result | Reproduce with |
 |---|---|---|---|
-| Unit tests | `tests/test_power.py`, 20 tests | pass | `pytest -q tests/test_power.py` |
+| Unit tests | `tests/test_power.py`, 24 tests | pass | `pytest -q tests/test_power.py` |
 | Same code paths | a family alone = its row in the full batch; `planted_side` = the full planted batch recomputed; `plant` = the generator's planted family | equal (1e-12 / 1e-15) | `pytest -q tests/test_power.py -k SameCodePaths` |
 | Correlations | `within_corr`/`across_corr` measured on a 58-year null world | within 0.02 / 0.03 | `pytest -q tests/test_power.py -k correlations` |
 | Determinism | same seed twice, `null_side` and `planted_side` | identical | `pytest -q tests/test_power.py -k Determinism` |

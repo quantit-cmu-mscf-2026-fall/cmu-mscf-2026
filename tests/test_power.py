@@ -85,11 +85,19 @@ class TestPowerSpec:
         with pytest.raises(ValueError, match="at least 2 variants"):
             PowerSpec(**{**SMALL, **change})
 
-    def test_bootstrap_resolution_is_checked_only_for_the_bootstrap(self):
-        boot = funnel.Thresholds(stage1="bootstrap")
+    @pytest.mark.parametrize("stage1", ["bootstrap", "rho", "independent"])
+    def test_bootstrap_resolution_is_checked_whenever_it_runs(self, stage1):
+        # null_side computes the bootstrap whenever n_boot > 0, whatever the
+        # stage-1 method, so a spec it can't run is refused here, not there.
+        th = funnel.Thresholds(stage1=stage1)
         with pytest.raises(ValueError, match="n_boot"):
-            PowerSpec(**{**SMALL, "n_boot": 50, "thresholds": boot})  # 51 < 20 x 4
-        assert PowerSpec(**{**SMALL, "n_boot": 50}).n_boot == 50  # "rho" reads no bootstrap
+            PowerSpec(**{**SMALL, "n_boot": 50, "thresholds": th})  # 51 < 20 x 4
+
+    def test_no_draws_are_needed_without_the_bootstrap(self):
+        spec = PowerSpec(**{**SMALL, "n_boot": 0})  # "rho" skips the bootstrap
+        assert power.null_side(spec, seed=5).stats["p1_bootstrap"].isna().all()
+        with pytest.raises(ValueError, match="n_boot"):
+            PowerSpec(**{**SMALL, "n_boot": 0, "thresholds": funnel.Thresholds(stage1="bootstrap")})
 
     def test_bootstrap_resolution_is_checked_at_the_registered_q1(self):
         # BH at q1 = 0.01 across 4 families needs n_boot + 1 >= 400, not 80.

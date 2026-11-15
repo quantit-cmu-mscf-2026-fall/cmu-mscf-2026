@@ -55,7 +55,8 @@ class PowerSpec:
     variants: each family's variant count, or one count for `n_families`.
     within_corr / across_corr: average pairwise correlation of two variants of
     one family / of different families. Lengths are trading days
-    (`from_years`). n_boot: stage 1's bootstrap draws. n_trials: the ledger's
+    (`from_years`). n_boot: bootstrap draws (0 skips the bootstrap; allowed
+    only when stage 1 is not the bootstrap). n_trials: the ledger's
     count, recorded only: no registered decision reads it.
     """
 
@@ -90,10 +91,10 @@ class PowerSpec:
         floor = 10 * block_length_rule(self.search_periods)
         if self.search_periods < floor or self.holdout_periods < 2:
             raise ValueError(f"need >= {floor} search periods and >= 2 holdout periods")
-        # BH at level q across H families needs n_boot + 1 >= H / q.
-        if self.n_boot < 0 or (
-            self.thresholds.stage1 == "bootstrap" and self.n_boot + 1 < len(v) / self.bootstrap_q
-        ):
+        # BH at level q across H families needs n_boot + 1 >= H / q. The funnel
+        # runs the bootstrap whenever n_boot > 0, whatever the stage-1 method.
+        bootstrap = self.thresholds.stage1 == "bootstrap" or self.n_boot > 0
+        if self.n_boot < 0 or (bootstrap and self.n_boot + 1 < len(v) / self.bootstrap_q):
             raise ValueError(
                 f"n_boot + 1 must be >= {len(v)} families / q = {self.bootstrap_q} "
                 "for the bootstrap"
