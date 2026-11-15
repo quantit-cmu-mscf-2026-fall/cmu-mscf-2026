@@ -106,3 +106,33 @@ def test_the_random_editor_is_reproducible_and_never_returns_the_parent():
         b = RandomEditor(7).drafts(parent, motif, 3, [], [])
         assert [d.expression for d in a] == [d.expression for d in b]
         assert all(identity_key(d.tree) != identity_key(parent) for d in a if d.tree)
+
+
+def test_script_reruns_use_distinct_folders_and_preserve_historical_v1(tmp_path, monkeypatch):
+    from research import learned_memory_search_check as check
+
+    design = tmp_path / "learned_memory_search_check.toml"
+    design.write_text(
+        '[check]\nbudget = 1\npanels = ["null"]\nconditions = ["memory"]\nrun_seeds = [0]\n'
+    )
+    out = tmp_path / "historical"
+    out.mkdir()
+    original = out / "results.json"
+    original.write_text("historical v1 evidence")
+    destinations = []
+
+    def run_one(design, scorer, panel, condition, seed, budget, destination, label):
+        destinations.append(destination)
+        destination.mkdir(parents=True, exist_ok=True)
+        return {"run_id": "synthetic", "first_recovery": None, "admitted": 0}
+
+    monkeypatch.setattr(check, "OUT", out)
+    monkeypatch.setattr(check, "scorers", lambda design: {"null": object()})
+    monkeypatch.setattr(check, "run_one", run_one)
+    monkeypatch.setattr(check, "summarize", lambda results, budget: "synthetic summary")
+    monkeypatch.setattr("sys.argv", ["check", "--design", str(design)])
+    check.main()
+    check.main()
+    assert original.read_text() == "historical v1 evidence"
+    assert len(set(destinations)) == 2
+    assert all(path != out and (path / "results.json").exists() for path in destinations)

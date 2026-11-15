@@ -1,14 +1,16 @@
-"""Step 3 of learned memory search: the small pre-registered check.
+"""Step 3 of learned memory search: rerun the archived synthetic designs.
 
     python research/learned_memory_search_check.py            # every run, then the summary
     python research/learned_memory_search_check.py --design research/<design>.toml
     python research/learned_memory_search_check.py --budget 50 --runs 1   # time one short run
 
-The design (default research/learned_memory_search_check.toml) is written
-before any run; each design's outputs go to their own folder. Each run is
+The designs were archived together; this history does not establish that
+they preceded their reported runs. Historical v1 used unavailable pre-fix
+screening code, so running its design now does not reproduce that evidence.
+Each invocation writes a fresh rerun folder and preserves earlier evidence. Each run is
 the deepen move (capstone.factors.deepen) over a fresh factor store, with
 the free random editor, on the planted or the null panel, with the memory
-on or off. Every scored child is a ledger trial, written by
+on or off. Every scored parent and child is a ledger trial, written by
 the deepen move as it happens. Stores, per-run results and the summary go to
 experiments/learned_memory_search_check/ (gitignored); the numbers belong in
 the PR description.
@@ -19,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import statistics
+import tempfile
 import time
 import tomllib
 from dataclasses import replace
@@ -172,7 +175,8 @@ def main() -> None:
     args = parser.parse_args()
     design = tomllib.loads(args.design.read_text(encoding="utf-8"))
     label = args.design.stem.removeprefix("learned_memory_search_")  # check, check_v2
-    out = OUT if label == "check" else OUT / label  # v1's outputs stay where they ran
+    OUT.mkdir(parents=True, exist_ok=True)
+    out = Path(tempfile.mkdtemp(prefix=f"{label}-rerun-", dir=OUT))
     check = design["check"]
     budget = args.budget or check["budget"]
     plan = [
