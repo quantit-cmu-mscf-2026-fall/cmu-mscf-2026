@@ -297,7 +297,8 @@ def _classify(p: Node, c: Node) -> str:
     if _func_swap(p, c) and p.func not in special and c.func not in special:
         return "operator_sub"
     if isinstance(p, BinOp) and isinstance(c, BinOp) and p.op != c.op:
-        only_p, only_c = _unmatched([p.left, p.right], [c.left, c.right], ordered=False)
+        # Operand chains, so ``a + b + c`` to ``a * b * c`` matches as well as two terms.
+        only_p, only_c = _unmatched(_operands(p), _operands(c), ordered=False)
         if not only_p and not only_c:
             return "operator_sub"
     if isinstance(p, Field_) and isinstance(c, Field_):
@@ -312,7 +313,7 @@ def _classify(p: Node, c: Node) -> str:
         isinstance(p, Unary) and _same(p.operand, c)
     ):
         return "normalization"
-    if _func_swap(p, c) and p.func in NORMALIZATION_FUNCS and c.func in NORMALIZATION_FUNCS:
+    if swap_in(NORMALIZATION_FUNCS):
         return "normalization"
     return "other"
 
@@ -335,8 +336,9 @@ def edit_motif(parent: Node, child: Node) -> str:
     7. ``nesting``: a time-series wrapper (`NESTING_FUNCS`) added or removed.
     8. ``temporal_shift``: a shift or delta added or removed, or swapped with
        another function on the same operands.
-    9. ``normalization``: a normalizing function or minus sign added, removed
-       or swapped for another.
+    9. ``normalization``: a normalizing function or minus sign added or
+       removed, or a normalizing function swapped with another function on
+       the same operands.
     10. ``other``: everything else, such as dropping a term or a rewrite; also
         a change that preprocessing makes vanish (a window moved within its bin).
 
@@ -388,6 +390,10 @@ def record_event(
     if (quality is None) != (baseline is None):
         raise ValueError("a scored child needs both its quality and its parent's baseline")
     residual = None if quality is None else quality - baseline
+    if any(
+        value is not None and not math.isfinite(value) for value in (quality, baseline, residual)
+    ):
+        raise ValueError("quality, baseline and residual must be finite when scored")
     row = {
         "run_id": run_id,
         "iteration": iteration,
@@ -514,10 +520,14 @@ class Baselines:
         self._count: dict[str, int] = {}
 
     def baseline(self, context: str, parent_quality: float | None) -> float | None:
+        if parent_quality is not None and not math.isfinite(parent_quality):
+            raise ValueError("parent quality must be finite when scored")
         count = self._count.get(context, 0)
         return parent_quality if count == 0 else self._sum[context] / count
 
     def add(self, context: str, child_quality: float) -> None:
+        if not math.isfinite(child_quality):
+            raise ValueError("child quality must be finite")
         self._sum[context] = self._sum.get(context, 0.0) + child_quality
         self._count[context] = self._count.get(context, 0) + 1
 
@@ -530,11 +540,7 @@ def gate(stats: PairStats, kappa: float, epsilon: float) -> float:
 
 
 def veto_gate(stats: PairStats, kappa: float, epsilon: float) -> float:
-    """The veto's confidence: `gate` once two children are scored, else
-    attempts / (attempts + kappa), so pairs whose children never get scored
-    (they all fail) can still be vetoed."""
-    if stats.n >= 2:
-        return gate(stats, kappa, epsilon)
+    """Confidence in the failure posterior, from every attempt, scored or not."""
     return stats.attempts / (stats.attempts + kappa)
 
 
@@ -548,6 +554,8 @@ def ledger_score(quality: float, rho_max: float, times_selected: int) -> float:
     """S_ledger(p) = Q(p) * (1 - rho_max(p)) / sqrt(1 + u_p) (plan decision D2; ours,
     as the paper gives no formula). rho_max: the parent's largest |corr| with
     another pool member."""
+    if not math.isfinite(quality):
+        raise ValueError("parent quality must be finite")
     return abs(quality) * (1.0 - abs(rho_max)) / math.sqrt(1 + times_selected)
 
 
@@ -574,6 +582,10 @@ class ParentView:
     quality: float
     rho_max: float
     times_selected: int
+
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.quality):
+            raise ValueError("parent quality must be finite")
 
 
 @dataclass(frozen=True)
