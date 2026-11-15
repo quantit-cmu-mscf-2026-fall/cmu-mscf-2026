@@ -107,6 +107,10 @@ conn.close()
 `cached_crsp_daily` writes to `data_cache/`, which is gitignored — CRSP data must
 not enter the public repo. Delete the parquet file to refresh.
 
+`sp500_members` (and `sp500_members_ciz`) clamp a spell still running at `end` to
+`end`, and flag it in `mbr_end_censored`: that name was still a member on the
+last day you asked about, and its real exit date is outside your window.
+
 ## 5. Three CRSP conventions that bite everyone once
 
 - **`prc` can be negative.** A negative price means there was no trade that day

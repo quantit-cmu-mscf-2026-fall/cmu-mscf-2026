@@ -163,7 +163,39 @@ def test_ciz_membership_returns_the_same_column_names_as_legacy():
     query = conn.queries[0]
     assert "crsp.dsp500list_v2" in query
     assert "mbrstartdt as mbr_start" in query
-    assert "mbrenddt as mbr_end" in query
+    assert "mbr_end," in query
+    assert "as mbr_end_censored" in query
+
+
+# --- membership spells clamped to the query window --------------------------
+
+MEMBERSHIP_PULLS = [
+    pytest.param(wrds_loader.sp500_members, "ending", id="legacy"),
+    pytest.param(wrds_loader.sp500_members_ciz, "mbrenddt", id="ciz"),
+]
+
+
+def _squash(query: str) -> str:
+    return " ".join(query.split())
+
+
+@pytest.mark.parametrize(("pull", "end_col"), MEMBERSHIP_PULLS)
+def test_membership_spell_end_is_clamped_to_the_query_end(pull, end_col):
+    """A spell still open at `end` must not carry dates past the window asked for."""
+    conn = RecordingConn()
+    pull(conn, "2010-01-01", "2020-12-31")
+    query = _squash(conn.queries[0])
+    clamp = f"case when {end_col} > %(end)s then %(end)s::date else {end_col} end as mbr_end"
+    assert clamp in query
+    assert f"{end_col} as mbr_end" not in query
+
+
+@pytest.mark.parametrize(("pull", "end_col"), MEMBERSHIP_PULLS)
+def test_membership_flags_spells_censored_at_the_query_end(pull, end_col):
+    """The clamp hides the true end, so the frame says which spells it cut."""
+    conn = RecordingConn()
+    pull(conn, "2010-01-01", "2020-12-31")
+    assert f"{end_col} > %(end)s as mbr_end_censored" in _squash(conn.queries[0])
 
 
 # --- cache keys --------------------------------------------------------------

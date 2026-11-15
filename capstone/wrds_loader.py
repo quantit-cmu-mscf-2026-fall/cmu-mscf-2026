@@ -320,9 +320,15 @@ def sp500_members(conn, start: str, end: str) -> pd.DataFrame:
     actually in it — which is the whole point. Building a universe from today's
     constituent list instead is the single most effective way to make a backtest
     look excellent for no reason.
+
+    A spell still running at `end` is clamped to `end`, so no row reaches past
+    the window asked for; `mbr_end_censored` marks those spells, whose true end
+    is unknown as of `end`.
     """
     query = """
-        select permno, start as mbr_start, ending as mbr_end
+        select permno, start as mbr_start,
+               case when ending > %(end)s then %(end)s::date else ending end as mbr_end,
+               ending > %(end)s as mbr_end_censored
         from crsp.dsp500list
         where ending >= %(start)s and start <= %(end)s
     """
@@ -330,14 +336,16 @@ def sp500_members(conn, start: str, end: str) -> pd.DataFrame:
 
 
 def sp500_members_ciz(conn, start: str, end: str) -> pd.DataFrame:
-    """`sp500_members` against `crsp.dsp500list_v2`, same columns out.
+    """`sp500_members` against `crsp.dsp500list_v2`, same columns out (end clamp included).
 
     A permno can hold SEVERAL spells — 11 do over 2010-2025 — because names
     leave the index and later rejoin. Any membership check must test against
     every spell, not against a single end date.
     """
     query = """
-        select permno, mbrstartdt as mbr_start, mbrenddt as mbr_end
+        select permno, mbrstartdt as mbr_start,
+               case when mbrenddt > %(end)s then %(end)s::date else mbrenddt end as mbr_end,
+               mbrenddt > %(end)s as mbr_end_censored
         from crsp.dsp500list_v2
         where mbrenddt >= %(start)s and mbrstartdt <= %(end)s
     """
