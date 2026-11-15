@@ -94,6 +94,35 @@ def test_lineage_reaches_the_paper(con):
     assert edge["edge_type"] == "refined"
 
 
+def test_lineage_keeps_parsed_rejections_before_a_factor_is_stored(con):
+    hid = store.add_hypothesis(con, _hypothesis())
+    node = parse("rank(high)")
+    store.reject(con, hid, "rank(high)", "not original", node=node)
+    assert [row["status"] for row in store.lineage(con, factor_id(node))] == ["rejected"]
+    fid, _ = store.add_factor(con, node, hid)
+    assert [row["status"] for row in store.lineage(con, fid)] == ["rejected", "stored"]
+
+
+def test_legacy_proposal_ids_are_backfilled_when_the_store_is_opened(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "legacy.db"
+    con = sqlite3.connect(path)
+    con.executescript(store.SCHEMA.replace("  proposed_factor_id TEXT,\n", ""))
+    con.row_factory = sqlite3.Row
+    store.add_paper(con, "arxiv:2502.16789", "Paper")
+    hid = store.add_hypothesis(con, _hypothesis())
+    with con:
+        con.execute(
+            "INSERT INTO proposals (hypothesis_id, expression, edge_type, status, created_at) "
+            "VALUES (?, 'rank(high)', 'proposed', 'rejected', 'old')",
+            (hid,),
+        )
+    con.close()
+    with store.connect(path) as reopened:
+        assert len(store.lineage(reopened, factor_id(parse("rank(high)")))) == 1
+
+
 def test_unknown_edge_type_is_refused(con):
     hid = store.add_hypothesis(con, _hypothesis())
     with pytest.raises(ValueError, match="edge_type"):
