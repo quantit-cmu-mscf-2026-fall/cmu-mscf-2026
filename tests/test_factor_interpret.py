@@ -134,6 +134,38 @@ def test_undefined_results_are_nan_not_inf():
     assert _one([-4.0, 9.0], "signed_power(close, 0.5)").tolist() == [-2.0, 3.0]
 
 
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "rank(close / volume)",
+        "sign(close / volume)",
+        "1 / (close / volume)",
+        "scale(close / volume)",
+    ],
+)
+def test_undefined_intermediate_results_stay_nan_in_parent_operators(expression):
+    panel = {
+        "close": pd.DataFrame({"A": [1.0, 2.0, 3.0], "B": [1.0, 2.0, 3.0]}),
+        "volume": pd.DataFrame({"A": [0.0, 0.0, 0.0], "B": [1.0, 1.0, 1.0]}),
+    }
+    values = evaluate(parse(expression), panel)
+    assert values["A"].isna().all()
+    assert np.isfinite(values["B"]).all()
+    assert (values["B"] != 0).all()
+
+
+@pytest.mark.parametrize("expression", ["close + 1 / 0", "close + 0 / 0"])
+def test_undefined_scalar_division_is_nan(expression):
+    assert _one([1.0, 2.0], expression).isna().all()
+
+
+def test_overflowing_intermediate_results_cannot_be_ranked():
+    close = pd.DataFrame({"A": [1e200], "B": [2.0]})
+    values = evaluate(parse("rank(close * close)"), {"close": close})
+    assert np.isnan(values.loc[0, "A"])
+    assert values.loc[0, "B"] == 1.0
+
+
 def test_a_market_field_is_the_same_for_every_stock():
     panel = _panel()
     # A formula must read a stock field, so close * 0 is there only to parse.

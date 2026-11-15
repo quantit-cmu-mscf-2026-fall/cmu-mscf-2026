@@ -290,7 +290,8 @@ def _classify(p: Node, c: Node) -> str:
     if _func_swap(p, c) and p.func not in special and c.func not in special:
         return "operator_sub"
     if isinstance(p, BinOp) and isinstance(c, BinOp) and p.op != c.op:
-        only_p, only_c = _unmatched([p.left, p.right], [c.left, c.right], ordered=False)
+        # Operand chains, so ``a + b + c`` to ``a * b * c`` matches as well as two terms.
+        only_p, only_c = _unmatched(_operands(p), _operands(c), ordered=False)
         if not only_p and not only_c:
             return "operator_sub"
     if isinstance(p, Field_) and isinstance(c, Field_):
@@ -305,7 +306,7 @@ def _classify(p: Node, c: Node) -> str:
         isinstance(p, Unary) and _same(p.operand, c)
     ):
         return "normalization"
-    if _func_swap(p, c) and p.func in NORMALIZATION_FUNCS and c.func in NORMALIZATION_FUNCS:
+    if swap_in(NORMALIZATION_FUNCS):
         return "normalization"
     return "other"
 
@@ -328,8 +329,9 @@ def edit_motif(parent: Node, child: Node) -> str:
     7. ``nesting``: a time-series wrapper (`NESTING_FUNCS`) added or removed.
     8. ``temporal_shift``: a shift or delta added or removed, or swapped with
        another function on the same operands.
-    9. ``normalization``: a normalizing function or minus sign added, removed
-       or swapped for another.
+    9. ``normalization``: a normalizing function or minus sign added or
+       removed, or a normalizing function swapped with another function on
+       the same operands.
     10. ``other``: everything else, such as dropping a term or a rewrite; also
         a change that preprocessing makes vanish (a window moved within its bin).
 
