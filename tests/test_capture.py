@@ -95,3 +95,12 @@ def test_redact_patterns():
     same, zero = mod.redact(benign)
     assert same == benign
     assert zero == 0
+
+
+def test_hook_commands_are_anchored_to_project_dir():
+    """Hooks must not depend on the session's cwd (a `cd` would break them)."""
+    settings = json.loads((STARTER / ".claude" / "settings.json").read_text())
+    for event in settings["hooks"].values():
+        for group in event:
+            for hook in group["hooks"]:
+                assert "$CLAUDE_PROJECT_DIR/" in hook["command"]

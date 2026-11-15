@@ -78,6 +78,24 @@ def test_published_update_is_picked_up_and_changes_version(env):
     assert sd.data_version() != before
 
 
+def test_file_removed_from_drive_is_dropped_so_versions_agree(env, tmp_path, monkeypatch):
+    # The yearly refresh: a new file is published and the old one retired.
+    # A teammate who synced before and one who syncs only after must end up
+    # with the same files and the same data_version() as the Drive.
+    drive, alice = env
+    sd.sync()
+    (drive / "other.parquet").unlink()
+    _publish(drive, {"other_2026": pd.DataFrame({"x": [1, 2, 3]})})
+    status = sd.sync()
+    assert status["other.parquet"] == "removed"
+    assert not (alice / "other.parquet").exists()
+    alice_version = sd.data_version()
+
+    monkeypatch.setenv("CAPSTONE_CACHE_DIR", str(tmp_path / "bob"))
+    sd.sync()
+    assert sd.data_version() == alice_version == sd.manifest_version(drive / sd.MANIFEST)
+
+
 def test_half_synced_file_is_rejected_and_previous_copy_kept(env):
     drive, cache = env
     sd.sync()
@@ -185,6 +203,30 @@ def test_stale_lock_from_crashed_process_is_cleared(env, monkeypatch):
     assert set(sd.sync().values()) == {"copied"}
 
 
+def test_stale_lock_replaced_by_another_waiter_is_left_alone(tmp_path, monkeypatch):
+    # Lauren's #26 race: two waiters see the same stale lock; the first removes
+    # it and takes a fresh one before the second acts. The second must not
+    # remove the fresh lock.
+    lock = tmp_path / ".sync.lock"
+    lock.write_text("1")
+    old = time.time() - 600
+    os.utime(lock, (old, old))
+    real_stat = Path.stat
+    calls = []
+
+    def stat_then_replace(self, *args, **kwargs):
+        result = real_stat(self, *args, **kwargs)
+        if self == lock and not calls:
+            calls.append(1)
+            lock.unlink()  # the other waiter clears the stale lock ...
+            lock.write_text("2")  # ... and takes a fresh one
+        return result
+
+    monkeypatch.setattr(Path, "stat", stat_then_replace)
+    assert sd._remove_if_stale(lock) is False
+    assert lock.read_text() == "2"
+
+
 def test_live_lock_is_respected_then_times_out(env, monkeypatch):
     """A recently refreshed lock belongs to a live sync: wait, never steal it."""
     _, cache = env
@@ -274,6 +316,25 @@ def test_quoted_spread_fills_without_look_ahead():
     assert spread.notna().all()
 
 
+@pytest.mark.parametrize("dtype", ["float64", "boolean"])
+def test_quoted_spread_takes_in_universe_with_gaps(dtype):
+    # load() hands back in_universe as float64 once it has a missing value
+    # (Carl's #26 review); unknown membership counts as out of the universe.
+    day = pd.Timestamp("2020-01-02")
+    frame = pd.DataFrame(
+        {
+            "permno": [1, 2, 3],
+            "date": [day] * 3,
+            "dlybid": [99.9, 50.0, np.nan],
+            "dlyask": [100.1, 51.0, np.nan],
+            "in_universe": pd.array([1.0, np.nan, 1.0]).astype(dtype),
+        }
+    )
+    spread = sd.quoted_spread(frame)
+    # Stock 3 has no quote: filled with the day's median over stock 1 only.
+    assert spread.iloc[2] == pytest.approx(0.002)
+
+
 def test_available_from_is_strictly_after_report_and_falls_back():
     days = pd.bdate_range("2020-01-01", "2020-12-31")
     fund = pd.DataFrame(
@@ -286,6 +347,15 @@ def test_available_from_is_strictly_after_report_and_falls_back():
     assert got.iloc[0] == pd.Timestamp("2020-04-27")  # Friday report -> Monday
     assert got.iloc[1] == pd.Timestamp("2020-06-30")  # 2020-06-29 + 1 trading day
     assert pd.isna(got.iloc[2]) and pd.isna(got.iloc[3])  # past calendar / no dates
+
+
+def test_available_from_annual_data_has_no_report_date():
+    # comp_funda has no rdq column (Lauren's #26 review): every year falls back.
+    days = pd.bdate_range("2020-01-01", "2020-12-31")
+    fund = pd.DataFrame({"datadate": pd.to_datetime(["2019-12-31", "2020-06-30"])})
+    got = sd.available_from(fund, days, report_col=None)
+    assert got.iloc[0] == pd.Timestamp("2020-03-31")  # 2020-03-30 + 1 trading day
+    assert got.iloc[1] == pd.Timestamp("2020-09-29")  # 2020-09-28 + 1 trading day
 
 
 def test_primary_links_filters_and_fills_open_end():

@@ -111,8 +111,8 @@ def sync(verbose: bool = False) -> dict[str, str]:
 
     Only files whose checksum changed are copied. Each copy is verified before
     it replaces the old one, so a failed or partial copy leaves the last good
-    version in place. With no Drive folder available, the existing local copy
-    is used as-is.
+    version in place. Files no longer on Drive are removed from the local copy.
+    With no Drive folder available, the existing local copy is used as-is.
     """
     local = cache_dir()
     local.mkdir(parents=True, exist_ok=True)
@@ -141,8 +141,7 @@ def _sync_lock(local: Path):
             break
         except FileExistsError:
             try:
-                if time.time() - lock.stat().st_mtime > LOCK_STALE_AFTER:
-                    lock.unlink(missing_ok=True)
+                if _remove_if_stale(lock):
                     continue
             except FileNotFoundError:
                 continue
@@ -163,6 +162,23 @@ def _sync_lock(local: Path):
         yield heartbeat
     finally:
         lock.unlink(missing_ok=True)
+
+
+def _remove_if_stale(lock: Path) -> bool:
+    """Remove a lock left by a crashed sync; True if it was removed.
+
+    Two waiters can both see the same stale lock. If one removes it and takes a
+    fresh lock, the other must not then remove that fresh one, so the lock is
+    checked again right before removal: a changed timestamp means someone else
+    got there first.
+    """
+    seen = lock.stat().st_mtime
+    if time.time() - seen <= LOCK_STALE_AFTER:
+        return False
+    if lock.stat().st_mtime != seen:
+        return False
+    lock.unlink(missing_ok=True)
+    return True
 
 
 def _copy(src: Path, dst: Path, heartbeat) -> None:
@@ -206,6 +222,19 @@ def _sync_locked(local: Path, verbose: bool, heartbeat=lambda: None) -> dict[str
         except (OSError, SharedDataError) as exc:
             temp.unlink(missing_ok=True)
             status[name] = f"FAILED: {exc}" + ("; kept previous copy" if target.exists() else "")
+        if verbose:
+            print(f"  {name}: {status[name]}", flush=True)
+
+    # A file taken off Drive (renamed or retired) must leave the local copy
+    # too; otherwise it keeps feeding data_version(), and two teammates synced
+    # to the same Drive report different versions.
+    for name in sorted(set(have) - set(want)):
+        try:
+            (local / name).unlink(missing_ok=True)
+            status[name] = "removed"
+        except OSError as exc:  # e.g. still open on Windows; drop it from the manifest anyway
+            status[name] = f"removed from manifest; file left in place: {exc}"
+        del have[name]
         if verbose:
             print(f"  {name}: {status[name]}", flush=True)
 
@@ -354,7 +383,10 @@ def quoted_spread(daily: pd.DataFrame) -> pd.Series:
     trailing = spread.groupby(frame["permno"]).transform(
         lambda s: s.shift(1).rolling(SPREAD_WINDOW, min_periods=5).median()
     )
-    daily_median = spread.where(frame["in_universe"]).groupby(frame["date"]).transform("median")
+    # load() turns in_universe into float64 when it has gaps, and .where() needs
+    # real booleans; unknown membership counts as out of the universe.
+    universe = frame["in_universe"].astype("float64").fillna(0).astype(bool)
+    daily_median = spread.where(universe).groupby(frame["date"]).transform("median")
     return spread.fillna(trailing).fillna(daily_median).reindex(daily.index).rename("spread")
 
 
@@ -369,18 +401,25 @@ def primary_links(link: pd.DataFrame) -> pd.DataFrame:
 
 
 def available_from(
-    fund: pd.DataFrame, trading_days, report_col: str = "rdq", period_col: str = "datadate"
+    fund: pd.DataFrame,
+    trading_days,
+    report_col: str | None = "rdq",
+    period_col: str = "datadate",
 ) -> pd.Series:
     """First trading day a fundamental may be used: strictly after its report date.
 
     Reports often land after the close, so the report date itself is too early.
     With no report date, the period end + REPORT_FALLBACK_DAYS is used, later
     than 99% of actual reports. NaT when that day is past the end of the calendar.
+
+    Annual data (`comp_funda`) has no report date: pass `report_col=None` and
+    every row uses the fallback. For S&P 500 members, 98.7% of annual earnings
+    announcements are out within 90 days of the fiscal year end.
     """
     days = pd.DatetimeIndex(sorted(pd.to_datetime(trading_days).unique()))
     # pd.Timedelta(days=...) warns under numpy 2.5; the unit= form does not.
     fallback = fund[period_col] + pd.Timedelta(REPORT_FALLBACK_DAYS, unit="D")
-    base = fund[report_col].fillna(fallback)
+    base = fallback if report_col is None else fund[report_col].fillna(fallback)
     out = pd.Series(pd.NaT, index=fund.index, dtype="datetime64[ns]", name="available_from")
     known = base.notna().to_numpy()
     pos = days.searchsorted(pd.DatetimeIndex(base[known]), side="right")

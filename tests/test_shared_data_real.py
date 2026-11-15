@@ -105,3 +105,17 @@ def test_report_dates_present_for_quarters_feeding_the_universe(daily):
     q = q[q["datadate"].between(q["min"] - pd.Timedelta(120, unit="D"), q["max"])]
     assert len(q) > 60_000
     assert q["rdq"].isna().mean() < 0.01
+
+
+def test_no_stock_takes_two_imputed_losses_for_one_exit(daily):
+    # Lauren's #26 review: a stock could get PERFORMANCE_LOSS on its first
+    # untracked day and again on a later delisting row. Two imputed losses are
+    # only right when the stock traded again in between (permno 83630: untracked
+    # in 2006, traded for years, delisted in 2020), so each one is its own exit.
+    need = ["permno", "date", "dlyret", "dlyretmissflg", "dlydelflg", "delactiontype"]
+    frame = daily[need].sort_values(["permno", "date"])
+    ret = sd.daily_returns(frame).loc[frame.index]
+    imputed = frame["dlyret"].isna() & ret.isin([sd.PERFORMANCE_LOSS, -1.0])
+    traded = frame["dlyret"].notna().astype(int).groupby(frame["permno"]).cumsum()
+    exits = pd.DataFrame({"permno": frame["permno"], "traded": traded})[imputed]
+    assert not exits.duplicated().any()
