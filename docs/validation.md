@@ -204,7 +204,7 @@ backtest upward, and no method in this document can correct it.
 | `synth`, `backtest` | `make_return_matrix`, `candidate_returns` | done |
 | `evaluate` | `sharpe_variance` / `sharpe_test` (normal, non-normal, autocorrelation-robust), PSR, MinTRL, implied independent trials | done |
 | `evaluate` | `holm`, `benjamini_yekutieli`, `estimate_pi0`, `storey_qvalues`; adjusted p-values and `evidence_profile`; one-sided `pvalue_greater` | done |
-| `evaluate` | local false-discovery rate and empirical null (Efron): a per-candidate probability of being real that allows for correlation | planned |
+| `evaluate` | `empirical_null`, `local_fdr` and `evidence_profile`'s `lfdr` column (Efron): empirical-null estimates and per-candidate null probabilities that allow for correlation | done |
 | `bootstrap` | stationary bootstrap, block-length selection | planned |
 | `snooping` | White's Reality Check, Romano–Wolf step-down | planned |
 | `cv` | purged k-fold with embargo (from the Alpha-GPT work), walk-forward | planned |
