@@ -520,10 +520,14 @@ class Baselines:
         self._count: dict[str, int] = {}
 
     def baseline(self, context: str, parent_quality: float | None) -> float | None:
+        if parent_quality is not None and not math.isfinite(parent_quality):
+            raise ValueError("parent quality must be finite when scored")
         count = self._count.get(context, 0)
         return parent_quality if count == 0 else self._sum[context] / count
 
     def add(self, context: str, child_quality: float) -> None:
+        if not math.isfinite(child_quality):
+            raise ValueError("child quality must be finite")
         self._sum[context] = self._sum.get(context, 0.0) + child_quality
         self._count[context] = self._count.get(context, 0) + 1
 
@@ -550,6 +554,8 @@ def ledger_score(quality: float, rho_max: float, times_selected: int) -> float:
     """S_ledger(p) = Q(p) * (1 - rho_max(p)) / sqrt(1 + u_p) (plan decision D2; ours,
     as the paper gives no formula). rho_max: the parent's largest |corr| with
     another pool member."""
+    if not math.isfinite(quality):
+        raise ValueError("parent quality must be finite")
     return abs(quality) * (1.0 - abs(rho_max)) / math.sqrt(1 + times_selected)
 
 
@@ -576,6 +582,10 @@ class ParentView:
     quality: float
     rho_max: float
     times_selected: int
+
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.quality):
+            raise ValueError("parent quality must be finite")
 
 
 @dataclass(frozen=True)

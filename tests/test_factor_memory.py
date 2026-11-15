@@ -424,6 +424,23 @@ def test_baseline_is_the_parent_quality_until_the_context_has_history():
     assert b.baseline("returns|q2|d0|u0", 0.15) == pytest.approx(0.20)
 
 
+@pytest.mark.parametrize("quality", [math.nan, math.inf, -math.inf])
+@pytest.mark.parametrize("boundary", ["parent", "baseline", "add", "ledger"])
+def test_nonfinite_quality_is_refused_at_decision_boundaries(quality, boundary):
+    b = Baselines()
+    with pytest.raises(ValueError, match="finite"):
+        if boundary == "parent":
+            ParentView("a", "returns|unscored|d0|u0", quality, 0.0, 0)
+        elif boundary == "baseline":
+            b.baseline("returns", quality)
+        elif boundary == "add":
+            b.add("returns", quality)
+        else:
+            ledger_score(quality, 0.0, 0)
+    b.add("returns", 0.2)
+    assert b.baseline("returns", 0.1) == 0.2
+
+
 def test_gate_by_hand():
     # n = 3, mu = 0.1, sigma = 0.2: 3/8 * min(1, 0.1 / 0.200001).
     assert gate(stats_of([0.1, 0.3, -0.1]), 5.0, 1e-6) == pytest.approx(0.1875, rel=1e-4)
