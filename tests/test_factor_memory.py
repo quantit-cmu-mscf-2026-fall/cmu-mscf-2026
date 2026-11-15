@@ -140,6 +140,9 @@ CASES = [
     ("close + volume", "close * volume", "operator_sub"),
     ("ts_corr(close, volume, 10)", "ts_cov(close, volume, 10)", "operator_sub"),
     ("rank(close - open) * cap", "rank(close / open) * cap", "operator_sub"),
+    ("close + volume + returns", "close * volume * returns", "operator_sub"),
+    ("close * volume * returns", "close + volume + returns", "operator_sub"),
+    ("rank(close + volume + returns)", "rank(close * volume * returns)", "operator_sub"),
     ("ts_mean(close, 5)", "ts_mean(open, 5)", "feature_swap"),
     ("returns + volume + cap", "returns + volume + close", "feature_swap"),
     ("ts_corr(returns, mkt_return, 63)", "ts_corr(returns, volume, 63)", "feature_swap"),
@@ -161,6 +164,9 @@ CASES = [
     ("-returns", "returns", "normalization"),
     ("log(volume)", "abs(volume)", "normalization"),
     ("ts_mean(returns, 5) / cap", "ts_mean(sign(returns), 5) / cap", "normalization"),
+    ("ts_mean(close, 20)", "zscore(close, 20)", "normalization"),
+    ("zscore(close, 20)", "ts_mean(close, 20)", "normalization"),
+    ("log(close)", "ts_mean(close, 5)", "normalization"),
     ("close + volume + returns", "close + volume", "other"),
     ("ts_mean(close, 10)", "ts_mean(close, 20)", "other"),
     ("close - volume", "open - shares", "other"),
@@ -292,6 +298,23 @@ def test_bad_events_are_refused(con, bad):
     with pytest.raises(ValueError):
         event(con, **bad)
     assert memory_events(con) == []
+
+
+@pytest.mark.parametrize(
+    ("quality", "baseline"),
+    [(v, 0.1) for v in (math.nan, math.inf, -math.inf)]
+    + [(0.2, v) for v in (math.nan, math.inf, -math.inf)]
+    + [(1e308, -1e308)],
+)
+def test_nonfinite_event_scores_cannot_poison_online_or_stored_statistics(con, quality, baseline):
+    online = MemoryState()
+    online.update(event(con, "admitted", 0.3, 0.1))
+    with pytest.raises(ValueError, match="finite"):
+        event(con, "admitted", quality, baseline)
+    online.update(event(con, "admitted", 0.2, 0.1))
+    batch = reduce_events(memory_events(con))
+    assert online.pairs == batch
+    assert online.stats("returns|q2|d0|u0", "nesting").mean == pytest.approx(0.15)
 
 
 def test_a_failed_parse_counts_under_the_intended_motif():
