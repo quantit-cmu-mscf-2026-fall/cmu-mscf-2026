@@ -126,16 +126,41 @@ def test_unrelated_trees_share_nothing_bigger_than_a_field():
     assert subtree_similarity(parse("ts_std(close, 10)"), parse("rank(close)")) == 1
 
 
-def test_zoo_is_alpha101_in_ohlcv_plus_returns_spellings():
+ZOO_MEMBERS = {
+    2, 3, 4, 6, 8, 12, 13, 14, 15, 16, 17, 18, 19, 20, 22, 26, 28, 29, 30, 31,
+    33, 34, 35, 37, 38, 39, 40, 43, 44, 45, 52, 53, 54, 55, 56, 60, 101,
+}  # fmt: skip
+
+
+def test_zoo_is_alpha101_in_the_grammar_plus_returns_spellings():
     zoo = dict(default_zoo())
+    assert set(ALPHA101_EXPRESSIONS) == {f"alpha_{n:03d}" for n in ZOO_MEMBERS}
     assert set(ALPHA101_EXPRESSIONS) <= set(zoo)
-    assert len(ALPHA101_EXPRESSIONS) >= 25
     for name in ALPHA101_EXPRESSIONS:
-        assert features_used(zoo[name]) <= set(OHLCV), name
+        assert features_used(zoo[name]) <= set(FIELDS), name
     respelled = [name for name in zoo if name.endswith("_returns")]
     assert "alpha_014_returns" in respelled
     for name in respelled:
         assert "returns" in features_used(zoo[name]), name
+
+
+@pytest.mark.parametrize(
+    "verbatim",
+    [
+        # Alpha#56 as printed in Kakushadze (2016), with the grammar's `returns` and `cap`.
+        "0 - (1 * (rank(ts_sum(returns, 10) / ts_sum(ts_sum(returns, 2), 3))"
+        " * rank(returns * cap)))",
+        "rank(ts_corr(shift(open - close, 1), close, 200)) + rank(open - close)",
+        "(1 - rank(sign(close - shift(close, 1)) + sign(shift(close, 1) - shift(close, 2))"
+        " + sign(shift(close, 2) - shift(close, 3)))) * ts_sum(volume, 5) / ts_sum(volume, 20)",
+        "(-1 * ts_min(low, 5) + shift(ts_min(low, 5), 5))"
+        " * rank((ts_sum(returns, 240) - ts_sum(returns, 20)) / 220) * ts_rank(volume, 5)",
+        "0 - (1 * ((2 * scale(rank((((close - low) - (high - close)) / (high - low)) * volume)))"
+        " - scale(rank(ts_argmax(close, 10)))))",
+    ],
+)
+def test_a_verbatim_alpha101_member_is_not_original(verbatim):
+    assert zoo_similarity(parse(verbatim), default_zoo())[1] == 1.0
 
 
 def test_new_fields_parse_and_turnover_is_expressible():

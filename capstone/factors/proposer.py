@@ -19,7 +19,15 @@ from dataclasses import dataclass
 from capstone.factors import alignment, store
 from capstone.factors.hypotheses import _FIELDS
 from capstone.factors.llm import FactorConfig, call_tool, grammar_help
-from capstone.factors.tree import Node, ParseError, factor_id, node_count, parse, zoo_similarity
+from capstone.factors.tree import (
+    Node,
+    ParseError,
+    factor_id,
+    node_count,
+    parse,
+    structural_key,
+    zoo_similarity,
+)
 from capstone.factors.zoo import default_zoo
 
 
@@ -114,7 +122,10 @@ def _judge(
         reason = f"too complex: {size} nodes, limit {config.max_nodes}"
     elif zoo_share >= config.max_zoo_share:
         reason = f"not original: {zoo_share:.0%} of it is in {nearest_zoo}"
-    elif store_share >= config.max_store_share:
+    elif store_share >= config.max_store_share and (
+        config.max_store_share < 1
+        or any(structural_key(tree) == structural_key(node) for _, tree in stored)
+    ):
         reason = f"not original: {store_share:.0%} of it is stored factor {nearest_factor}"
     else:
         # The judge runs last: it costs a model call, the checks above don't.
