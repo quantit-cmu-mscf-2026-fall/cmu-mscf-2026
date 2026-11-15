@@ -52,6 +52,19 @@ class TestPeriodsByDate:
                 returns, family, search_end=SEARCH_END, holdout_start=SEARCH_END, n_boot=0
             )
 
+    @pytest.mark.parametrize("n_boot", [0, 199])
+    @pytest.mark.parametrize("label", ["absent", "nan"])
+    def test_every_variant_needs_a_hypothesis_label(self, n_boot, label):
+        # A variant without a label would drop out of its family and k would
+        # undercount the search; n_boot=0 skips the bootstrap's own check.
+        returns, family = _dated(n_families=4, drift={"h0": 0.003})
+        h0_v2 = family.index == "h0_v2"
+        family = family[~h0_v2] if label == "absent" else family.where(~h0_v2)
+        with pytest.raises(ValueError, match="family is missing for 1 columns"):
+            family_statistics(
+                returns, family, search_end=SEARCH_END, holdout_start=HOLDOUT_START, n_boot=n_boot
+            )
+
     def test_requires_a_date_index(self):
         returns, family = _dated()
         with pytest.raises(TypeError):
