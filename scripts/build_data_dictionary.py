@@ -119,7 +119,10 @@ def check_claims(daily: pd.DataFrame) -> None:
     cap_ratio = (daily.dlycap / (daily.dlyprc * daily.shrout)).dropna()
     assert cap_ratio.between(0.999, 1.001).mean() > 0.99, "dlycap is not prc x shrout"
     assert (daily.dlyprc.dropna() >= 0).all(), "negative prices present"
-    assert (daily.loc[daily.sharetype == "N/A", "dlydelflg"] == "Y").all()
+    for col in daily.columns:  # the "N/A" label is used for every coded column
+        if pd.api.types.is_object_dtype(daily[col]) or pd.api.types.is_string_dtype(daily[col]):
+            on = daily[col] == "N/A"
+            assert (daily.loc[on, "dlydelflg"] == "Y").all(), f"{col} is N/A off a delisting row"
     assert daily.loc[daily.dlyretmissflg == "NA", "dlyret"].notna().all()
     assert daily.loc[daily.delretmisstype == "NA", "delret"].notna().all()
     assert (daily.loc[daily.dlyprcflg == "SU", "tradingstatusflg"] == "S").all()
