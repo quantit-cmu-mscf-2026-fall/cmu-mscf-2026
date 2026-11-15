@@ -8,7 +8,8 @@ best of these N strategies on one half of the sample tell me anything about the
 other half?" CSCV answers it by brute force: chop the sample into `n_blocks`
 contiguous blocks, and for every way of choosing half the blocks as in-sample,
 pick the IS winner and look up where it lands in the out-of-sample ranking. PBO
-is the share of splits where the winner comes in below the OOS median.
+is the share of usable splits where the winner comes in below the OOS median,
+counting a winner exactly on the median as half.
 
 Read the number against the right baseline. PBO near 0.5 is what *independent*
 no-skill candidates produce, not a clean bill of health: when each candidate is
@@ -31,9 +32,8 @@ duplicates of each other used to score 0 as well, for no better reason than
 every rank tying on the median; `pbo` now splits that mass and reads 0.5.
 
 Input is a T x N matrix of per-period strategy returns, one column per trial.
-`backtest.sweep` produces per-candidate *summaries* rather than this matrix, so
-build it by running each candidate through `backtest.run_backtest` and
-concatenating the resulting series column-wise.
+Build it with `backtest.candidate_returns`: `backtest.sweep` produces
+per-candidate summaries rather than the required per-period matrix.
 """
 
 from __future__ import annotations
@@ -139,8 +139,10 @@ def cscv(
         dict with:
             pbo: share of splits whose IS winner landed below the OOS median,
                 counting a winner exactly on the median as half. A winner with
-                no OOS Sharpe (flat out of sample) ranks at the bottom and
-                counts as overfit. NaN when no split had a winner.
+                no OOS Sharpe (flat out of sample) ties with other flat
+                candidates at the bottom. If every candidate is flat OOS,
+                they all tie on the median and count as half. NaN when no
+                split had a winner.
             n_splits_used: splits that contributed, out of `n_splits`. Lower
                 than `n_splits` means some splits had no column with an
                 in-sample Sharpe, so no winner; if it is 0, `pbo` is NaN.
@@ -245,9 +247,9 @@ def cscv(
 
     # A split only has a winner if the winner has an in-sample Sharpe; when no
     # column does, argmax picked one arbitrarily and the split is dropped. A
-    # real winner that has no Sharpe out of sample (it went flat) is the
-    # textbook overfit case: it stays in, ranked at the bottom above, and
-    # counts as overfit. Dropping it would make PBO more reassuring.
+    # real winner that goes flat out of sample stays in and ties at the
+    # bottom (on the median if all are flat). Dropping it would
+    # make PBO more reassuring.
     usable = np.isfinite(winner_is)
     relative_rank = np.where(usable, relative_rank, np.nan)
     if usable.any():

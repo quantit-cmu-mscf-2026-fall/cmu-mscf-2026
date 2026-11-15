@@ -399,6 +399,29 @@ class TestMedianTiesAndUnusableSplits:
         assert result["n_splits_used"] == result["n_splits"]
         assert 0.0 <= result["pbo"] <= 1.0
 
+    @pytest.mark.parametrize("n_blocks", [2, 8])
+    def test_all_flat_out_of_sample_ties_on_the_median_and_counts_half(self, n_blocks):
+        rng = np.random.default_rng(0)
+        matrix = pd.DataFrame(rng.normal(0, 0.01, (800, 4)))
+        matrix.iloc[400:] = 0.0
+
+        result = cscv(matrix, n_blocks=n_blocks)
+
+        # The all-flat IS split has no winner. Its complement has a winner,
+        # but every OOS candidate is flat: retain that split at the mid-rank.
+        assert result["n_splits_used"] == math.comb(n_blocks, n_blocks // 2) - 1
+        flat_oos_winner = np.isfinite(result["winner_is_sharpe"]) & np.isnan(
+            result["winner_oos_sharpe"]
+        )
+        assert flat_oos_winner.sum() == 1
+        assert result["oos_ranks"][flat_oos_winner].iloc[0] == pytest.approx(0.5)
+        ranks = result["oos_ranks"].dropna()
+        assert result["pbo"] == pytest.approx(
+            ((ranks < 0.5).sum() + 0.5 * (ranks == 0.5).sum()) / len(ranks)
+        )
+        if n_blocks == 2:
+            assert result["pbo"] == pytest.approx(0.5)
+
     # 0.001 happens to cancel exactly in the one-pass variance; the others leave
     # a small positive residue that used to pass for a variance and gave the
     # flat column a Sharpe of about 1e9.
