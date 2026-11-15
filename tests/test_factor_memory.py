@@ -140,6 +140,9 @@ CASES = [
     ("close + volume", "close * volume", "operator_sub"),
     ("ts_corr(close, volume, 10)", "ts_cov(close, volume, 10)", "operator_sub"),
     ("rank(close - open) * cap", "rank(close / open) * cap", "operator_sub"),
+    ("close + volume + returns", "close * volume * returns", "operator_sub"),
+    ("close * volume * returns", "close + volume + returns", "operator_sub"),
+    ("rank(close + volume + returns)", "rank(close * volume * returns)", "operator_sub"),
     ("ts_mean(close, 5)", "ts_mean(open, 5)", "feature_swap"),
     ("returns + volume + cap", "returns + volume + close", "feature_swap"),
     ("ts_corr(returns, mkt_return, 63)", "ts_corr(returns, volume, 63)", "feature_swap"),
@@ -161,6 +164,9 @@ CASES = [
     ("-returns", "returns", "normalization"),
     ("log(volume)", "abs(volume)", "normalization"),
     ("ts_mean(returns, 5) / cap", "ts_mean(sign(returns), 5) / cap", "normalization"),
+    ("ts_mean(close, 20)", "zscore(close, 20)", "normalization"),
+    ("zscore(close, 20)", "ts_mean(close, 20)", "normalization"),
+    ("log(close)", "ts_mean(close, 5)", "normalization"),
     ("close + volume + returns", "close + volume", "other"),
     ("ts_mean(close, 10)", "ts_mean(close, 20)", "other"),
     ("close - volume", "open - shares", "other"),
@@ -294,6 +300,23 @@ def test_bad_events_are_refused(con, bad):
     assert memory_events(con) == []
 
 
+@pytest.mark.parametrize(
+    ("quality", "baseline"),
+    [(v, 0.1) for v in (math.nan, math.inf, -math.inf)]
+    + [(0.2, v) for v in (math.nan, math.inf, -math.inf)]
+    + [(1e308, -1e308)],
+)
+def test_nonfinite_event_scores_cannot_poison_online_or_stored_statistics(con, quality, baseline):
+    online = MemoryState()
+    online.update(event(con, "admitted", 0.3, 0.1))
+    with pytest.raises(ValueError, match="finite"):
+        event(con, "admitted", quality, baseline)
+    online.update(event(con, "admitted", 0.2, 0.1))
+    batch = reduce_events(memory_events(con))
+    assert online.pairs == batch
+    assert online.stats("returns|q2|d0|u0", "nesting").mean == pytest.approx(0.15)
+
+
 def test_a_failed_parse_counts_under_the_intended_motif():
     assert event_motif({"motif_realized": None, "motif_intended": "nesting"}) == "nesting"
     assert event_motif({"motif_realized": "other", "motif_intended": "nesting"}) == "other"
@@ -401,6 +424,23 @@ def test_baseline_is_the_parent_quality_until_the_context_has_history():
     assert b.baseline("returns|q2|d0|u0", 0.15) == pytest.approx(0.20)
 
 
+@pytest.mark.parametrize("quality", [math.nan, math.inf, -math.inf])
+@pytest.mark.parametrize("boundary", ["parent", "baseline", "add", "ledger"])
+def test_nonfinite_quality_is_refused_at_decision_boundaries(quality, boundary):
+    b = Baselines()
+    with pytest.raises(ValueError, match="finite"):
+        if boundary == "parent":
+            ParentView("a", "returns|unscored|d0|u0", quality, 0.0, 0)
+        elif boundary == "baseline":
+            b.baseline("returns", quality)
+        elif boundary == "add":
+            b.add("returns", quality)
+        else:
+            ledger_score(quality, 0.0, 0)
+    b.add("returns", 0.2)
+    assert b.baseline("returns", 0.1) == 0.2
+
+
 def test_gate_by_hand():
     # n = 3, mu = 0.1, sigma = 0.2: 3/8 * min(1, 0.1 / 0.200001).
     assert gate(stats_of([0.1, 0.3, -0.1]), 5.0, 1e-6) == pytest.approx(0.1875, rel=1e-4)
@@ -408,10 +448,10 @@ def test_gate_by_hand():
     assert gate(stats_of([0.5]), 5.0, 1e-6) == 0.0  # closed below two residuals
 
 
-def test_veto_gate_counts_attempts_until_two_are_scored():
+def test_veto_gate_counts_attempts_independently_of_scored_residuals():
     assert veto_gate(stats_of([], failures=5), 5.0, 1e-6) == pytest.approx(0.5)
     s = stats_of([0.1, 0.3, -0.1], failures=10)
-    assert veto_gate(s, 5.0, 1e-6) == gate(s, 5.0, 1e-6)
+    assert veto_gate(s, 5.0, 1e-6) == pytest.approx(13 / 18)
 
 
 @pytest.mark.parametrize(
@@ -433,6 +473,15 @@ def test_veto_needs_both_confidence_and_failures():
     assert not vetoed(stats_of([], failures=1), CONFIG)  # rate 2/3 < 0.7
     assert not vetoed(stats_of([], failures=2), CONFIG)  # gate 2/7 < 0.3
     assert not vetoed(stats_of([0.2] * 50), CONFIG)  # successes never veto
+
+
+def test_scored_children_do_not_hide_repeated_failures_or_remove_a_veto():
+    assert vetoed(stats_of([0.10, -0.08], failures=40), CONFIG)
+    s = stats_of([], failures=30)
+    assert vetoed(s, CONFIG)
+    for residual in (0.10, -0.10):
+        s.add("admitted", residual)
+    assert vetoed(s, CONFIG)
 
 
 PARENTS = [

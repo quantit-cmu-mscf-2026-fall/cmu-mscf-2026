@@ -94,10 +94,47 @@ def test_lineage_reaches_the_paper(con):
     assert edge["edge_type"] == "refined"
 
 
+def test_lineage_keeps_parsed_rejections_before_a_factor_is_stored(con):
+    hid = store.add_hypothesis(con, _hypothesis())
+    node = parse("rank(high)")
+    store.reject(con, hid, "rank(high)", "not original", node=node)
+    assert [row["status"] for row in store.lineage(con, factor_id(node))] == ["rejected"]
+    fid, _ = store.add_factor(con, node, hid)
+    assert [row["status"] for row in store.lineage(con, fid)] == ["rejected", "stored"]
+
+
+def test_legacy_proposal_ids_are_backfilled_when_the_store_is_opened(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "legacy.db"
+    con = sqlite3.connect(path)
+    con.executescript(store.SCHEMA.replace("  proposed_factor_id TEXT,\n", ""))
+    con.row_factory = sqlite3.Row
+    store.add_paper(con, "arxiv:2502.16789", "Paper")
+    hid = store.add_hypothesis(con, _hypothesis())
+    with con:
+        con.execute(
+            "INSERT INTO proposals (hypothesis_id, expression, edge_type, status, created_at) "
+            "VALUES (?, 'rank(high)', 'proposed', 'rejected', 'old')",
+            (hid,),
+        )
+    con.close()
+    with store.connect(path) as reopened:
+        assert len(store.lineage(reopened, factor_id(parse("rank(high)")))) == 1
+
+
 def test_unknown_edge_type_is_refused(con):
     hid = store.add_hypothesis(con, _hypothesis())
     with pytest.raises(ValueError, match="edge_type"):
         store.add_factor(con, parse("rank(close)"), hid, edge_type="mutated")
+
+
+def test_method_hypotheses_cannot_create_factors_or_proposals(con):
+    hid = store.add_hypothesis(con, _hypothesis(kind="method"))
+    with pytest.raises(ValueError, match="market"):
+        store.add_factor(con, parse("rank(open)"), hid)
+    assert store.factors(con) == []
+    assert store.proposals(con) == []
 
 
 def test_a_hypothesis_needs_its_paper_first(con):
@@ -116,3 +153,21 @@ def test_store_survives_reopening_and_trees_read_back(tmp_path):
     reopened = store.connect(path)
     assert [name for name, _ in store.factor_trees(reopened)] == [fid]
     assert factor_id(store.factor_trees(reopened)[0][1]) == fid
+
+
+def test_factor_database_sidecars_are_ignored(tmp_path):
+    import subprocess
+    from pathlib import Path
+
+    ignore = Path(__file__).resolve().parents[1] / ".gitignore"
+    (tmp_path / ".gitignore").write_text(ignore.read_text(), encoding="utf8")
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    paths = [f"experiments/factors.db{suffix}" for suffix in ("", "-journal", "-wal", "-shm")]
+    result = subprocess.run(
+        ["git", "check-ignore", *paths],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout.splitlines() == paths

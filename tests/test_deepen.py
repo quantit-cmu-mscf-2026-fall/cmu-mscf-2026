@@ -31,7 +31,7 @@ from capstone.factors.deepen import (
 )
 from capstone.factors.llm import FactorConfig
 from capstone.factors.memory import PRODUCIBLE_MOTIFS, memory_events
-from capstone.factors.tree import factor_id, identity_key, parse
+from capstone.factors.tree import factor_id, identity_key, parse, unparse
 
 CONFIG = FactorConfig(model="test-model", alignment_model="", max_repairs=1)
 
@@ -133,6 +133,25 @@ def _entries(path):
     return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
 
+def test_starting_parent_scores_are_logged_before_pool_admission(con, ledger, monkeypatch):
+    scorer = FakeScorer(fail={SEEDS[-1]})
+    d = deepener(con, ScriptedEditor(), scorer, parents=[])
+    add = d.pool.add
+
+    def checked_add(fid, quality, values, *args):
+        entry = _entries(ledger)[-1]
+        assert entry["params"]["factor_id"] == fid
+        assert entry["params"]["role"] == "parent"
+        assert entry["metrics"]["quality"] == quality
+        return add(fid, quality, values, *args)
+
+    monkeypatch.setattr(d.pool, "add", checked_add)
+    assert [d.add_parent(factor_id(parse(e))) for e in SEEDS] == [True, True, False]
+    entries = _entries(ledger)
+    assert scorer.calls == 3 and len(entries) == 2
+    assert {e["params"]["expression"] for e in entries} == set(SEEDS[:2])
+
+
 # ---------------------------------------------------------------------------
 # One round
 
@@ -154,6 +173,8 @@ def test_a_round_records_move_lineage_events_and_one_ledger_trial_per_score(con,
     assert len(events) == 4 and {e["motif_intended"] for e in events} == {motif}
     scored = [o for o in outcomes if o.quality is not None]
     entries = _entries(ledger)
+    assert sum(e["params"].get("role") == "parent" for e in entries) == len(SEEDS)
+    entries = [e for e in entries if e["params"].get("role") != "parent"]
     assert scored and len(entries) == len(scored)  # one trial per score, no more
     assert {e["params"]["factor_id"] for e in entries} == {o.factor_id for o in scored}
     assert all(e["tags"] == ["learned-memory-search", "deepen"] for e in entries)
@@ -165,9 +186,10 @@ def test_screening_rejections_are_not_scored(con, ledger):
     scorer = FakeScorer()
     d = deepener(con, editor, scorer, children=2, parents=["ts_mean(returns, 21)"])
     calls_before = scorer.calls
+    entries_before = _entries(ledger)
     outcomes = d.step()
     assert all(o.status == "rejected" and "not original" in o.reason for o in outcomes)
-    assert scorer.calls == calls_before and _entries(ledger) == []
+    assert scorer.calls == calls_before and _entries(ledger) == entries_before
 
 
 def test_pool_decisions_set_the_memory_status(con, ledger):
@@ -180,7 +202,9 @@ def test_pool_decisions_set_the_memory_status(con, ledger):
     assert low.status == "rejected" and "Q 0.050" in low.reason
     assert by_expr["ts_max(cap, 5)"].status == "invalid"
     assert factor_id(parse("log(cap)")) in d.pool.quality  # a future parent
-    assert len(_entries(ledger)) == 2  # the unscorable child is not a trial
+    entries = _entries(ledger)
+    assert sum(e["params"].get("role") == "parent" for e in entries) == len(SEEDS)
+    assert sum(e["params"].get("role") != "parent" for e in entries) == 2
 
 
 def test_an_admitted_child_carries_its_lineage(con, ledger):
@@ -422,6 +446,32 @@ def test_the_agent_decides_and_its_reason_is_recorded_before_scoring(con, ledger
     assert {o.motif_intended for o in outcomes} == {"nesting"}
 
 
+def test_agent_decision_and_repairs_include_the_chosen_parents_lineage(con, ledger):
+    ancestor = "rank(close / open)"
+    expression = "log(cap)"
+    hid = con.execute("SELECT id FROM hypotheses").fetchone()[0]
+    store.add_factor(
+        con,
+        parse(expression),
+        hid,
+        parent_factor_id=factor_id(parse(ancestor)),
+        edge_type="refined",
+    )
+    client = AgentClient(
+        _decision(expression, "nesting", ["ts_mean(log(cap),"]),
+        {"edits": [{"expression": "ts_mean(log(cap), 5)", "rationale": "repair"}]},
+    )
+    d = deepener(con, ScriptedEditor(), parents=[expression], children=1)
+    d.agent = DeepenAgent(client, CONFIG, max_calls=2, usage=Counter())
+    d.step()
+    lineage = "Lineage, oldest first: " + " -> ".join(
+        unparse(parse(e)) for e in (ancestor, expression)
+    )
+    assert len(client.calls) == 2
+    for call in client.calls:
+        assert lineage in call["messages"][0]["content"]
+
+
 def test_a_vetoed_edit_is_refused_then_asked_again(con, ledger):
     d = _agent_deepener(con, None)
     parent = factor_id(parse("rank(close / open)"))
@@ -471,3 +521,21 @@ def test_the_agent_spends_from_the_same_call_limit(con, ledger):
     d.agent = agent
     with pytest.raises(BudgetExhausted):  # the repair call would be the second
         d.step()
+
+
+def test_repairs_keep_the_parent_edit_lineage_and_vetoes_and_request_missing_edits():
+    client = FakeClient(["ts_mean(returns,"], ["ts_mean(returns, 63)", "ts_mean(returns, 126)"])
+    editor = ModelEditor(client, CONFIG, max_calls=2, usage=Counter())
+    drafts = editor.drafts(
+        parse("ts_mean(returns, 21)"),
+        "window_rescale",
+        2,
+        ["returns", "ts_mean(returns, 21)"],
+        ["other"],
+    )
+    repair = client.calls[1]["messages"][0]["content"]
+    assert "Parent: ts_mean(returns, 21)" in repair
+    assert MOTIF_WORDS["window_rescale"] in repair
+    assert "returns -> ts_mean(returns, 21)" in repair and "other (" in repair
+    assert "new edit" in repair and "'': empty expression" not in repair
+    assert all(d.tree is not None for d in drafts)

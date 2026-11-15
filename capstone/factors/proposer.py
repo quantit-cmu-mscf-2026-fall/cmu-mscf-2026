@@ -30,6 +30,7 @@ from capstone.factors.tree import (
     node_count,
     parse,
     root_genes,
+    structural_key,
     zoo_similarity,
 )
 from capstone.factors.zoo import default_zoo
@@ -143,7 +144,10 @@ def _judge(
         reason = f"too complex: {size} nodes, limit {config.max_nodes}"
     elif zoo_share >= config.max_zoo_share:
         reason = f"not original: {zoo_share:.0%} of it is in {nearest_zoo}"
-    elif store_share >= config.max_store_share:
+    elif store_share >= config.max_store_share and (
+        config.max_store_share < 1
+        or any(structural_key(tree) == structural_key(node) for _, tree in stored)
+    ):
         reason = f"not original: {store_share:.0%} of it is stored factor {nearest_factor}"
     elif avoid and (overused := sorted((root_genes(node) - inherited) & avoid.keys())):
         reason = "frequent subtree: " + "; ".join(avoid[g] for g in overused)

@@ -2,13 +2,13 @@
 
 One `Deepener.step` is one deepen round:
 
-1. Learned memory search (`capstone.factors.memory`) picks a parent from the
-   pool and a kind of edit, from the parent's own merit and what the memory
-   says about that edit for that kind of parent; vetoed edits are skipped.
-2. Opus writes `memory_children_per_parent` edited formulas in one call,
-   given the parent, its lineage, the edit in plain words and the edits
-   vetoed for its kind of parent. Formulas that do not parse go back for
-   repair, as in the proposer.
+1. When configured, the agent chooses a parent and allowed edit and writes
+   the children, given each candidate's quality, hypothesis, lineage and
+   memory evidence. Vetoed edits are excluded from the choices.
+2. Otherwise learned memory search (`capstone.factors.memory`) picks the
+   parent and edit, and Opus writes `memory_children_per_parent` formulas,
+   given the parent, its lineage, the edit in plain words and vetoed edits.
+   Parse failures go back for repair with the chosen parent and edit context.
 3. Each child goes through the proposer's screening (size, originality,
    frequent subtrees, alignment) and is stored, or rejected, as a `refined`
    child of its parent. Frequent subtree avoidance judges only the structure
@@ -298,11 +298,14 @@ def edit_prompt(
 
 
 def _repair_prompt(failures: list[tuple[str, str]]) -> str:
-    listed = "\n".join(f"- {expr!r}: {error}" for expr, error in failures)
+    listed = "\n".join(
+        f"- {expr!r}: {error}" if expr else "- Missing answer: write a new edit of the parent."
+        for expr, error in failures
+    )
     return (
-        "These formulas did not parse:\n"
+        "These edits need correction or completion:\n"
         f"{listed}\n\n"
-        "Return a corrected version of each, in the same order, making the same kind of edit."
+        "Return one corrected or new edit for each item, in the same order."
     )
 
 
@@ -337,7 +340,15 @@ class ModelEditor:
             usage=self.usage,
         )
 
-    def _repaired(self, items: list[dict], n: int) -> list[Draft]:
+    def _repaired(
+        self,
+        items: list[dict],
+        n: int,
+        parent: Node,
+        motif: str,
+        lineage: Sequence[str],
+        vetoed_motifs: Sequence[str],
+    ) -> list[Draft]:
         """Exactly `n` drafts (missing answers are empty), parse failures sent back
         for repair up to `config.max_repairs` rounds."""
         items = list(items)[:n]
@@ -348,7 +359,9 @@ class ModelEditor:
             if not broken:
                 break
             answer = self._call(
-                _repair_prompt([(drafts[i].expression, drafts[i].error) for i in broken])
+                edit_prompt(parent, motif, len(broken), lineage, vetoed_motifs)
+                + "\n\n"
+                + _repair_prompt([(drafts[i].expression, drafts[i].error) for i in broken])
             )
             for i, item in zip(broken, answer.get("edits", []), strict=False):
                 drafts[i] = _draft(item)
@@ -359,7 +372,7 @@ class ModelEditor:
     ) -> list[Draft]:
         """`n` edits of kind `motif` to `parent`, parse failures repaired."""
         answer = self._call(edit_prompt(parent, motif, n, lineage, vetoed_motifs))
-        return self._repaired(answer.get("edits", []), n)
+        return self._repaired(answer.get("edits", []), n, parent, motif, lineage, vetoed_motifs)
 
 
 # ---------------------------------------------------------------------------
@@ -375,6 +388,7 @@ class Candidate:
     hypothesis: str  # the specification of the hypothesis it implements
     evidence: str  # the memory's table for its kind of parent (`memory.evidence_table`)
     allowed: tuple[str, ...]  # edit kinds it may get: applicable and not vetoed
+    lineage: tuple[str, ...]  # oldest ancestor through this parent
 
 
 @dataclass(frozen=True)
@@ -431,6 +445,8 @@ def decide_prompt(candidates: Sequence[Candidate], n: int) -> str:
             f"  hypothesis: {c.hypothesis}",
             f"  allowed edits: {', '.join(c.allowed)}",
         ]
+        if len(c.lineage) > 1:
+            lines.append("  Lineage, oldest first: " + " -> ".join(c.lineage))
     lines += ["", "The memory's evidence, by kind of parent:"]
     for context in sorted({c.view.context for c in candidates}):
         table = next(c.evidence for c in candidates if c.view.context == context)
@@ -465,7 +481,14 @@ class DeepenAgent(ModelEditor):
                     motif,
                     str(answer.get("reason", "")),
                     str(answer.get("evidence_used", "")),
-                    self._repaired(answer.get("edits", []), n),
+                    self._repaired(
+                        answer.get("edits", []),
+                        n,
+                        parse(chosen.expression),
+                        motif,
+                        chosen.lineage,
+                        [],
+                    ),
                 )
             why = (
                 f"there is no parent {parent_id!r}"
@@ -546,6 +569,20 @@ class Deepener:
         scored = self.scorer(tree)
         if scored is None or not math.isfinite(scored.quality):
             return False
+        log_run(
+            LEDGER_NAME,
+            params={
+                "run_id": self.run_id,
+                "factor_id": fid,
+                "expression": unparse(tree),
+                "role": "parent",
+                "iteration": self.evaluations,
+                "model": self.config.model,
+            },
+            metrics={"quality": scored.quality},
+            seed=self.seed,
+            tags=self.ledger_tags,
+        )
         self.pool.add(fid, scored.quality, scored.values)
         self.trees[fid] = tree
         return True
@@ -636,6 +673,7 @@ class Deepener:
                     self._hypothesis(v.id)["specification"],
                     evidence_table(evidence(self.memory, v.context, self.config)),
                     allowed,
+                    tuple(self.lineage(v.id)),
                 )
             )
         return out
