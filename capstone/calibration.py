@@ -32,6 +32,7 @@ runs the grid.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -88,7 +89,7 @@ class FamilySet:
 
 def make_family_set(
     n_families: int,
-    k: int,
+    k: int | Sequence[int],
     share_real: float,
     sharpe_real: float,
     *,
@@ -100,7 +101,9 @@ def make_family_set(
 ) -> FamilySet:
     """Families of `k` variants of one idea, with realistic defects.
 
-    Each variant is sqrt(within_rho) x its family's series + sqrt(1 - within_rho)
+    `k` is every family's variant count, or a sequence of `n_families` counts
+    (families in order); a scalar `k` and `[k] * n_families` give the same
+    data. Each variant is sqrt(within_rho) x its family's series + sqrt(1 - within_rho)
     x its own, both from `synth.make_return_matrix` with the same `defects`
     (`rho`, `ar1`, `t_df`, `garch`, `vol`), so variants of one idea are
     near-copies and every defect carries through. A real family's series is
@@ -109,6 +112,9 @@ def make_family_set(
     """
     if not 0.0 < within_rho <= 1.0:
         raise ValueError("within_rho must be in (0, 1]")
+    counts = np.full(n_families, k) if np.ndim(k) == 0 else np.asarray(k)
+    if len(counts) != n_families or (counts < 1).any():
+        raise ValueError(f"k must be >= 1 for each of the {n_families} families, got {k!r}")
     n_obs = n_search + n_holdout
     n_real = int(round(share_real * n_families))
     base = make_return_matrix(
@@ -120,17 +126,17 @@ def make_family_set(
         **defects,
     )
     own = make_return_matrix(
-        n_obs=n_obs, n_candidates=n_families * k, n_real=0, seed=seed + 1_000_003, **defects
+        n_obs=n_obs, n_candidates=int(counts.sum()), n_real=0, seed=seed + 1_000_003, **defects
     )
-    b = base.returns.to_numpy()
-    e = own.returns.to_numpy().reshape(n_obs, n_families, k)
-    x = np.sqrt(within_rho) * b[:, :, None] + np.sqrt(1.0 - within_rho) * e
+    # Variant columns family by family: column j of family f is own column
+    # sum(counts[:f]) + j, as the scalar case's reshape laid them out.
+    which = np.repeat(np.arange(n_families), counts)
+    b = base.returns.to_numpy()[:, which]
+    x = np.sqrt(within_rho) * b + np.sqrt(1.0 - within_rho) * own.returns.to_numpy()
     hypotheses = list(base.returns.columns)
-    columns = [f"{h}_v{j}" for h in hypotheses for j in range(k)]
-    returns = pd.DataFrame(
-        x.reshape(n_obs, n_families * k), index=base.returns.index, columns=columns
-    )
-    family = pd.Series(np.repeat(hypotheses, k), index=columns, name="hypothesis")
+    columns = [f"{h}_v{j}" for h, n in zip(hypotheses, counts, strict=True) for j in range(n)]
+    returns = pd.DataFrame(x, index=base.returns.index, columns=columns)
+    family = pd.Series(np.repeat(hypotheses, counts), index=columns, name="hypothesis")
     return FamilySet(returns, family, base.truth.rename("truth"), n_search, n_holdout)
 
 
