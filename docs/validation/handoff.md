@@ -194,7 +194,7 @@ and read the count with:
 
 ```python
 from capstone.runlog import trial_count
-m = trial_count()               # every logged trial
+m = trial_count(include_tags=["<your-family-tag>"])  # your family only; bare trial_count() counts every entry
 m = trial_count("mom-sweep")    # only trials logged under one experiment name
 ```
 
