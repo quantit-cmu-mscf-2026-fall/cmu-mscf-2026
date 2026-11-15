@@ -267,6 +267,11 @@ def add_factor(
     Returns (factor_id, is_new). A factor already in the store is not stored
     again, but the proposal is still recorded, with status "duplicate".
     """
+    hypothesis = con.execute(
+        "SELECT kind FROM hypotheses WHERE id = ?", (hypothesis_id,)
+    ).fetchone()
+    if hypothesis is not None and hypothesis["kind"] != "market":
+        raise ValueError("only a market hypothesis can produce a factor")
     fid = factor_id(node)
     with con:
         is_new = (

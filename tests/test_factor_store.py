@@ -129,6 +129,14 @@ def test_unknown_edge_type_is_refused(con):
         store.add_factor(con, parse("rank(close)"), hid, edge_type="mutated")
 
 
+def test_method_hypotheses_cannot_create_factors_or_proposals(con):
+    hid = store.add_hypothesis(con, _hypothesis(kind="method"))
+    with pytest.raises(ValueError, match="market"):
+        store.add_factor(con, parse("rank(open)"), hid)
+    assert store.factors(con) == []
+    assert store.proposals(con) == []
+
+
 def test_a_hypothesis_needs_its_paper_first(con):
     with pytest.raises(Exception, match="FOREIGN KEY"):
         store.add_hypothesis(con, _hypothesis(paper_key="arxiv:not-added"))
