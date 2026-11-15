@@ -8,7 +8,8 @@ net returns, dates x candidates, and a hypothesis family per candidate.
 - every candidate has a family label, and every label names a candidate;
 - values are finite or missing, and every candidate has some returns;
 - rows where no candidate has a return (an untraded first day, a warm-up
-  every candidate shares) are dropped, the same way for every generator.
+  every candidate shares) are dropped by `from_returns`, the same way for
+  every generator.
 
 `stage_inputs` then computes the funnel's per-family statistics
 (`funnel.family_statistics`) with periods cut by date: stages 1-3 see
@@ -112,14 +113,17 @@ def stage_inputs(
     holdout_start=None,
     n_boot: int,
     seed: int,
+    q: float,
 ) -> pd.DataFrame:
     """The funnel's per-family statistics for `fi`, periods cut by date.
 
     Stages 1-3 (`best`, `p1_*`, `p2`) see dates on or before `search_end`
     only; the `ho_*` / `nv_*` columns come from dates on or after
     `holdout_start`. Without `holdout_start`, returns reaching past
-    `search_end` raise, so the holdout is never read by accident. Returns
-    the "reuse" design, the frame the funnel's stages filter.
+    `search_end` raise, so the holdout is never read by accident. `q` is the
+    registered stage-1 BH level: `n_boot` too small to resolve it raises
+    rather than leaving stage 1 without power. Returns the "reuse" design,
+    the frame the funnel's stages filter.
     """
     return funnel.family_statistics(
         fi.returns,
@@ -128,4 +132,5 @@ def stage_inputs(
         holdout_start=holdout_start,
         n_boot=n_boot,
         seed=seed,
+        q=q,
     )["reuse"]

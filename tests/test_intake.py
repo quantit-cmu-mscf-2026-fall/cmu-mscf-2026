@@ -172,7 +172,7 @@ def test_stage_inputs_never_shows_holdout_rows_to_stages_1_to_3(monkeypatch):
         return original(window, family, **kwargs)
 
     monkeypatch.setattr(funnel, "bootstrap_family_pvalues", spy)
-    kwargs = dict(search_end=search_end, holdout_start=holdout_start, n_boot=199, seed=3)
+    kwargs = dict(search_end=search_end, holdout_start=holdout_start, n_boot=199, seed=3, q=0.05)
     a = stage_inputs(clean, **kwargs)
     b = stage_inputs(poisoned, **kwargs)
 
@@ -182,7 +182,7 @@ def test_stage_inputs_never_shows_holdout_rows_to_stages_1_to_3(monkeypatch):
     assert (b["ho_sharpe"] != a["ho_sharpe"]).all()  # stage 4 does read the holdout
     # The same statistics as on the search period alone.
     search_only = from_returns(fs.returns.loc[:search_end], fs.family, generator="synthetic")
-    c = stage_inputs(search_only, search_end=search_end, n_boot=199, seed=3)
+    c = stage_inputs(search_only, search_end=search_end, n_boot=199, seed=3, q=0.05)
     pd.testing.assert_frame_equal(a[cols], c[cols])
 
 
@@ -190,13 +190,22 @@ def test_stage_inputs_refuses_post_search_dates_without_a_holdout():
     fs = _family_set(4, 0.0, seed=2, n_holdout=60)
     fi = from_returns(fs.returns, fs.family, generator="synthetic")
     with pytest.raises(ValueError, match="holdout_start"):
-        stage_inputs(fi, search_end=fs.returns.index[fs.n_search - 1], n_boot=199, seed=0)
+        stage_inputs(fi, search_end=fs.returns.index[fs.n_search - 1], n_boot=199, seed=0, q=0.05)
+
+
+def test_too_few_bootstrap_draws_for_the_registered_q_raise():
+    # BH at q=0.01 across 20 families needs p-values down to 0.0005; 499 draws
+    # floor them at 0.002, so stage 1 could pass nothing. Refuse it up front.
+    fs = calibration.make_family_set(20, 5, 0.15, 2.0, n_search=3 * 252, n_holdout=0, seed=4)
+    fi = from_returns(fs.returns, fs.family, generator="synthetic")
+    with pytest.raises(ValueError, match="can't resolve BH at 0.01"):
+        stage_inputs(fi, search_end=fs.returns.index[-1], n_boot=499, seed=0, q=0.01)
 
 
 def test_planted_families_get_small_stage1_pvalues():
     fs = _family_set(10, 0.3, seed=4)
     fi = from_returns(fs.returns, fs.family, generator="synthetic")
-    stats = stage_inputs(fi, search_end=fs.returns.index[-1], n_boot=199, seed=0)
+    stats = stage_inputs(fi, search_end=fs.returns.index[-1], n_boot=199, seed=0, q=0.10)
     planted = fs.truth[fs.truth].index
     assert len(planted) == 3
     assert (stats.loc[planted, "p1_bootstrap"] <= 0.01).all()
@@ -212,7 +221,7 @@ def test_stage1_on_null_families_accepts_at_most_q1_in_expectation(defect):
             10, 5, 0.0, 0.0, n_search=3 * 252, n_holdout=0, seed=100 + seed, **defect
         )
         fi = from_returns(fs.returns, fs.family, generator="synthetic")
-        stats = stage_inputs(fi, search_end=fs.returns.index[-1], n_boot=199, seed=seed)
+        stats = stage_inputs(fi, search_end=fs.returns.index[-1], n_boot=199, seed=seed, q=q1)
         passed = benjamini_hochberg(stats["p1_bootstrap"], q1)
         accepted.append(passed.mean())
         any_accepted += bool(passed.any())

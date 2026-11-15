@@ -16,7 +16,8 @@
   candidate without returns; a non-blank generator name. Rows where no
   candidate traded are dropped and counted in `source["n_dropped_rows"]`.
 - `stage_inputs` cuts periods by date: stages 1-3 see `<= search_end` only;
-  returns past `search_end` without `holdout_start` raise.
+  returns past `search_end` without `holdout_start` raise. It takes the
+  registered stage-1 BH level `q` and raises if `n_boot` can't resolve it.
 - Imports no generator, backtest or data code.
 - Failures: `TypeError` (not a dated frame / Series), `ValueError` (the rest).
 
@@ -24,7 +25,7 @@
 
 | Check | How | Result | Reproduce with |
 |---|---|---|---|
-| Unit tests | `tests/test_intake.py`, 17 tests | pass | `pytest -q tests/test_intake.py` |
+| Unit tests | `tests/test_intake.py`, 18 tests | pass | `pytest -q tests/test_intake.py` |
 | Holdout never seen by stages 1-3 | holdout rows poisoned with +1e6; bootstrap spied | stage 1-3 columns identical | `pytest -q tests/test_intake.py -k holdout` |
 | Null calibration | 20 null family sets each, iid, `rho=0.3`, `ar1=0.2`; BH at 0.10 on `p1_bootstrap` | mean share accepted <= 0.10 | `pytest -q tests/test_intake.py -k null` |
 | Power | 3 of 10 planted families, Sharpe 2 | all planted pass BH at 0.10 | `pytest -q tests/test_intake.py -k planted` |
