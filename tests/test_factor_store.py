@@ -153,3 +153,21 @@ def test_store_survives_reopening_and_trees_read_back(tmp_path):
     reopened = store.connect(path)
     assert [name for name, _ in store.factor_trees(reopened)] == [fid]
     assert factor_id(store.factor_trees(reopened)[0][1]) == fid
+
+
+def test_factor_database_sidecars_are_ignored(tmp_path):
+    import subprocess
+    from pathlib import Path
+
+    ignore = Path(__file__).resolve().parents[1] / ".gitignore"
+    (tmp_path / ".gitignore").write_text(ignore.read_text(), encoding="utf8")
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    paths = [f"experiments/factors.db{suffix}" for suffix in ("", "-journal", "-wal", "-shm")]
+    result = subprocess.run(
+        ["git", "check-ignore", *paths],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout.splitlines() == paths
