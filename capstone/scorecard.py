@@ -85,6 +85,8 @@ SCORECARD_COLUMNS: tuple[str, ...] = (
     "expected_mean",
     "scale",
 )
+# Read back as strings, never re-inferred: the family index, `best`, `generator`.
+_LABEL_COLUMNS = ("family", "best", "generator")
 _BOOL_COLUMNS = ("s1_pass", "s2_pass", "s3_pass", "s3_measured", "s4_pass", "accepted")
 
 
@@ -227,10 +229,21 @@ def _number(value) -> float:
 
 
 def read_report(path: str | Path) -> GateResult:
-    """Read a gate report written by `write_report` back into a `GateResult`."""
+    """Read a gate report written by `write_report` back into a `GateResult`.
+
+    Family labels, `best` and `generator` come back as the strings written.
+    """
     path = Path(path)
     report = json.loads(path.read_text(encoding="utf-8"))
-    card = pd.read_csv(path.parent / report["scorecard_csv"], index_col=0, **_ROUND_TRIP)
+    # Labels stay as written: without this "NA" reads as NaN and "001" as 1.
+    card = pd.read_csv(
+        path.parent / report["scorecard_csv"],
+        index_col=0,
+        dtype=dict.fromkeys(_LABEL_COLUMNS, str),
+        keep_default_na=False,
+        na_values=[""],
+        **_ROUND_TRIP,
+    )
     for column in _BOOL_COLUMNS:
         card[column] = card[column].astype(bool)
     h = report["header"]
@@ -239,7 +252,7 @@ def read_report(path: str | Path) -> GateResult:
     for name in ("search_fdr_estimate", "pbo", "avg_correlation"):
         h[name] = _number(h[name])
     accepted = tuple(card.index[card["accepted"]])
-    if list(accepted) != report["accepted"]:
+    if list(accepted) != [str(a) for a in report["accepted"]]:
         raise ValueError(f"{path}: the accepted families disagree with the scorecard")
     rows = report["loadings"]["rows"]
     loadings = pd.DataFrame()

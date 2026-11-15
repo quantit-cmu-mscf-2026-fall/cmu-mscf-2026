@@ -28,7 +28,8 @@ description.
   refused unless `holdout_start` (> `search_end`) is passed explicitly.
 - `holdout_statistics` reads only the columns it is asked for.
 - Errors: `TypeError` without a date index; `ValueError` for unordered
-  dates, an empty period or a holdout that does not follow the search.
+  dates, an empty period, a holdout that does not follow the search, or a
+  variant with no hypothesis label.
 - `screen` never reads `ho_*`. Stage 1 refuses a missing family p-value
   (BH would drop it); stage 4 refuses a live candidate with no holdout
   statistics. Stage 3 passes through (spanning test not built yet).
@@ -41,10 +42,10 @@ description.
 
 | Check | How | Result | Reproduce with |
 |---|---|---|---|
-| Unit tests | `tests/test_funnel.py`, 21 tests | pass | `pytest -q tests/test_funnel.py` |
+| Unit tests | `tests/test_funnel.py`, 32 tests | pass | `pytest -q tests/test_funnel.py` |
 | Holdout blindness | shock holdout dates, compare stage-1/2 numbers | unchanged | `pytest -q tests/test_funnel.py -k only_search` |
 | Calibration unchanged | old vs new `calibration.family_statistics`, 4 sets x 2 `n_boot` x 2 designs | exactly equal | see the PR description |
-| Scorecard and report | `tests/test_scorecard.py`, 7 tests (9 cases), hand-built result | pass, pandas 3.1 and 2.2 | `pytest -q tests/test_scorecard.py` |
+| Scorecard and report | `tests/test_scorecard.py`, 9 tests (14 cases), hand-built result | pass, pandas 3.1 and 2.2 | `pytest -q tests/test_scorecard.py` |
 | Registration | `tests/test_gate.py`, 16 tests (27 cases), `tmp_path` ledger | pass | `pytest -q tests/test_gate.py` |
 | Calibration runs unchanged | old vs new `run_funnel`/`run_naive_stack`/`gates_alone`, 96 settings | exactly equal | see the PR description |
 | pandas 3 | all-NaN family, nothing passes the naive stack | no warning | `pytest -q tests/test_funnel.py -k Pandas3` |

@@ -157,6 +157,27 @@ class TestReport:
         assert back.header.trial_scope == result.header.trial_scope
         pd.testing.assert_frame_equal(back.loadings, result.loadings)
 
+    @pytest.mark.parametrize(
+        "families, best",
+        [
+            (["NA", "EU", "JP"], None),  # "NA" is a default missing marker
+            (["001", "002", "003"], None),  # would be read as 1, 2, 3
+            (FAMILIES, ["7", "8", "9"]),  # best would be read as int
+        ],
+    )
+    def test_labels_read_back_as_written(self, tmp_path, families, best):
+        result = _result(accepted=("h0", "h1"))
+        card = result.scorecard.rename(index=dict(zip(FAMILIES, families, strict=True)))
+        if best is not None:
+            card["best"] = best
+        card["generator"] = "000"
+        result = dataclasses.replace(result, scorecard=card, accepted=tuple(families[:2]))
+        path = tmp_path / "gate_report.json"
+        write_report(result, path)
+        back = read_report(path)
+        pd.testing.assert_frame_equal(back.scorecard, result.scorecard)
+        assert back.accepted == result.accepted
+
     @pytest.mark.parametrize("accepted", [("h1", "h0"), ("h0", "h2")])
     def test_a_result_whose_accepted_disagrees_with_its_scorecard_is_refused(self, accepted):
         # Caught when the result is built, not when the report is read at deploy.
