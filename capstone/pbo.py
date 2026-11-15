@@ -55,6 +55,10 @@ _COMBO_CHUNK = 4096
 # 12,870, which is what this code produces. The paper has the typo.)
 _MAX_BLOCKS = 24
 
+# A variance below this fraction of the mean square is rounding residue, not
+# spread: the column is flat and has no Sharpe. See `_sharpe_from_moments`.
+_FLAT_RTOL = 1e-10
+
 
 def _chunked_masks(n_blocks: int, chunk_size: int) -> Iterator[np.ndarray]:
     """Yield in-sample block indicator matrices, `chunk_size` splits at a time.
@@ -89,7 +93,13 @@ def _sharpe_from_moments(
     block is visited once no matter how many splits reuse it.
 
     Returns NaN where the variance is not positive -- a flat strategy has no
-    Sharpe, and inventing one would let it win a split.
+    Sharpe, and inventing one would let it win a split. "Not positive" includes
+    a variance within rounding of zero: for a constant column the one-pass
+    formula below often leaves a tiny positive residue (about 1e-21 for a
+    daily 0.02/252), which would otherwise read as a Sharpe near 1e9. A
+    variance below `_FLAT_RTOL` times the mean square counts as zero; that is
+    a standard deviation under 1e-5 of the mean, which no real return series
+    has.
 
     The one-pass variance loses precision when the mean is large against the
     spread: at sd 0.01 the median relative error is about 1e-8 at mean 100,
@@ -98,8 +108,9 @@ def _sharpe_from_moments(
     """
     mean = total / n_obs
     variance = (total_sq - n_obs * mean**2) / (n_obs - 1)
+    flat = variance <= _FLAT_RTOL * (total_sq / n_obs)
     with np.errstate(invalid="ignore", divide="ignore"):
-        sharpe = np.where(variance > 0, mean / np.sqrt(variance), np.nan)
+        sharpe = np.where(flat, np.nan, mean / np.sqrt(variance))
     return sharpe * np.sqrt(periods_per_year)
 
 
@@ -139,8 +150,9 @@ def cscv(
                 beta will be negative in most practical cases, due to
                 compensation effects"; measured on independent no-skill sets
                 from `synth.make_return_matrix` the mean slope is about -0.41,
-                against about -1.0 on a coupled sweep. A negative slope alone is
-                not evidence of overfitting.
+                against about -1.0 on a coupled sweep. The baseline depends on
+                how correlated the candidates are: at `rho=0.5` it is about
+                -0.84. A negative slope alone is not evidence of overfitting.
             degradation_intercept: intercept of that same fit.
             oos_ranks: Series of the winner's relative OOS rank per split, in
                 (0, 1), where 0.5 is the median; NaN for a split without a

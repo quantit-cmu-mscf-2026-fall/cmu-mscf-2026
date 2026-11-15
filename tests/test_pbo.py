@@ -8,7 +8,7 @@ got wrong. Two baselines matter and they are not the same number:
   generates -- score PBO near **0.5**, not near 1. Each candidate is its own
   draw, so its IS and OOS halves are independent and the winner's OOS rank is
   uniform. Half the splits land below the median by symmetry. Measured over
-  seeds 0-5 of the configuration used here: 0.34 to 0.69, mean 0.55.
+  seeds 0-5 of the configuration used here: 0.29 to 0.72, mean 0.53.
 * **Coupled candidates** -- variants of one search over one sample, so their
   full-sample performances cluster while their IS/OOS splits do not -- score
   near **1.0**. That is the overfit-parameter-sweep regime CSCV exists to
@@ -35,7 +35,7 @@ import pytest
 
 from capstone.backtest import run_backtest
 from capstone.pbo import cscv
-from capstone.synth import candidate_frames, make_panel
+from capstone.synth import candidate_frames, make_panel, make_return_matrix
 
 # Kept small enough that the whole file runs in seconds, but wide enough that
 # the winner is picked from a real crowd: 100 candidates over ~2 years.
@@ -92,7 +92,7 @@ def _assert_independent_null_calibration(result: dict) -> None:
     Kept as a helper rather than inlined so the sabotage test can assert that
     these exact assertions fail when IS and OOS share rows. Bounds are wide
     because a single panel's PBO is itself a noisy statistic -- the measured
-    spread over seeds 0-5 is 0.34 to 0.69.
+    spread over seeds 0-5 is 0.29 to 0.72.
     """
     assert 0.20 < result["pbo"] < 0.85, (
         f"PBO {result['pbo']:.3f} is outside the range independent no-skill candidates "
@@ -119,7 +119,7 @@ class TestIndependentNullPanel:
 
     def test_pbo_averages_near_one_half_across_seeds(self):
         # Per-panel PBO is noisy; the average over seeds is what should sit at
-        # 0.5. Measured mean over these three seeds is 0.46.
+        # 0.5. Measured mean over these three seeds is 0.44.
         values = [cscv(strategy_matrix(seed=s), n_blocks=N_BLOCKS)["pbo"] for s in range(3)]
         mean_pbo = float(np.mean(values))
         assert 0.30 < mean_pbo < 0.75, f"mean PBO {mean_pbo:.3f} over seeds {values}"
@@ -381,7 +381,7 @@ class TestMedianTiesAndUnusableSplits:
         # Lauren's #64 repro: one column earns for 100 days and is flat after,
         # the textbook overfit pattern. When it wins in-sample but has no OOS
         # Sharpe, the split must stay in and rank it at the bottom. Dropping
-        # those splits read 0.243 on 35 of 70 splits instead of 0.614.
+        # those splits read 0.243 on 35 of 70 splits instead of 0.621.
         rng = np.random.default_rng(1)
         matrix = pd.DataFrame(rng.normal(0, 0.01, (800, 6)))
         burst = np.zeros(800)
@@ -399,14 +399,70 @@ class TestMedianTiesAndUnusableSplits:
         assert result["n_splits_used"] == result["n_splits"]
         assert 0.0 <= result["pbo"] <= 1.0
 
-    def test_a_flat_candidate_still_never_wins_a_split(self):
-        # Unchanged behaviour, pinned alongside the fix: a zero-variance column
-        # has no Sharpe, so it must not be selectable IS.
+    # 0.001 happens to cancel exactly in the one-pass variance; the others leave
+    # a small positive residue that used to pass for a variance and gave the
+    # flat column a Sharpe of about 1e9.
+    @pytest.mark.parametrize("level", [0.001, 0.02 / 252, 0.0003, 0.0007, 0.01 / 3])
+    @pytest.mark.parametrize("n_blocks", [8, 16])
+    def test_a_flat_candidate_still_never_wins_a_split(self, level, n_blocks):
+        # A constant column has no Sharpe, so it must not be selectable IS,
+        # whatever constant it holds and however the blocks fall.
         rng = np.random.default_rng(0)
         matrix = pd.DataFrame(rng.normal(0, 0.01, (N_DATES, 6)))
-        matrix["cash"] = 0.001
+        matrix["cash"] = level
 
-        result = cscv(matrix, n_blocks=8)
+        result = cscv(matrix, n_blocks=n_blocks)
 
         assert "cash" not in set(result["winner_columns"])
         assert result["n_splits_used"] == result["n_splits"]
+        assert np.all(np.abs(result["winner_is_sharpe"]) < 100)
+
+
+# REVIEW.md item 3: null calibration and power on `synth.make_return_matrix`,
+# with the correlated (`rho`) and autocorrelated (`ar1`) nulls switched on.
+# Small matrices and many seeds: one seed's PBO swings widely (sd about 0.22
+# here), the seed average does not.
+_SYNTH_CASES = [(0.0, 0.0), (0.5, 0.0), (0.0, 0.3), (0.5, 0.3)]
+
+
+class TestReturnMatrixCalibration:
+    @pytest.mark.parametrize(("rho", "ar1"), _SYNTH_CASES)
+    def test_no_skill_candidates_average_a_pbo_near_one_half(self, rho, ar1):
+        # Independent-in-time no-skill candidates: the IS winner's OOS rank is
+        # uniform, so PBO averages 0.5 whether or not the candidates share a
+        # factor or are autocorrelated. Measured over seeds 0-31: 0.508 to
+        # 0.519 across the four cases, sd of one seed about 0.22, so the band
+        # below is about 2.5 standard errors of the mean wide.
+        pbos = [
+            cscv(
+                make_return_matrix(n_obs=400, n_candidates=20, rho=rho, ar1=ar1, seed=seed).returns,
+                n_blocks=8,
+            )["pbo"]
+            for seed in range(32)
+        ]
+
+        assert 0.4 < np.mean(pbos) < 0.6
+
+    @pytest.mark.parametrize(("rho", "ar1"), _SYNTH_CASES)
+    def test_a_planted_signal_drives_pbo_towards_zero(self, rho, ar1):
+        # One candidate with a real edge wins IS and stays on top OOS. Measured
+        # over seeds 0-15: mean PBO 0.0 to 0.07 across the four cases (the
+        # ar1 case is the weakest, since autocorrelation widens the Sharpe's
+        # spread).
+        pbos = [
+            cscv(
+                make_return_matrix(
+                    n_obs=400,
+                    n_candidates=20,
+                    n_real=1,
+                    sharpe_real=5.0,
+                    rho=rho,
+                    ar1=ar1,
+                    seed=seed,
+                ).returns,
+                n_blocks=8,
+            )["pbo"]
+            for seed in range(16)
+        ]
+
+        assert np.mean(pbos) < 0.2
