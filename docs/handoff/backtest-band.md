@@ -1,7 +1,7 @@
 # Testing handoff: no-trade band in the backtest
 
 ## 1. What this PR adds
-A no-trade band for `capstone/backtest.py` (QUANTIT-NEW): `backtest_frame(..., band=)`
+A no-trade band for `capstone/backtest.py` (QUANTIT-123): `backtest_frame(..., band=)`
 and the rule itself, `band_book(weights, missing, band=, gross=, hold=)`. Tests are in
 `tests/test_backtest.py` (the "No-trade band" section). It does not add `band=` to
 `run_backtest`, `sweep` or `candidate_returns`, and it does not touch the factor code.
