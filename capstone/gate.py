@@ -73,9 +73,16 @@ class GateConfig:
     factors_digest: str | None = None
 
     def __post_init__(self) -> None:
+        dates = {}
         for name in ("search_end", "holdout_start", "holdout_end"):
-            object.__setattr__(self, name, pd.Timestamp(getattr(self, name)).date().isoformat())
-        if not self.search_end < self.holdout_start <= self.holdout_end:
+            value = getattr(self, name)
+            stamp = None if value is None else pd.Timestamp(value)
+            if stamp is None or pd.isna(stamp):
+                raise ValueError(f"{name} is required (got {value!r})")
+            dates[name] = stamp.date()
+            object.__setattr__(self, name, stamp.date().isoformat())
+        # Compare the dates themselves: as strings a missing date ("NaT") sorts last.
+        if not dates["search_end"] < dates["holdout_start"] <= dates["holdout_end"]:
             raise ValueError("need search_end < holdout_start <= holdout_end")
         if self.n_boot < 0 or (self.thresholds.stage1 == "bootstrap" and self.n_boot == 0):
             raise ValueError("n_boot must be positive for the bootstrap stage-1 gate")

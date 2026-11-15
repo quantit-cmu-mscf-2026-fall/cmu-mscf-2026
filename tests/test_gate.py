@@ -152,12 +152,25 @@ class TestGateConfig:
             {"n_boot": 0},
             {"n_boot": -1, "thresholds": Thresholds()},
             {"factors_digest": "not-a-digest"},
+            # A missing date would be stored as "NaT", which sorts after
+            # every ISO date, so the order check alone lets it through.
+            {"holdout_end": None},
+            {"holdout_end": float("nan")},
+            {"holdout_end": "NaT"},
+            {"search_end": None},
+            {"holdout_start": None},
         ],
     )
     def test_bad_configs_raise_at_construction(self, market, change):
         change = {k: market.search_end if v == "search_end" else v for k, v in change.items()}
         with pytest.raises(ValueError):
             config_for(market, **change)
+
+    def test_a_registered_config_with_no_holdout_end_is_refused(self, market):
+        data = config_for(market).to_dict()
+        data["holdout_end"] = None
+        with pytest.raises(ValueError, match="holdout_end"):
+            GateConfig.from_dict(data)
 
     def test_no_draws_are_needed_without_the_bootstrap(self, market):
         assert config_for(market, n_boot=0, thresholds=Thresholds(stage1="rho")).n_boot == 0
