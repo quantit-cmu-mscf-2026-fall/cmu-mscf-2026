@@ -249,6 +249,34 @@ def test_a_missing_rate_pays_that_days_median():
     assert frame["cost"].iloc[1] == pytest.approx(0.5 * 30e-4 + 0.5 * 40e-4)
 
 
+@pytest.mark.parametrize(
+    "break_table",
+    [
+        pytest.param(lambda r: r.drop(r.index[2]), id="a date missing from the table"),
+        pytest.param(lambda r: r.iloc[:3], id="a table that ends early"),
+        pytest.param(lambda r: r.set_axis(r.index.strftime("%Y-%m-%d")), id="string dates"),
+    ],
+)
+def test_a_trade_with_no_rate_at_all_raises_instead_of_trading_free(break_table):
+    # With every asset missing, the day's median is NaN too, and `.sum` used to
+    # charge those trades nothing: a string-dated table cost 0.0 in total.
+    signal, returns = _panel(n_dates=6, n_assets=3)
+    rate = pd.DataFrame(10.0, index=signal.index, columns=signal.columns)
+    with pytest.raises(ValueError, match="no rate for trades"):
+        backtest_frame(signal, returns, cost_bps=break_table(rate), demean=True, gross=1.0)
+
+
+def test_an_untraded_date_needs_no_rate():
+    # Only trades need a price: a held book on a date with no rates is fine.
+    signal, returns = _panel(n_dates=6, n_assets=3)
+    signal.loc[:] = [1.0, 0.0, -1.0]  # one book, built on day 0 and never changed
+    rate = pd.DataFrame(10.0, index=signal.index, columns=signal.columns)
+    rate.iloc[2:] = np.nan
+    frame = backtest_frame(signal, returns, cost_bps=rate, demean=True, gross=1.0)
+    assert frame["cost"].iloc[1] == pytest.approx(10e-4)
+    assert (frame["cost"].iloc[2:] == 0).all()
+
+
 def test_holding_trades_only_on_rebalance_dates():
     signal, returns = _panel(n_dates=60)
     daily = backtest_frame(signal, returns, cost_bps=10.0, demean=True, gross=1.0)
