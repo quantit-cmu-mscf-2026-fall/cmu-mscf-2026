@@ -11,6 +11,7 @@ from capstone.backtest import (
     backtest_frame,
     candidate_returns,
     run_backtest,
+    sharpe_ratio,
     summarize,
     sweep,
     to_weights,
@@ -166,6 +167,21 @@ def test_summarize_zero_vol_gives_nan_sharpe_not_error():
     summary = summarize(returns, freq="daily")
     assert summary.vol == 0.0
     assert np.isnan(summary.sharpe)
+
+
+def test_sharpe_ratio_is_mean_over_sample_sd_annualised():
+    r = pd.Series([0.01, -0.02, 0.03, np.nan, 0.005])
+    clean = r.dropna()
+    expected = clean.mean() / clean.std(ddof=1) * np.sqrt(252)
+    assert sharpe_ratio(r, 252) == pytest.approx(expected, rel=1e-15)
+    assert np.isnan(sharpe_ratio(pd.Series([0.0] * 5), 252))  # no variance
+    assert np.isnan(sharpe_ratio(pd.Series([0.01]), 252))  # one period
+    series = pd.Series(np.random.default_rng(0).normal(0.001, 0.01, 500))
+    for freq, periods in (("daily", 252), ("monthly", 12)):
+        summary = summarize(series, freq=freq)
+        assert summary.sharpe == sharpe_ratio(series, periods)
+        # Exactly the ratio summarize reports, as it was before sharpe_ratio existed.
+        assert summary.sharpe == summary.mean / summary.vol
 
 
 def test_cost_bps_reduces_mean_return():
