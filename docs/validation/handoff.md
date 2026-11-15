@@ -205,6 +205,14 @@ your branch yet, the command line gives the same number:
 `python -m capstone.runlog stats`. Tests must set `CAPSTONE_LEDGER_DIR` to a
 temporary directory and never touch `experiments/runs.jsonl`.
 
+The ledger is append-only, so a run that should not count (a duplicate, a
+run against the wrong data) is never deleted. Log a correction instead:
+`log_run("ledger-correction", params={"ledger_name": "mom-sweep",
+"excludes": [{"ts_utc": "<the run's ts_utc>"}], "reason": "..."})`. Add any
+param of the run to an item to tell apart runs logged at the same time.
+`trial_count` and `stats` leave the excluded runs and the correction itself
+out of the count, and a malformed correction raises `ValueError`.
+
 ## Avoiding merge conflicts
 
 - Put new methods in **your own module** (`bootstrap.py`, `snooping.py`,

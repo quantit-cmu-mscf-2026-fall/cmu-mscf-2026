@@ -22,6 +22,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 LEDGER_FILENAME = "runs.jsonl"
+# The name of an entry that leaves earlier entries out of the trial count.
+CORRECTION_NAME = "ledger-correction"
 
 
 def _ledger_dir() -> Path:
@@ -172,6 +174,60 @@ def read_entries() -> list[dict]:
     return entries
 
 
+def _corrections(entries: list[dict]) -> dict[tuple[str, str], list[dict]]:
+    """What the ledger's corrections exclude, by (experiment name, ts_utc).
+
+    The ledger is append-only: a mistaken or duplicate run is never deleted.
+    A later entry named `CORRECTION_NAME` excludes it instead, and says why::
+
+        log_run(CORRECTION_NAME, params={
+            "ledger_name": "evaluate-factor",
+            "excludes": [{"ts_utc": "...", "factor_id": "..."}, ...],
+            "reason": "duplicates of the 2026-10-05 run",
+        })
+
+    An item excludes the entry logged under `ledger_name` at `ts_utc` whose
+    params hold every other key of the item with the same value: the
+    timestamp names the run, and the params it lists tell apart runs logged
+    in the same microsecond.
+
+    Raises:
+        ValueError: if a correction has no `ledger_name`, its `excludes` is
+            not a list, or an item has no `ts_utc`. Ignoring a malformed
+            correction would quietly count runs someone meant to exclude.
+    """
+    out: dict[tuple[str, str], list[dict]] = {}
+    for entry in entries:
+        if entry.get("name") != CORRECTION_NAME:
+            continue
+        params = entry.get("params") or {}
+        excludes = params.get("excludes")
+        if (
+            "ledger_name" not in params
+            or not isinstance(excludes, list)
+            or not all(isinstance(item, dict) and "ts_utc" in item for item in excludes)
+        ):
+            raise ValueError(
+                f"malformed ledger correction logged at {entry.get('ts_utc')}: it needs "
+                "params ledger_name and excludes, a list of items each with a ts_utc"
+            )
+        for item in excludes:
+            out.setdefault((params["ledger_name"], item["ts_utc"]), []).append(item)
+    return out
+
+
+def _is_trial(entry: dict, corrections: dict[tuple[str, str], list[dict]]) -> bool:
+    """False for a correction entry and for an entry a correction excludes."""
+    if entry.get("name") == CORRECTION_NAME:
+        return False
+    params = entry.get("params") or {}
+    items = corrections.get((entry.get("name"), entry.get("ts_utc")), ())
+    return not any(
+        all(k in params and params[k] == v for k, v in item.items() if k != "ts_utc")
+        for item in items
+    )
+
+
 def trial_count(
     name: str | None = None,
     *,
@@ -197,6 +253,9 @@ def trial_count(
             methodology runs out of a strategy's family size; the convention
             is to tag those "synthetic".
 
+    Corrections (`_corrections`) apply first: an entry a ledger correction
+    excludes is not a trial, and neither is the correction itself.
+
     Returns:
         The number of matching entries. Entries written without a `name` are
         counted by `trial_count()` but match no `name` filter, so the per-name
@@ -204,7 +263,7 @@ def trial_count(
         `params` and `seed` logged twice (a re-run after a crash, say) is two
         entries, because each was logged before its result was seen. That
         errs conservative; a duplicate that should not count is marked by a
-        later entry, never deleted.
+        later correction entry, never deleted.
 
     Raises:
         LookupError: if nothing matches. A correction run against zero trials
@@ -213,12 +272,15 @@ def trial_count(
             excluded everything, so it fails loudly instead of returning 0.
         TypeError: if a tag filter is a bare string. `set("synthetic")` is a
             set of letters, which would silently match nothing.
-        ValueError: from `read_entries`, if a ledger line is malformed.
+        ValueError: from `read_entries`, if a ledger line is malformed, or
+            if a ledger correction is.
     """
     for arg, tags in (("include_tags", include_tags), ("exclude_tags", exclude_tags)):
         if isinstance(tags, str):
             raise TypeError(f"{arg} takes a list of tags, not a string: [{tags!r}]")
     entries = read_entries()
+    corrections = _corrections(entries)
+    entries = [entry for entry in entries if _is_trial(entry, corrections)]
     if name is not None:
         entries = [entry for entry in entries if entry.get("name") == name]
     if include_tags is not None:
@@ -241,11 +303,17 @@ def trial_count(
 
 
 def _cmd_stats() -> None:
-    """Print the numbers a correction needs: how many trials, by whom, of what."""
+    """Print the numbers a correction needs: how many trials, by whom, of what.
+
+    Runs per name are trials: ledger corrections applied, as in `trial_count`.
+    """
     entries = read_entries()
-    names = Counter(entry.get("name", "?") for entry in entries)
+    corrections = _corrections(entries)
+    trials = [entry for entry in entries if _is_trial(entry, corrections)]
+    names = Counter(entry.get("name", "?") for entry in trials)
     users = {entry.get("user", "unknown") for entry in entries}
     print(f"total runs: {len(entries)}")
+    print(f"trials (corrections applied): {len(trials)}")
     print(f"distinct names: {len(names)}")
     for name, count in names.most_common():
         print(f"  {name}: {count}")

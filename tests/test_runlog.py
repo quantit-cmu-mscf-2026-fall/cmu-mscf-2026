@@ -260,3 +260,97 @@ def test_a_repeated_trial_counts_twice(tmp_path, monkeypatch):
     for _ in range(3):
         runlog.log_run("sweep", params={"lookback": 20}, seed=0)
     assert runlog.trial_count("sweep") == 3
+
+
+# ---------------------------------------------------------------------------
+# Corrections: the ledger is append-only, so a run that should not count is
+# excluded by a later "ledger-correction" entry, never deleted.
+
+
+def _correction(ledger_name, excludes, reason="duplicates"):
+    return runlog.log_run(
+        runlog.CORRECTION_NAME,
+        params={"ledger_name": ledger_name, "excludes": excludes, "reason": reason},
+    )
+
+
+def test_trial_count_honours_a_correction(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    first = [runlog.log_run("sweep", params={"factor_id": f}) for f in ("a", "b")]
+    runlog.log_run("sweep", params={"factor_id": "a", "variant_id": "a-1"})
+    runlog.log_run("other", params={"factor_id": "a"})
+    assert runlog.trial_count("sweep") == 3
+
+    _correction(
+        "sweep", [{"ts_utc": e["ts_utc"], "factor_id": e["params"]["factor_id"]} for e in first]
+    )
+    assert runlog.trial_count("sweep") == 1
+    assert runlog.trial_count("other") == 1
+    # The correction is bookkeeping, not a trial, and nothing was deleted.
+    assert runlog.trial_count() == 2
+    assert len(runlog.read_entries()) == 5
+
+
+def test_a_correction_matches_on_the_timestamp_and_every_param_it_names(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    run = runlog.log_run("sweep", params={"variant_id": "v1", "lookback": 20})
+    runlog.log_run("sweep", params={"variant_id": "v2"})
+    _correction("sweep", [{"ts_utc": run["ts_utc"], "variant_id": "v3"}])  # wrong param
+    _correction("other", [{"ts_utc": run["ts_utc"]}])  # another experiment's runs
+    _correction("sweep", [{"ts_utc": "2001-01-01T00:00:00+00:00"}])  # no such run
+    assert runlog.trial_count("sweep") == 2
+
+    _correction("sweep", [{"ts_utc": run["ts_utc"], "variant_id": "v1", "lookback": 20}])
+    assert runlog.trial_count("sweep") == 1
+
+
+def test_corrections_compose_with_the_tag_filters(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    run = runlog.log_run("sweep", params={"seed_set": 1}, tags=["real"])
+    runlog.log_run("sweep", params={"seed_set": 2}, tags=["real"])
+    runlog.log_run("sweep", params={"seed_set": 3}, tags=["synthetic"])
+    _correction("sweep", [{"ts_utc": run["ts_utc"], "seed_set": 1}])
+    assert runlog.trial_count("sweep", include_tags=["real"]) == 1
+    assert runlog.trial_count("sweep", exclude_tags=["real"]) == 1
+    assert runlog.trial_count(exclude_tags=["synthetic"]) == 1
+
+
+def test_a_correction_that_excludes_everything_still_refuses_zero(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    run = runlog.log_run("sweep")
+    _correction("sweep", [{"ts_utc": run["ts_utc"]}])
+    with pytest.raises(LookupError):
+        runlog.trial_count("sweep")
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"excludes": [{"ts_utc": "x"}], "reason": "r"},  # no ledger_name
+        {"ledger_name": "sweep", "excludes": [{"factor_id": "a"}], "reason": "r"},  # no ts_utc
+        {"ledger_name": "sweep", "excludes": {"ts_utc": "x"}, "reason": "r"},  # not a list
+    ],
+)
+def test_a_malformed_correction_raises(tmp_path, monkeypatch, params):
+    # Ignoring it would quietly keep runs someone meant to exclude, or (worse,
+    # with a guessed reading) drop runs nobody meant to.
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    runlog.log_run("sweep")
+    runlog.log_run(runlog.CORRECTION_NAME, params=params)
+    with pytest.raises(ValueError, match="correction"):
+        runlog.trial_count("sweep")
+
+
+def test_stats_counts_trials_after_corrections(tmp_path, monkeypatch, capsys):
+    # CLAUDE.md sends people to `stats` for the trial count, so it must agree
+    # with `trial_count`.
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    runs = [runlog.log_run("alpha", seed=seed) for seed in range(3)]
+    runlog.log_run("beta")
+    _correction("alpha", [{"ts_utc": runs[0]["ts_utc"]}])
+    runlog.main(["stats"])
+    out = capsys.readouterr().out
+    assert "total runs: 5" in out
+    assert "trials (corrections applied): 3" in out
+    assert "  alpha: 2" in out and "  beta: 1" in out
+    assert runlog.CORRECTION_NAME not in out
