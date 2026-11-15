@@ -431,10 +431,10 @@ def test_gate_by_hand():
     assert gate(stats_of([0.5]), 5.0, 1e-6) == 0.0  # closed below two residuals
 
 
-def test_veto_gate_counts_attempts_until_two_are_scored():
+def test_veto_gate_counts_attempts_independently_of_scored_residuals():
     assert veto_gate(stats_of([], failures=5), 5.0, 1e-6) == pytest.approx(0.5)
     s = stats_of([0.1, 0.3, -0.1], failures=10)
-    assert veto_gate(s, 5.0, 1e-6) == gate(s, 5.0, 1e-6)
+    assert veto_gate(s, 5.0, 1e-6) == pytest.approx(13 / 18)
 
 
 @pytest.mark.parametrize(
@@ -456,6 +456,15 @@ def test_veto_needs_both_confidence_and_failures():
     assert not vetoed(stats_of([], failures=1), CONFIG)  # rate 2/3 < 0.7
     assert not vetoed(stats_of([], failures=2), CONFIG)  # gate 2/7 < 0.3
     assert not vetoed(stats_of([0.2] * 50), CONFIG)  # successes never veto
+
+
+def test_scored_children_do_not_hide_repeated_failures_or_remove_a_veto():
+    assert vetoed(stats_of([0.10, -0.08], failures=40), CONFIG)
+    s = stats_of([], failures=30)
+    assert vetoed(s, CONFIG)
+    for residual in (0.10, -0.10):
+        s.add("admitted", residual)
+    assert vetoed(s, CONFIG)
 
 
 PARENTS = [

@@ -536,11 +536,7 @@ def gate(stats: PairStats, kappa: float, epsilon: float) -> float:
 
 
 def veto_gate(stats: PairStats, kappa: float, epsilon: float) -> float:
-    """The veto's confidence: `gate` once two children are scored, else
-    attempts / (attempts + kappa), so pairs whose children never get scored
-    (they all fail) can still be vetoed."""
-    if stats.n >= 2:
-        return gate(stats, kappa, epsilon)
+    """Confidence in the failure posterior, from every attempt, scored or not."""
     return stats.attempts / (stats.attempts + kappa)
 
 
