@@ -37,7 +37,9 @@ papers (file or paperlog) -> hypotheses.extract -> store.hypotheses
 - **Originality** (AlphaAgent Eq. 6) is the share of a formula inside its
   largest subtree shared with a reference, compared by shape, so a retuned
   window does not make a copy original. Rejected at or above `max_zoo_share`
-  against Alpha101 and `max_store_share` against what is already stored.
+  against Alpha101. Against stored factors, `max_store_share = 1.0` rejects
+  only whole-shape retunes, not components of a larger stored factor;
+  lower thresholds reject at or above that shared-subtree fraction.
 - **Identity**: `factor_id` keeps windows and constants and ignores operand
   order under `+` and `*`. Each factor is stored once; every proposal of it,
   including duplicates, rejections and parse failures, is kept in
