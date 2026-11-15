@@ -26,7 +26,7 @@ translates Chinese-language papers into English.
 3. **Deduplicate.** By arXiv ID, DOI, and fuzzy title, within the batch and against the
    log. Records whose identifiers disagree are never merged.
 4. **Prefilter.** A keyword gate that *routes* rather than drops: rejected papers keep
-   their abstracts and are revisited whenever the prefilter version or mode changes.
+   their abstracts and are re-checked on every run, so a change to its terms or mode lets them through.
 5. **Screen.** Claude Haiku scores 0-5 against your rubric, tags, extracts methods,
    datasets, markets and code links, flags look-ahead bias, and translates. Every scoring
    event is recorded, so a score is a dated opinion under a known rubric version, not a
@@ -144,7 +144,7 @@ and set `PAPERLOG_DB=../paperlog-data/papers.db`.
 
 arXiv, Semantic Scholar and OpenAlex are free at this volume (OpenAlex's free key has a
 daily allowance far above what a weekly run uses). The only cost is screening: with Haiku,
-each paper is one short call, and `max_papers_per_run` caps the total. Check the token
+each paper is one short call, and `screening.budget_per_run` caps the total. Check the token
 counts printed at the end of each run against current pricing at claude.com/pricing.
 
 ## Tuning

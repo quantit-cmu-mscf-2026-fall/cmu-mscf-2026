@@ -83,13 +83,15 @@ def backfill_references(ref_anchors, cfg, log=print):
 
     Semantic Scholar first, OpenAlex when it has nothing, which happens when the
     publisher elides the reference list. Returns (papers, labels done); a paper
-    counts as done only if references came back, so an empty answer is retried
-    on the next run instead of being marked done.
+    counts as done only if the whole list came back, so an empty or partial
+    answer is retried on the next run instead of being marked done.
     """
     cap = cfg["semantic_scholar"].get("max_references", 200)
     out, done = [], []
     for label, pid, doi in ref_anchors:
         refs = s2.fetch_references([(label, pid)], cap, log) if pid else []
+        if refs is None:  # a page failed: not done, retried next run
+            continue
         if not refs and cfg["openalex"].get("enabled", True):
             refs = openalex.references_of(label, doi, cap, log)
         if refs:
@@ -170,16 +172,13 @@ def classify(con, keys, pf_cfg, loosen: bool):
 
 
 def revisit_filtered(con, pf_cfg, loosen: bool, log=print):
-    """Papers the prefilter rejected under an older/stricter setting get another look."""
+    """Every filtered paper is re-checked against the current prefilter, so a change
+    to its terms or mode lets papers through without bumping `version`."""
     cfg = dict(pf_cfg)
     if loosen:
         cfg["mode"] = "either"
     version = pf_cfg.get("version", 1)
-    rows = con.execute(
-        "SELECT key, title, abstract FROM papers WHERE status='filtered' AND "
-        "(prefilter_version IS NULL OR prefilter_version < ? OR ?)",
-        (version, 1 if loosen else 0),
-    ).fetchall()
+    rows = con.execute("SELECT key, title, abstract FROM papers WHERE status='filtered'").fetchall()
     revived = []
     for r in rows:
         if prefilter.passes(r["title"], r["abstract"] or "", cfg):

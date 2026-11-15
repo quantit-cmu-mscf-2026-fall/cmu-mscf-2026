@@ -57,7 +57,8 @@ def to_paper(c: dict, found_via: str) -> Paper:
     )
 
 
-def _page(pid: str, edge: str, cap: int, log) -> list[dict]:
+def _page(pid: str, edge: str, cap: int, log) -> tuple[list[dict], bool]:
+    """Up to `cap` items, and whether every page asked for arrived."""
     items, offset = [], 0
     key = "citingPaper" if edge == "citations" else "citedPaper"
     while offset < cap:
@@ -69,13 +70,13 @@ def _page(pid: str, edge: str, cap: int, log) -> list[dict]:
             ).json()
         except Exception as e:
             log(f"  s2: {edge} failed for {pid}: {e}")
-            break
+            return items, False
         items += [i.get(key) or {} for i in r.get("data") or []]
         if r.get("next") is None:
             break
         offset = r["next"]
         time.sleep(1.1)
-    return items
+    return items, True
 
 
 def fetch_citations(anchors: list[tuple[str, str]], since: str, cap: int, log=print) -> list[Paper]:
@@ -83,7 +84,7 @@ def fetch_citations(anchors: list[tuple[str, str]], since: str, cap: int, log=pr
     out = []
     for label, pid in anchors:
         n = 0
-        for c in _page(pid, "citations", cap, log):
+        for c in _page(pid, "citations", cap, log)[0]:
             if not c.get("title"):
                 continue
             p = to_paper(c, f"cites:{label[:60]}")
@@ -98,15 +99,19 @@ def fetch_citations(anchors: list[tuple[str, str]], since: str, cap: int, log=pr
     return out
 
 
-def fetch_references(anchors: list[tuple[str, str]], cap: int, log=print) -> list[Paper]:
-    """References of adopted papers: no date filter, this is deliberate backfill."""
+def fetch_references(anchors: list[tuple[str, str]], cap: int, log=print) -> list[Paper] | None:
+    """References of adopted papers: no date filter, this is deliberate backfill.
+
+    Returns None if any page failed: a partial list would be marked done and its
+    missing references never retried.
+    """
     out = []
     for label, pid in anchors:
-        refs = [
-            to_paper(c, f"cited-by:{label[:60]}")
-            for c in _page(pid, "references", cap, log)
-            if c.get("title")
-        ]
+        items, complete = _page(pid, "references", cap, log)
+        if not complete:
+            log(f"  s2: reference list of '{label[:55]}' incomplete, will retry next run")
+            return None
+        refs = [to_paper(c, f"cited-by:{label[:60]}") for c in items if c.get("title")]
         out += refs
         log(f"  s2: {len(refs):>4} references of '{label[:55]}'")
         time.sleep(1.1)

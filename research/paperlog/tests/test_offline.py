@@ -724,3 +724,33 @@ def test_a_partial_reference_list_is_not_returned(monkeypatch):
 
     monkeypatch.setattr(openalex, "get", fake_get)
     assert openalex.references_of("P", None, 200, lambda *_: None) == []
+
+
+def test_a_partial_semantic_scholar_reference_list_is_not_marked_done(monkeypatch):
+    # Page 1 arrives, page 2 fails after retries: the paper must be retried next run.
+    def fake_get(url, params=None, **_):
+        if params["offset"] == 0:
+            rows = [{"citedPaper": {"title": f"Ref {i}", "paperId": f"r{i}"}} for i in range(100)]
+            return types.SimpleNamespace(json=lambda: {"data": rows, "next": 100})
+        raise RuntimeError("429")
+
+    monkeypatch.setattr(cli.s2, "get", fake_get)
+    monkeypatch.setattr(cli.s2.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(cli.openalex, "references_of", lambda *a, **k: [Paper(title="OA")])
+    cfg = {"semantic_scholar": {"max_references": 200}, "openalex": {"enabled": True}}
+    refs, done = cli.backfill_references([("Adopted paper", "PID", None)], cfg, lambda *_: None)
+    assert refs == [] and done == []
+
+
+def test_filtered_papers_revisited_when_prefilter_terms_or_mode_change(tmp_path):
+    con = dbm.connect(str(tmp_path / "m.db"))
+    k = dbm.insert(con, Paper(title="Momentum in stock returns", abstract=""), 1)
+    strict = {"version": 1, "mode": "both", "agent_terms": ["momentum"], "finance_terms": ["x"]}
+    assert cli.classify(con, [k], strict, loosen=False) == []
+    assert cli.revisit_filtered(con, strict, loosen=False) == []  # same rule: stays filtered
+    # mode changed, version not bumped
+    assert cli.revisit_filtered(con, {**strict, "mode": "either"}, loosen=False) == [k]
+    con.execute("UPDATE papers SET status='filtered' WHERE key=?", (k,))
+    # terms widened, version not bumped
+    wider = {**strict, "finance_terms": ["stock"]}
+    assert cli.revisit_filtered(con, wider, loosen=False) == [k]
