@@ -21,7 +21,7 @@ papers (file or paperlog) -> hypotheses.extract -> store.hypotheses
   factors) or `method` (about how to search or validate, such as "simpler
   factors decay less"). Method hypotheses are stored and stop there.
 - **Complexity**: a formula with more than `max_nodes` tree nodes is rejected
-  (AlphaAgent's complexity control). Every Alpha101 member has at most 26.
+  (AlphaAgent's complexity control). Every Alpha101 member in the zoo has a spelling with at most 28 nodes.
 - **Usage**: every paper's model calls and tokens go in the `usage` table,
   including for a paper that failed partway; `stats` totals them.
 - **Factors** are formulas in a closed grammar over daily open, high, low,

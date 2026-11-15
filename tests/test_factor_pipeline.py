@@ -281,3 +281,25 @@ def test_cli_without_paperlog_exits_cleanly(tmp_path, monkeypatch, capsys):
     db = str(tmp_path / "factors.db")
     assert cli.main(["--db", db, "run", "--source", "paperlog"]) == 2
     assert "file source" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("command", [["list"], ["stats"], ["methods"], ["lineage", "missing"]])
+def test_read_commands_refuse_a_missing_store_without_creating_it(tmp_path, capsys, command):
+    path = tmp_path / "not-synced" / "factors.db"
+    assert cli.main(["--db", str(path), *command]) == 2
+    assert not path.parent.exists()
+    assert "store" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("command", [["list"], ["stats"], ["methods"], ["lineage", "missing"]])
+def test_read_commands_leave_legacy_stores_unchanged(tmp_path, command):
+    path = tmp_path / "legacy #1.db"
+    con = store.connect(path)
+    con.execute("ALTER TABLE hypotheses DROP COLUMN kind")
+    con.execute("ALTER TABLE proposals DROP COLUMN proposed_factor_id")
+    con.execute("DROP TABLE usage")
+    con.commit()
+    con.close()
+    before = path.read_bytes()
+    assert cli.main(["--db", str(path), *command]) in (0, 1)
+    assert path.read_bytes() == before

@@ -112,9 +112,13 @@ def default_path() -> Path:
     return Path(__file__).resolve().parents[2] / "experiments" / DB_FILENAME
 
 
-def connect(path: str | Path | None = None) -> sqlite3.Connection:
-    """Open the store, creating the file and tables if needed."""
+def connect(path: str | Path | None = None, *, readonly: bool = False) -> sqlite3.Connection:
+    """Open the store; read-only connections never create or migrate it."""
     path = Path(path) if path is not None else default_path()
+    if readonly:
+        con = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+        con.row_factory = sqlite3.Row
+        return con
     path.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(path)
     con.row_factory = sqlite3.Row
@@ -389,12 +393,14 @@ def proposals(con: sqlite3.Connection, status: str | None = None) -> list[dict]:
 
 def lineage(con: sqlite3.Connection, fid: str) -> list[dict]:
     """Every proposal of one factor, each with its hypothesis and paper."""
+    columns = {row[1] for row in con.execute("PRAGMA table_info(proposals)")}
+    identity = "proposed_factor_id" if "proposed_factor_id" in columns else "factor_id"
     rows = con.execute(
         "SELECT p.id AS proposal_id, p.status, p.edge_type, p.parent_factor_id, p.expression, "
         "p.rationale, p.model, p.created_at, h.id AS hypothesis_id, h.observation, "
         "h.specification, pa.key AS paper_key, pa.title AS paper_title, pa.url AS paper_url "
         "FROM proposals p JOIN hypotheses h ON h.id = p.hypothesis_id "
-        "JOIN papers pa ON pa.key = h.paper_key WHERE p.proposed_factor_id = ? ORDER BY p.id",
+        f"JOIN papers pa ON pa.key = h.paper_key WHERE p.{identity} = ? ORDER BY p.id",
         (fid,),
     )
     return [dict(r) for r in rows]
