@@ -90,10 +90,14 @@ class PowerSpec:
         floor = 10 * block_length_rule(self.search_periods)
         if self.search_periods < floor or self.holdout_periods < 2:
             raise ValueError(f"need >= {floor} search periods and >= 2 holdout periods")
+        # BH at level q across H families needs n_boot + 1 >= H / q.
         if self.n_boot < 0 or (
-            self.thresholds.stage1 == "bootstrap" and self.n_boot + 1 < 20 * len(v)
+            self.thresholds.stage1 == "bootstrap" and self.n_boot + 1 < len(v) / self.bootstrap_q
         ):
-            raise ValueError(f"n_boot + 1 must be >= 20 x {len(v)} families for the bootstrap")
+            raise ValueError(
+                f"n_boot + 1 must be >= {len(v)} families / q = {self.bootstrap_q} "
+                "for the bootstrap"
+            )
         if self.n_trials is not None and self.n_trials < sum(v):
             raise ValueError(f"n_trials={self.n_trials} is fewer than the {sum(v)} variants")
 
@@ -104,6 +108,14 @@ class PowerSpec:
             holdout_periods=round(holdout_years * PERIODS_PER_YEAR),
             **kwargs,
         )
+
+    @property
+    def bootstrap_q(self) -> float:
+        """The BH level the bootstrap must resolve: the registered q1 for a
+        bootstrap stage 1 (never looser than the funnel's default 0.05)."""
+        if self.thresholds.stage1 == "bootstrap":
+            return min(0.05, self.thresholds.q1)
+        return 0.05
 
     @property
     def within_rho(self) -> float:
@@ -162,7 +174,7 @@ def null_side(spec: PowerSpec, seed: int) -> NullSide:
     fs = null_world(spec, seed)
     dates = fs.returns.index
     ends = dict(search_end=dates[fs.n_search - 1], holdout_start=dates[fs.n_search])
-    kwargs = dict(**ends, n_boot=spec.n_boot, seed=seed)
+    kwargs = dict(**ends, n_boot=spec.n_boot, seed=seed, q=spec.bootstrap_q)
     null = funnel.family_statistics(fs.returns, fs.family, **kwargs)["reuse"]
     return NullSide(fs, kwargs, null)
 

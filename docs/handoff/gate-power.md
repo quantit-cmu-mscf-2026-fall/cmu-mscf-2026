@@ -11,7 +11,7 @@ Details: the PR descriptions. Each PR in this track adds its rows here.
 ## 2. Contract
 - Adds no statistics: every number comes from `funnel.family_statistics` on `make_family_set` data.
 - Deterministic for a seed. Simulated data only: no real data, no ledger writes.
-- `PowerSpec` raises `ValueError` on a configuration the funnel can't run: a family with fewer than 2 variants, under 10 bootstrap blocks of search data, `n_boot + 1 < 20 x families` with the bootstrap stage 1, `within_corr < across_corr`, fewer trials than variants.
+- `PowerSpec` raises `ValueError` on a configuration the funnel can't run: a family with fewer than 2 variants, under 10 bootstrap blocks of search data, `n_boot + 1 < families / min(0.05, q1)` with the bootstrap stage 1 (and `null_side` checks the bootstrap at that level), `within_corr < across_corr`, fewer trials than variants.
 
 ## 3. How it was vetted
 

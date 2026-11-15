@@ -91,6 +91,18 @@ class TestPowerSpec:
             PowerSpec(**{**SMALL, "n_boot": 50, "thresholds": boot})  # 51 < 20 x 4
         assert PowerSpec(**{**SMALL, "n_boot": 50}).n_boot == 50  # "rho" reads no bootstrap
 
+    def test_bootstrap_resolution_is_checked_at_the_registered_q1(self):
+        # BH at q1 = 0.01 across 4 families needs n_boot + 1 >= 400, not 80.
+        boot = funnel.Thresholds(q1=0.01, stage1="bootstrap")
+        with pytest.raises(ValueError, match="n_boot"):
+            PowerSpec(**{**SMALL, "n_boot": 199, "thresholds": boot})
+        spec = PowerSpec(**{**SMALL, "n_boot": 399, "thresholds": boot})
+        side = power.null_side(spec, seed=5)
+        assert side.kwargs["q"] == 0.01
+        target = side.stats.index[0]
+        strong = power.planted_side(side, [target], 5.0)
+        assert funnel.screen(strong, spec.thresholds).loc[target, "stage1"]
+
 
 # ---------------------------------------------------------------------------
 # The simulation is the funnel's own code
