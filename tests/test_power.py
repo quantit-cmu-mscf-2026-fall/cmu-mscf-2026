@@ -3,11 +3,13 @@
 The contract:
 
 - `PowerSpec` normalises its variant counts and refuses a configuration the
-  funnel can't run (too short for the bootstrap, too few draws for its
-  resolution, correlations out of order, fewer trials than variants);
+  funnel can't run (a family with fewer than 2 variants, too short for the
+  bootstrap, too few draws for its resolution, correlations out of order,
+  fewer trials than variants);
 - the simulation is the funnel's own code: a family's statistics computed
   alone equal its row computed with every family, and planting a Sharpe
-  equals the calibration generator's planted family;
+  equals the calibration generator's planted family; a planted side's columns
+  equal the full batch recomputed with the target planted;
 - `within_corr` / `across_corr` are the correlations the generator produces;
 - the same seed gives the same world.
 
@@ -51,8 +53,8 @@ class TestPowerSpec:
             spec.n_boot = 1
 
     def test_list_of_variants_sets_the_family_count(self):
-        spec = PowerSpec(**{**SMALL, "variants": [2, 5, 1], "n_boot": 59})
-        assert spec.variants == (2, 5, 1) and spec.n_families == 3
+        spec = PowerSpec(**{**SMALL, "variants": [2, 5, 3], "n_boot": 59})
+        assert spec.variants == (2, 5, 3) and spec.n_families == 3
 
     def test_from_years(self):
         spec = PowerSpec.from_years(
@@ -74,6 +76,13 @@ class TestPowerSpec:
     )
     def test_refuses(self, change):
         with pytest.raises(ValueError):
+            PowerSpec(**{**SMALL, **change})
+
+    @pytest.mark.parametrize("change", [{"variants": (2, 5, 1)}, {"variants": 1, "n_families": 4}])
+    def test_refuses_a_family_of_one_variant(self, change):
+        # The funnel needs at least 2 trials per family; one variant would
+        # only fail later, inside null_side.
+        with pytest.raises(ValueError, match="at least 2 variants"):
             PowerSpec(**{**SMALL, **change})
 
     def test_bootstrap_resolution_is_checked_only_for_the_bootstrap(self):
@@ -115,9 +124,33 @@ class TestSameCodePaths:
         zero = power.planted_side(side, [target], 0.0)
         pd.testing.assert_frame_equal(zero[read], side.stats[read], rtol=1e-12)
         strong = power.planted_side(side, [target], 5.0)
-        pd.testing.assert_frame_equal(strong.drop(index=target), side.stats.drop(index=target))
+        pd.testing.assert_frame_equal(
+            strong.drop(index=target), side.stats[strong.columns].drop(index=target)
+        )
         assert strong.loc[target, "p2"] < side.stats.loc[target, "p2"]
         assert strong.attrs["n_variants"] == side.stats.attrs["n_variants"]
+
+    def test_planted_side_equals_the_full_batch_recomputed(self):
+        # Every column planted_side returns is what the funnel gives on the
+        # whole planted batch. The naive stack's columns (`naive_pass`,
+        # `nv_*`) are left out: their Holm, BY and BH corrections and the
+        # DSR's trial count run over the whole batch, not the target's
+        # variants. In this world the target alone passes the naive stack;
+        # in the full batch it doesn't.
+        spec = PowerSpec(
+            variants=(3,) * 6,
+            within_corr=0.5,
+            search_periods=4 * 252,
+            holdout_periods=2 * 252,
+            n_boot=0,
+        )
+        side = power.null_side(spec, seed=3)
+        target = side.stats.index[0]
+        planted = power.planted_side(side, [target], 1.0)
+        returns = power.plant(side.fs.returns, side.fs.family, target, 1.0)
+        full = funnel.family_statistics(returns, side.fs.family, **side.kwargs)["reuse"]
+        assert not any(c == "naive_pass" or c.startswith("nv_") for c in planted.columns)
+        pd.testing.assert_frame_equal(planted, full[planted.columns], rtol=1e-12)
 
     def test_planting_matches_the_calibration_generator(self):
         planted = make_family_set(5, 3, 0.2, 0.8, within_rho=0.7, rho=0.1, seed=2)

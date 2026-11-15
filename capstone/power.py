@@ -11,8 +11,12 @@ statistics: every number comes from the funnel's own code
 correlate `within_corr`, of different families `across_corr`). A target
 family's variants are then given a true Sharpe on the search period and the
 holdout (`plant`, the generator's own rule), and only the target's statistics
-are recomputed: a family's statistics, bootstrap included, depend only on its
-own columns and the seed (tested). One null world serves every Sharpe.
+are recomputed. That is valid for the columns the gate's stages read (`best`,
+`p1_*`, `p2`, `ho_*`): those, bootstrap included, depend only on the family's
+own columns and the seed (tested). One null world serves every Sharpe. The
+naive stack's columns (`naive_pass`, `nv_*`) are not: its Holm, BY and BH
+corrections and the DSR's trial count run over every variant in the batch, so
+`planted_side` leaves them out.
 """
 
 from __future__ import annotations
@@ -72,8 +76,8 @@ class PowerSpec:
                 raise ValueError("one variant count for all families needs n_families")
             v = (v,) * int(self.n_families)
         v = tuple(int(x) for x in v)
-        if not v or min(v) < 1:
-            raise ValueError("every family needs at least one variant")
+        if not v or min(v) < 2:
+            raise ValueError(f"every family needs at least 2 variants (trials), got {v}")
         if self.n_families is not None and self.n_families != len(v):
             raise ValueError(f"n_families={self.n_families} but {len(v)} variant counts")
         object.__setattr__(self, "variants", v)
@@ -165,7 +169,12 @@ def null_side(spec: PowerSpec, seed: int) -> NullSide:
 
 def planted_side(side: NullSide, targets: Sequence, sharpe: float) -> pd.DataFrame:
     """The statistics of `side` with the `targets` families' variants planted
-    at `sharpe`; only their rows are recomputed."""
+    at `sharpe`; only their rows are recomputed.
+
+    The naive stack's columns (`naive_pass`, `nv_*`) are dropped: they depend
+    on the whole batch, so the targets' rows alone would get them wrong. For
+    them, run `funnel.family_statistics` on the whole planted batch.
+    """
     fs, kwargs, null = side
     targets = list(targets)
     cols = fs.family.index[fs.family.isin(targets)]
@@ -174,5 +183,6 @@ def planted_side(side: NullSide, targets: Sequence, sharpe: float) -> pd.DataFra
         planted = plant(planted, fs.family[cols], target, sharpe)
     rows = funnel.family_statistics(planted, fs.family[cols], **kwargs)["reuse"]
     stats = pd.concat([null.drop(index=targets), rows]).reindex(null.index)
+    stats = stats.drop(columns=[c for c in stats if c == "naive_pass" or c.startswith("nv_")])
     stats.attrs["n_variants"] = null.attrs["n_variants"]
     return stats
