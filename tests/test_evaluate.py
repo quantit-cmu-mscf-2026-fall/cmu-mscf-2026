@@ -911,13 +911,50 @@ class TestLocalFdr:
             profile = evidence_profile(pvalues)
         assert profile["lfdr"].isna().all() and profile["bh"].notna().all()
 
-    def test_on_real_sharpe_pvalues_end_to_end(self):
+    def test_profile_leaves_lfdr_nan_when_most_p_values_are_tied(self):
+        # Many duplicate candidates (identical returns, so identical p-values)
+        # leave the histogram no spread: IQR 0, one bin's worth of data. The fit
+        # used to raise statsmodels' MissingDataError, which took the whole
+        # profile down instead of leaving lfdr NaN.
+        rng = np.random.default_rng(0)
+        tied = np.r_[np.full(165, 0.5), stats.norm.sf(rng.standard_normal(135))]
+        for pvalues in (pd.Series(tied), pd.Series(np.full(250, 0.3))):
+            with pytest.raises(ValueError, match="no spread"):
+                local_fdr(pvalues)
+            with pytest.warns(RuntimeWarning, match="no spread"):
+                profile = evidence_profile(pvalues)
+            assert profile["lfdr"].isna().all()
+            assert profile[["holm", "by", "bh", "q"]].notna().all().all()
+
+    def test_all_null_return_matrices_rarely_flag_anything(self):
+        # The null calibration on `make_return_matrix` with both defects on:
+        # correlated (rho) and autocorrelated (ar1) all-null candidates -> HAC
+        # p-values -> lfdr <= 0.2. Measured any-flag rate over seeds 0-119:
+        # 3.3% (rho 0, ar1 0), 5.8% (0.5, 0), 3.3% (0, 0.3), 5.0% (0.5, 0.3).
+        flagged = []
+        for seed in range(120):
+            matrix = make_return_matrix(n_obs=750, n_candidates=200, rho=0.5, ar1=0.3, seed=seed)
+            pvalues = pd.Series(
+                {c: sharpe_test(matrix.returns[c]).pvalue_greater for c in matrix.returns.columns}
+            )
+            flagged.append(bool((local_fdr(pvalues) <= 0.2).any()))
+        assert np.mean(flagged) <= 0.10
+
+    @pytest.mark.parametrize(("ar1", "min_power"), [(0.0, 0.85), (0.3, 0.7)])
+    def test_on_real_sharpe_pvalues_end_to_end(self, ar1, min_power):
         # Correlated strategy returns -> one-sided HAC p-values -> lfdr <= 0.2.
-        # Measured over 10 seeds: FDR 0.0, power 0.97.
+        # Measured over seeds 0-9: FDR 0.0, power 0.97 at ar1 0; FDR 0.006,
+        # power 0.79 at ar1 0.3 (autocorrelation widens the HAC standard error).
         found, fdps = [], []
-        for seed in range(5):
+        for seed in range(10):
             matrix = make_return_matrix(
-                n_obs=750, n_candidates=200, n_real=20, sharpe_real=2.5, rho=0.5, seed=seed
+                n_obs=750,
+                n_candidates=200,
+                n_real=20,
+                sharpe_real=2.5,
+                rho=0.5,
+                ar1=ar1,
+                seed=seed,
             )
             pvalues = pd.Series(
                 {c: sharpe_test(matrix.returns[c]).pvalue_greater for c in matrix.returns.columns}
@@ -926,4 +963,4 @@ class TestLocalFdr:
             found.append(f)
             fdps.append(fdp)
         assert np.mean(fdps) <= 0.05
-        assert np.mean(found) >= 0.85
+        assert np.mean(found) >= min_power

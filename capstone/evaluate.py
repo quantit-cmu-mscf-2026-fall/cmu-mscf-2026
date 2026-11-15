@@ -835,6 +835,10 @@ def _fit_mixture(z: np.ndarray, degree: int) -> tuple[np.ndarray, np.ndarray, fl
     reach = _FIT_RANGE_SCALES * (q75 - q25) / 1.349
     inside = z[np.abs(z - median) <= reach]
     lo, hi = float(inside.min()), float(inside.max())
+    if not q75 > q25 or not hi > lo:
+        # Half the candidates or more share one p-value (duplicate returns):
+        # the histogram is one spike and the polynomial design is degenerate.
+        raise ValueError("the z-scores have no spread to fit: half or more are tied")
     pad = 0.1 * (hi - lo)
     edges = np.linspace(lo - pad, hi + pad, max(20, min(120, n // 5)) + 1)
     mids = (edges[:-1] + edges[1:]) / 2
@@ -874,8 +878,9 @@ def empirical_null(pvalues: pd.Series, *, degree: int = 3, central: float = 0.5)
 
     Raises:
         ValueError: with fewer than `MIN_LOCAL_FDR_CANDIDATES` usable
-            p-values, or if the centre of the histogram isn't concave (no null
-            to find; not seen at 200 or more candidates in 1,200 sets each).
+            p-values, if half or more of them are tied (no spread to fit), or
+            if the centre of the histogram isn't concave (no null to find; not
+            seen at 200 or more candidates in 1,200 sets each).
     """
     z = _z_scores(pvalues.dropna()).to_numpy(dtype=float)
     if len(z) < MIN_LOCAL_FDR_CANDIDATES:
@@ -966,8 +971,8 @@ def local_fdr(
 
     Raises:
         ValueError: with fewer than `MIN_LOCAL_FDR_CANDIDATES` usable
-            p-values, or if the centre of the z-score histogram isn't concave
-            (no null to fit; see `empirical_null`).
+            p-values, if half or more of them are tied, or if the centre of the
+            z-score histogram isn't concave (no null to fit; see `empirical_null`).
     """
     usable = pvalues.dropna()
     if len(usable) < MIN_LOCAL_FDR_CANDIDATES:
