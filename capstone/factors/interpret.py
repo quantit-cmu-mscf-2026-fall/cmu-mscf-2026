@@ -106,10 +106,19 @@ def _field(name: str, panel: Panel, template: pd.DataFrame) -> pd.DataFrame:
 
 
 def _eval(node: Node, panel: Panel, template: pd.DataFrame):
+    # A parent must never rank, sign or scale an undefined child's infinity.
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        out = _eval_node(node, panel, template)
+    if isinstance(out, pd.DataFrame):
+        return out.replace([np.inf, -np.inf], np.nan)
+    return out if np.isfinite(out) else np.float64(np.nan)
+
+
+def _eval_node(node: Node, panel: Panel, template: pd.DataFrame):
     if isinstance(node, Field_):
         return _field(node.name, panel, template)
     if isinstance(node, Const):
-        return node.value
+        return np.float64(node.value)
     if isinstance(node, Unary):
         return -_eval(node.operand, panel, template)
     if isinstance(node, BinOp):

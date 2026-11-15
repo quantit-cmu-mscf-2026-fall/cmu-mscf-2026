@@ -137,8 +137,13 @@ def build_panel(daily: pd.DataFrame, data_version: str = "") -> Panel:
 
 
 def _market_return(returns: pd.DataFrame, cap: pd.DataFrame, universe: pd.DataFrame) -> pd.Series:
-    """The universe's return each day, weighted by the previous day's cap."""
-    weight = cap.where(universe).shift(1)
+    """That day's universe's return, each stock weighted by its previous day's cap.
+
+    Membership is the day's own (`tree.py`'s definition of `mkt_return`): a
+    stock that joins on day t counts in `mkt_return[t]`, one that leaves on t
+    does not. Only the weight is lagged.
+    """
+    weight = cap.shift(1).where(universe)
     held = weight.notna() & returns.notna()
     total = weight.where(held).sum(axis=1)
     out = (weight * returns).where(held).sum(axis=1) / total.where(total > 0)
@@ -177,7 +182,7 @@ class FactorReturns:
 
 NEUTRALITY = ("none", "sector")
 # A 2-digit SIC group with fewer universe stocks than this on a day falls back
-# to its SIC division for that day, so no group is too thin to demean within.
+# to its SIC division for that day. A division's fallback group can still be thin.
 MIN_SECTOR_SIZE = 5
 _DIVISIONS = (  # SIC divisions by 2-digit major group
     (1, 9, "agriculture"),
@@ -226,10 +231,12 @@ def _division(sic2: float) -> str:
 
 def sector_groups(panel: Panel) -> pd.Series:
     """Each universe (date, permno)'s sector: its 2-digit SIC group, or its SIC
-    division on a day its group has fewer than `MIN_SECTOR_SIZE` universe stocks."""
+    division on a day its group has fewer than `MIN_SECTOR_SIZE` universe stocks.
+    A universe stock with no SIC code that day has no sector (no row here)."""
     if panel.sic is None:
         raise ValueError("this panel has no SIC codes")
-    sic = panel.sic.where(panel.universe).stack()
+    # dropna: pandas 3's stack() keeps NaN cells, pandas 2's dropped them.
+    sic = panel.sic.where(panel.universe).stack().dropna()
     sic2 = (sic // 100).astype(int)
     dates = sic2.index.get_level_values(0)
     size = sic2.groupby([dates, sic2.values]).transform("size")
@@ -252,7 +259,7 @@ def signal_weights(signal: pd.DataFrame, panel: Panel, neutral: str = "none") ->
     """
     has_signal = signal.notna().any(axis=1)
     if neutral == "sector":
-        long = signal.stack()
+        long = signal.stack().dropna()
         sectors = sector_groups(panel).reindex(long.index)
         dates = long.index.get_level_values(0)
         demeaned = long - long.groupby([dates, sectors.values]).transform("mean")

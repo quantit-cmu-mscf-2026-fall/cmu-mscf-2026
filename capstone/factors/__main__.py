@@ -20,6 +20,7 @@ experiments/factors.db).
 from __future__ import annotations
 
 import argparse
+import sqlite3
 import sys
 
 from capstone.factors import store
@@ -68,6 +69,9 @@ def _lineage(args, con) -> int:
 
 
 def _methods(args, con) -> int:
+    if "kind" not in {row[1] for row in con.execute("PRAGMA table_info(hypotheses)")}:
+        print("no method hypotheses", file=sys.stderr)
+        return 1
     sql = (
         "SELECT h.*, p.title, p.url, p.citation FROM hypotheses h "
         "JOIN papers p ON p.key = h.paper_key WHERE h.kind = 'method'"
@@ -99,8 +103,17 @@ def _stats(args, con) -> int:
     hypotheses = con.execute("SELECT COUNT(*) FROM hypotheses").fetchone()[0]
     print(f"papers {papers}, hypotheses {hypotheses}, factors {len(store.factors(con))}")
     print(f"proposals {sum(counts.values())}: {counts}")
-    kinds = dict(con.execute("SELECT kind, COUNT(*) FROM hypotheses GROUP BY kind").fetchall())
+    has_kind = "kind" in {row[1] for row in con.execute("PRAGMA table_info(hypotheses)")}
+    kinds = (
+        dict(con.execute("SELECT kind, COUNT(*) FROM hypotheses GROUP BY kind").fetchall())
+        if has_kind
+        else {"market": hypotheses}
+    )
     print(f"hypotheses by kind: {kinds}")
+    if not con.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='usage'"
+    ).fetchone():
+        return 0
     for model, calls, tokens_in, tokens_out in con.execute(
         "SELECT model, SUM(calls), SUM(input_tokens), SUM(output_tokens) FROM usage GROUP BY model"
     ):
@@ -132,7 +145,11 @@ def main(argv: list[str] | None = None) -> int:
     methods_cmd.add_argument("--paper", help="only this paper's key")
 
     args = parser.parse_args(argv)
-    con = store.connect(args.db)
+    try:
+        con = store.connect(args.db, readonly=args.command != "run")
+    except sqlite3.Error as exc:
+        print(f"cannot open factor store: {exc}", file=sys.stderr)
+        return 2
     try:
         handler = {
             "run": _run,
