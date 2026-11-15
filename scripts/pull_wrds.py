@@ -12,8 +12,10 @@ skipped, so an interrupted run picks up where it stopped. Everything lands in
 data_cache/, which is gitignored — none of this may enter the public repo.
 
 Why the v2 tables: legacy crsp.dsf stops at 2024-12-31; crsp.dsf_v2 continues.
-In the CIZ format the delisting return is folded into dlyret on the delisting
-date, so no separate dsedelist merge is needed for returns.
+In CIZ, dlyret includes the delisting return on the delisting date. The broad
+crsp_dsf_v2_* files drop those rows under the descriptor filter and therefore
+lack delisting returns. The unfiltered S&P 500 pull keeps them; no separate
+dsedelist merge is needed for its returns.
 """
 
 from __future__ import annotations
@@ -30,7 +32,7 @@ OUT = Path(__file__).resolve().parent.parent / "data_cache" / "wrds"
 
 # CIZ equivalent of legacy shrcd in (10, 11) and exchcd in (1, 2, 3).
 # conditionaltype / tradingstatusflg are kept as columns rather than filtered,
-# so halted and delisting-day rows (which carry the delisting return) survive.
+# so halted rows survive; the descriptor filter still drops delisting rows.
 CRSP_FILTER = """
     sharetype = 'NS' and securitytype = 'EQTY' and securitysubtype = 'COM'
     and usincflg = 'Y' and issuertype in ('ACOR', 'CORP')
@@ -163,7 +165,7 @@ def pull_sp500(db, start: int, end: int) -> None:
     Pulled by permno with NO share-type filter: the common-stock filter above
     drops members that are REITs or incorporated abroad (~55 names a day by the
     2020s). Adds `in_sp500` (date inside a membership spell) and the delisting
-    record on the stock's final row; `dlyret` itself is left untouched.
+    record on its delisting row (`dlydelflg == 'Y'`); `dlyret` is untouched.
     """
     spells = db.raw_sql(
         "select permno, mbrstartdt, mbrenddt from crsp.dsp500list_v2 "
