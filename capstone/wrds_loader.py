@@ -15,8 +15,9 @@ First-time setup is in docs/wrds_howto.md. In short::
 
     pip install wrds
     python -c "import wrds; wrds.Connection(wrds_username='YOUR_ID')"
-    # answer 'y' when it offers to create ~/.pgpass, then you never type the
-    # password again
+    # answer 'y' when it offers to create the password file (~/.pgpass on
+    # macOS/Linux, %APPDATA%\\postgresql\\pgpass.conf on Windows), then you
+    # never type the password again
 
 If you have no WRDS account yet, everything here has a drop-in stand-in:
 `capstone.sample_data.load_sample_prices()` returns the same frame shape from a
