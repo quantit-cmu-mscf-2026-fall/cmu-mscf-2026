@@ -561,6 +561,20 @@ class Deepener:
         scored = self.scorer(tree)
         if scored is None or not math.isfinite(scored.quality):
             return False
+        log_run(
+            LEDGER_NAME,
+            params={
+                "run_id": self.run_id,
+                "factor_id": fid,
+                "expression": unparse(tree),
+                "role": "parent",
+                "iteration": self.evaluations,
+                "model": self.config.model,
+            },
+            metrics={"quality": scored.quality},
+            seed=self.seed,
+            tags=self.ledger_tags,
+        )
         self.pool.add(fid, scored.quality, scored.values)
         self.trees[fid] = tree
         return True

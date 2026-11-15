@@ -133,6 +133,25 @@ def _entries(path):
     return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
 
+def test_starting_parent_scores_are_logged_before_pool_admission(con, ledger, monkeypatch):
+    scorer = FakeScorer(fail={SEEDS[-1]})
+    d = deepener(con, ScriptedEditor(), scorer, parents=[])
+    add = d.pool.add
+
+    def checked_add(fid, quality, values, *args):
+        entry = _entries(ledger)[-1]
+        assert entry["params"]["factor_id"] == fid
+        assert entry["params"]["role"] == "parent"
+        assert entry["metrics"]["quality"] == quality
+        return add(fid, quality, values, *args)
+
+    monkeypatch.setattr(d.pool, "add", checked_add)
+    assert [d.add_parent(factor_id(parse(e))) for e in SEEDS] == [True, True, False]
+    entries = _entries(ledger)
+    assert scorer.calls == 3 and len(entries) == 2
+    assert {e["params"]["expression"] for e in entries} == set(SEEDS[:2])
+
+
 # ---------------------------------------------------------------------------
 # One round
 
@@ -154,6 +173,8 @@ def test_a_round_records_move_lineage_events_and_one_ledger_trial_per_score(con,
     assert len(events) == 4 and {e["motif_intended"] for e in events} == {motif}
     scored = [o for o in outcomes if o.quality is not None]
     entries = _entries(ledger)
+    assert sum(e["params"].get("role") == "parent" for e in entries) == len(SEEDS)
+    entries = [e for e in entries if e["params"].get("role") != "parent"]
     assert scored and len(entries) == len(scored)  # one trial per score, no more
     assert {e["params"]["factor_id"] for e in entries} == {o.factor_id for o in scored}
     assert all(e["tags"] == ["learned-memory-search", "deepen"] for e in entries)
@@ -165,9 +186,10 @@ def test_screening_rejections_are_not_scored(con, ledger):
     scorer = FakeScorer()
     d = deepener(con, editor, scorer, children=2, parents=["ts_mean(returns, 21)"])
     calls_before = scorer.calls
+    entries_before = _entries(ledger)
     outcomes = d.step()
     assert all(o.status == "rejected" and "not original" in o.reason for o in outcomes)
-    assert scorer.calls == calls_before and _entries(ledger) == []
+    assert scorer.calls == calls_before and _entries(ledger) == entries_before
 
 
 def test_pool_decisions_set_the_memory_status(con, ledger):
@@ -180,7 +202,9 @@ def test_pool_decisions_set_the_memory_status(con, ledger):
     assert low.status == "rejected" and "Q 0.050" in low.reason
     assert by_expr["ts_max(cap, 5)"].status == "invalid"
     assert factor_id(parse("log(cap)")) in d.pool.quality  # a future parent
-    assert len(_entries(ledger)) == 2  # the unscorable child is not a trial
+    entries = _entries(ledger)
+    assert sum(e["params"].get("role") == "parent" for e in entries) == len(SEEDS)
+    assert sum(e["params"].get("role") != "parent" for e in entries) == 2
 
 
 def test_an_admitted_child_carries_its_lineage(con, ledger):
