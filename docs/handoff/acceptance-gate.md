@@ -16,7 +16,10 @@ description.
 - **The scorecard** (QUANTIT-35): `capstone/scorecard.py`, the row and
   header shape (`SCORECARD_COLUMNS`, `GateHeader`, `TrialScope`,
   `GateResult`) and the report (`write_report`/`read_report`, JSON + CSV).
-- Not yet: registration and the single-look run that fill the scorecard.
+- **Registration** (QUANTIT-33): `capstone/gate.py`, `GateConfig` (hashed
+  from its content), `register` (logs it to the ledger once, tag "gate"),
+  `required_n_boot` and the input checks a run makes first.
+- Not yet: the single-look run that fills the scorecard.
 
 ## 2. Contract
 - Input: a performance matrix (dates x variants, `docs/validation.md`) and a
@@ -29,6 +32,8 @@ description.
 - `screen` never reads `ho_*`. Stage 1 refuses a missing family p-value
   (BH would drop it); stage 4 refuses a live candidate with no holdout
   statistics. Stage 3 passes through (spanning test not built yet).
+- A config's hash is SHA-256 of its canonical JSON, equal in every process.
+  The gate's ledger entries are tagged "gate" and never counted as trials.
 - The report is standard JSON (NaN as null) and reads back to the same
   result; `read_report` refuses an accepted list the scorecard disagrees with.
 
@@ -40,6 +45,7 @@ description.
 | Holdout blindness | shock holdout dates, compare stage-1/2 numbers | unchanged | `pytest -q tests/test_funnel.py -k only_search` |
 | Calibration unchanged | old vs new `calibration.family_statistics`, 4 sets x 2 `n_boot` x 2 designs | exactly equal | see the PR description |
 | Scorecard and report | `tests/test_scorecard.py`, 7 tests (9 cases), hand-built result | pass, pandas 3.1 and 2.2 | `pytest -q tests/test_scorecard.py` |
+| Registration | `tests/test_gate.py`, 15 tests (21 cases), `tmp_path` ledger | pass | `pytest -q tests/test_gate.py` |
 | Calibration runs unchanged | old vs new `run_funnel`/`run_naive_stack`/`gates_alone`, 96 settings | exactly equal | see the PR description |
 | pandas 3 | all-NaN family, nothing passes the naive stack | no warning | `pytest -q tests/test_funnel.py -k Pandas3` |
 
