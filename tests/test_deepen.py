@@ -237,3 +237,21 @@ def test_the_call_limit_is_hard():
     editor.drafts(parse("returns"), "rank_switch", 1, [], [])
     with pytest.raises(BudgetExhausted):
         editor.drafts(parse("returns"), "rank_switch", 1, [], [])
+
+
+def test_repairs_keep_the_parent_edit_lineage_and_vetoes_and_request_missing_edits():
+    client = FakeClient(["ts_mean(returns,"], ["ts_mean(returns, 63)", "ts_mean(returns, 126)"])
+    editor = ModelEditor(client, CONFIG, max_calls=2, usage=Counter())
+    drafts = editor.drafts(
+        parse("ts_mean(returns, 21)"),
+        "window_rescale",
+        2,
+        ["returns", "ts_mean(returns, 21)"],
+        ["other"],
+    )
+    repair = client.calls[1]["messages"][0]["content"]
+    assert "Parent: ts_mean(returns, 21)" in repair
+    assert MOTIF_WORDS["window_rescale"] in repair
+    assert "returns -> ts_mean(returns, 21)" in repair and "other (" in repair
+    assert "new edit" in repair and "'': empty expression" not in repair
+    assert all(d.tree is not None for d in drafts)
