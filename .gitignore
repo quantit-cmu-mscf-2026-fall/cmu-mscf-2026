@@ -7,6 +7,6 @@ __pycache__/
 *.egg-info/
 .sessions/
 experiments/runs.jsonl
-experiments/factors.db
+experiments/factors.db*
 experiments/alignment_labels.csv
 experiments/reports/

@@ -298,11 +298,14 @@ def edit_prompt(
 
 
 def _repair_prompt(failures: list[tuple[str, str]]) -> str:
-    listed = "\n".join(f"- {expr!r}: {error}" for expr, error in failures)
+    listed = "\n".join(
+        f"- {expr!r}: {error}" if expr else "- Missing answer: write a new edit of the parent."
+        for expr, error in failures
+    )
     return (
-        "These formulas did not parse:\n"
+        "These edits need correction or completion:\n"
         f"{listed}\n\n"
-        "Return a corrected version of each, in the same order, making the same kind of edit."
+        "Return one corrected or new edit for each item, in the same order."
     )
 
 
@@ -337,7 +340,15 @@ class ModelEditor:
             usage=self.usage,
         )
 
-    def _repaired(self, items: list[dict], n: int) -> list[Draft]:
+    def _repaired(
+        self,
+        items: list[dict],
+        n: int,
+        parent: Node,
+        motif: str,
+        lineage: Sequence[str],
+        vetoed_motifs: Sequence[str],
+    ) -> list[Draft]:
         """Exactly `n` drafts (missing answers are empty), parse failures sent back
         for repair up to `config.max_repairs` rounds."""
         items = list(items)[:n]
@@ -348,7 +359,9 @@ class ModelEditor:
             if not broken:
                 break
             answer = self._call(
-                _repair_prompt([(drafts[i].expression, drafts[i].error) for i in broken])
+                edit_prompt(parent, motif, len(broken), lineage, vetoed_motifs)
+                + "\n\n"
+                + _repair_prompt([(drafts[i].expression, drafts[i].error) for i in broken])
             )
             for i, item in zip(broken, answer.get("edits", []), strict=False):
                 drafts[i] = _draft(item)
@@ -359,7 +372,7 @@ class ModelEditor:
     ) -> list[Draft]:
         """`n` edits of kind `motif` to `parent`, parse failures repaired."""
         answer = self._call(edit_prompt(parent, motif, n, lineage, vetoed_motifs))
-        return self._repaired(answer.get("edits", []), n)
+        return self._repaired(answer.get("edits", []), n, parent, motif, lineage, vetoed_motifs)
 
 
 # ---------------------------------------------------------------------------
@@ -465,7 +478,9 @@ class DeepenAgent(ModelEditor):
                     motif,
                     str(answer.get("reason", "")),
                     str(answer.get("evidence_used", "")),
-                    self._repaired(answer.get("edits", []), n),
+                    self._repaired(
+                        answer.get("edits", []), n, parse(chosen.expression), motif, [], []
+                    ),
                 )
             why = (
                 f"there is no parent {parent_id!r}"

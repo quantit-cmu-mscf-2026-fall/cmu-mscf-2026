@@ -161,10 +161,10 @@ def main(argv: list[str] | None = None) -> int:
     table, labelled = report(args.sheet)
     if labelled < MIN_LABELS:
         print(f"only {labelled} labelled rows; label at least {MIN_LABELS} first", file=sys.stderr)
-    print("min_alignment  misaligned caught  aligned rejected  agreement")
+    print("min_alignment        misaligned caught  aligned rejected  agreement")
     for row in table:
         print(
-            f"{row['min_alignment']:<14.2f} {row['misaligned_caught']:<18} "
+            f"{row['min_alignment']:<20} {row['misaligned_caught']:<18} "
             f"{row['aligned_rejected']:<17} {row['agreement']:.2f}"
         )
     return 0

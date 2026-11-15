@@ -471,3 +471,21 @@ def test_the_agent_spends_from_the_same_call_limit(con, ledger):
     d.agent = agent
     with pytest.raises(BudgetExhausted):  # the repair call would be the second
         d.step()
+
+
+def test_repairs_keep_the_parent_edit_lineage_and_vetoes_and_request_missing_edits():
+    client = FakeClient(["ts_mean(returns,"], ["ts_mean(returns, 63)", "ts_mean(returns, 126)"])
+    editor = ModelEditor(client, CONFIG, max_calls=2, usage=Counter())
+    drafts = editor.drafts(
+        parse("ts_mean(returns, 21)"),
+        "window_rescale",
+        2,
+        ["returns", "ts_mean(returns, 21)"],
+        ["other"],
+    )
+    repair = client.calls[1]["messages"][0]["content"]
+    assert "Parent: ts_mean(returns, 21)" in repair
+    assert MOTIF_WORDS["window_rescale"] in repair
+    assert "returns -> ts_mean(returns, 21)" in repair and "other (" in repair
+    assert "new edit" in repair and "'': empty expression" not in repair
+    assert all(d.tree is not None for d in drafts)

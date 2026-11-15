@@ -25,7 +25,7 @@ max_store_share = 1.0
 
 # Complexity (AlphaAgent's third mechanism): a formula with more tree nodes
 # than this is rejected as over-engineered. Every Alpha101 member in the zoo
-# has at most 26 nodes; the first real run's rejected-in-hindsight formulas
+# has a spelling with at most 28 nodes; the first real run's rejected-in-hindsight formulas
 # had 31-45.
 max_nodes = 30
 
