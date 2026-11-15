@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import tomllib
 from pathlib import Path
 
@@ -109,7 +110,10 @@ def test_the_random_editor_is_reproducible_and_never_returns_the_parent():
 
 
 def test_script_reruns_use_distinct_folders_and_preserve_historical_v1(tmp_path, monkeypatch):
-    from research import learned_memory_search_check as check
+    script = Path(__file__).resolve().parents[1] / "research" / "learned_memory_search_check.py"
+    spec = importlib.util.spec_from_file_location("learned_memory_search_check", script)
+    check = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(check)
 
     design = tmp_path / "learned_memory_search_check.toml"
     design.write_text(
