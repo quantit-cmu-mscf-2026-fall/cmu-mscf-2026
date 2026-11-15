@@ -215,7 +215,8 @@ def family_statistics(
 
     Args:
         returns: dates x variants (a DatetimeIndex, increasing).
-        family: hypothesis label per column of `returns`.
+        family: hypothesis label per column of `returns`; every column needs
+            one.
         search_end: last date of the search period (agents and stages 1-3).
         holdout_start: first holdout date (stage 4 only). Required when
             `returns` has any date after `search_end`; without it there are
@@ -239,6 +240,11 @@ def family_statistics(
         raise TypeError("returns must be a DataFrame indexed by date")
     if not returns.index.is_monotonic_increasing:
         raise ValueError("returns' dates must be increasing")
+    # Every variant counts toward its family's k, so each needs a label. The
+    # bootstrap checks this too, but n_boot=0 skips it.
+    missing = returns.columns.difference(family.dropna().index)
+    if len(missing):
+        raise ValueError(f"family is missing for {len(missing)} columns, e.g. {missing[0]!r}")
     search_end = pd.Timestamp(search_end)
     last_date = returns.index.max()
     if holdout_start is None:
