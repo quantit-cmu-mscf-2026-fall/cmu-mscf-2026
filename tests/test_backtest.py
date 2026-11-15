@@ -360,8 +360,8 @@ def _small_book():
 def test_the_band_rule_on_a_small_book():
     signal = _small_book()
     weights = signal.fillna(0.0)  # rows already sum to gross 1 in absolute value
-    book = band_book(weights, signal.isna(), band=0.06, gross=1.0)
-    row1 = np.array([0.5, -0.35, 0.1, -0.1]) / 1.05  # rescaled to gross: the kept name moves too
+    book = band_book(weights, signal.isna(), band=0.06)
+    row1 = np.array([0.5, -0.35, 0.1, -0.1])  # not rescaled: the kept name stays where it was
     expected = np.vstack([[0.5, -0.5, 0.0, 0.0], row1, row1, [0.0, -0.5, 0.25, 0.25]])
     np.testing.assert_allclose(book.to_numpy(), expected, rtol=0, atol=1e-15)
 
@@ -375,10 +375,10 @@ def test_the_band_rule_on_a_small_book():
 
 def test_the_band_holds_between_rebalances():
     signal = _small_book()
-    book = band_book(signal.fillna(0.0), signal.isna(), band=0.06, gross=1.0, hold=2)
+    book = band_book(signal.fillna(0.0), signal.isna(), band=0.06, hold=2)
     np.testing.assert_array_equal(book.iloc[1].to_numpy(), book.iloc[0].to_numpy())
     # Against the book held since row 0: name a stays (0.03 <= band), the rest move.
-    expected = np.array([0.5, -0.37, 0.08, -0.08]) / 1.03
+    expected = np.array([0.5, -0.37, 0.08, -0.08])
     np.testing.assert_allclose(book.iloc[2].to_numpy(), expected, rtol=0, atol=1e-15)
     np.testing.assert_array_equal(book.iloc[3].to_numpy(), book.iloc[2].to_numpy())
 
@@ -386,7 +386,7 @@ def test_the_band_holds_between_rebalances():
 def test_an_empty_target_book_goes_flat_inside_a_band():
     dates = pd.bdate_range("2015-01-05", periods=2)
     weights = pd.DataFrame([[0.5, -0.5], [0.0, 0.0]], index=dates, columns=["a", "b"])
-    book = band_book(weights, weights.isna(), band=0.9, gross=1.0)
+    book = band_book(weights, weights.isna(), band=0.9)
     assert (book.iloc[1] == 0.0).all()
 
 
@@ -396,7 +396,7 @@ def test_an_invalid_band_is_refused(band):
     with pytest.raises(ValueError, match="band"):
         backtest_frame(signal, returns, cost_bps=10.0, demean=True, gross=1.0, band=band)
     with pytest.raises(ValueError, match="band"):
-        band_book(signal, signal.isna(), band=band, gross=1.0)
+        band_book(signal, signal.isna(), band=band)
 
 
 def test_a_banded_backtest_keeps_the_idle_rule_and_each_assets_rate():
@@ -411,7 +411,7 @@ def test_a_banded_backtest_keeps_the_idle_rule_and_each_assets_rate():
     # As without a band: the first rebalance with a signal is date 15, held from 16.
     assert frame["net"].iloc[:16].isna().all()
     assert frame["net"].iloc[16:].notna().all()
-    book = band_book(to_weights(signal), signal.isna(), band=0.05, gross=1.0, hold=5)
+    book = band_book(to_weights(signal), signal.isna(), band=0.05, hold=5)
     trades = book.shift(1).fillna(0.0).diff().abs()
     cost = (trades * rate.shift(1) / 10000.0).sum(axis=1)
     np.testing.assert_allclose(frame["cost"].iloc[16:], cost.iloc[16:], rtol=1e-12)
@@ -440,7 +440,56 @@ def test_turnover_and_cost_fall_as_the_band_widens(synth_market, window, hold):
     assert (np.diff(turnover) <= 1e-12).all()
     assert (np.diff(cost) <= 1e-12).all()
     assert turnover[-1] < 0.85 * turnover[0]
+    target = to_weights(signal)
     for b in BANDS[1:]:
-        book = band_book(to_weights(signal), signal.isna(), band=b, gross=1.0, hold=hold)
-        held = book.abs().sum(axis=1)
-        np.testing.assert_allclose(held[held > 0], 1.0, rtol=1e-12)  # the book keeps its gross
+        book = band_book(target, signal.isna(), band=b, hold=hold)
+        rebalance = np.arange(len(book)) % hold == 0
+        off = (book - target).abs().to_numpy()[rebalance]
+        assert (off <= b + 1e-12).all()  # every name within the band of its target
+
+
+def _assert_banded(book, target, band, hold=1):
+    """Every rebalance: each name within `band` of its target, and a live
+    target is never left flat or levered onto a few names."""
+    rebalance = np.arange(len(book)) % hold == 0
+    b, w = book.to_numpy()[rebalance], target.to_numpy()[rebalance]
+    assert (np.abs(b - w) <= band + 1e-12).all()
+    live = np.abs(w).sum(axis=1) > 0
+    assert (np.abs(b[live]).sum(axis=1) > 0).all()
+    assert np.abs(b).max() <= np.abs(w).max() + band + 1e-12
+    # Demeaned targets net to zero, so the net is at most the kept names' slack.
+    kept = (np.abs(b - w) > 0).sum(axis=1)
+    assert (np.abs(b.sum(axis=1)) <= kept * band + 1e-12).all()
+
+
+@pytest.mark.parametrize("hold", [1, 5])
+@pytest.mark.parametrize("band", [0.005, 0.02, 0.06])
+def test_a_band_wider_than_one_over_n_stays_near_its_target(band, hold):
+    # 200 names: 1/N is 0.005 and the largest target weight is about 0.02, so
+    # most names sit inside a 0.02 band of zero. The book must stay within the
+    # band of its target, not concentrate gross on the few names that trade.
+    panel = make_panel(n_dates=250, n_assets=200, n_candidates=1, n_real=1, effect_size=0.1, seed=0)
+    signal = panel.signals["cand_0000"].rolling(10).mean()
+    target = to_weights(signal)
+    book = band_book(target, signal.isna(), band=band, hold=hold)
+    _assert_banded(book, target, band, hold)
+    # The first rebalance with a signal opens the whole target book.
+    live = target.abs().sum(axis=1).to_numpy() > 0
+    first = int(np.argmax(live & (np.arange(len(target)) % hold == 0)))
+    np.testing.assert_array_equal(book.iloc[first].to_numpy(), target.iloc[first].to_numpy())
+
+
+def test_a_wide_band_on_one_small_book_keeps_names_not_gross():
+    dates = pd.bdate_range("2015-01-05", periods=2)
+    first = np.array([0.30, 0.05, -0.05, -0.30, 0.04, -0.04, 0.03, -0.03, 0.08, -0.08])
+    second = np.array([0.20, 0.09, -0.01, -0.36, 0.0, -0.08, 0.06, 0.0, 0.10, 0.0])
+    second = second - second.mean()
+    target = pd.DataFrame([first / np.abs(first).sum(), second / np.abs(second).sum()], dates)
+    book = band_book(target, target.isna(), band=0.06)
+    _assert_banded(book, target, 0.06)
+    # A flat book opens at its target; then only the names more than 0.06 off move.
+    np.testing.assert_array_equal(book.iloc[0].to_numpy(), target.iloc[0].to_numpy())
+    w0, w1 = target.to_numpy()
+    expected = np.where(np.abs(w1 - w0) > 0.06, w1, w0)
+    np.testing.assert_array_equal(book.iloc[1].to_numpy(), expected)
+    assert (expected != w0).any() and (expected == w0).any()  # both rules exercised

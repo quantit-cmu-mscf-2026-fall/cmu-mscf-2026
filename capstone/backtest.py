@@ -57,26 +57,27 @@ def band_book(
     missing: pd.DataFrame,
     *,
     band: float,
-    gross: float,
     hold: int = 1,
 ) -> pd.DataFrame:
     """The book held after each date's close under a no-trade band.
 
     `weights` is the target book on each date (`to_weights`), `missing` marks
-    the names with no signal that date. Starting flat, on every `hold`-th
-    date counted from the first (a rebalance):
+    the names with no signal that date. On every `hold`-th date counted from
+    the first (a rebalance):
 
     - a name trades to its target only when |target - held| > `band`, or when
       it has no signal (it is closed, whatever its weight); otherwise it keeps
       its held weight;
-    - the book is then rescaled to `gross` (the kept weights move by that
-      factor too, and pay for it);
+    - a flat book opens at its target in full, so the band never keeps a book
+      flat while there is a signal;
     - a target with no position at all (no signal anywhere) is taken as is:
       the book goes flat.
 
-    Between rebalances the book is held. `band` is in units of weight at
-    `gross`. The book is not exactly dollar-neutral when weights are kept:
-    each kept name is off its target by at most `band` before the rescale.
+    Between rebalances the book is held. `band` is in units of target weight.
+    The book is not rescaled: every name is within `band` of its target on
+    each rebalance, so the book is never levered onto the names that traded.
+    It is therefore not exactly dollar-neutral, and its gross can differ from
+    the target's, by at most `band` per kept name.
     """
     _check_band(band)
     if hold < 1:
@@ -88,11 +89,9 @@ def band_book(
     for t in range(len(target)):
         if t % hold == 0:
             row = target[t]
-            if np.abs(row).sum() > 0:
+            if np.abs(row).sum() > 0 and np.abs(held).sum() > 0:
                 move = (np.abs(row - held) > band) | closed[t]
                 held = np.where(move, row, held)
-                total = np.abs(held).sum()
-                held = held * (gross / total) if total > 0 else held
             else:
                 held = row.copy()
         out[t] = held
@@ -146,7 +145,7 @@ def backtest_frame(
         rebalance = pd.Series(np.arange(len(dates)) % hold == 0, index=dates)
         no_signal = no_signal.astype(float).where(rebalance).ffill().astype(bool)
     if band > 0:
-        weights = band_book(weights, signal.isna(), band=band, gross=gross, hold=hold)
+        weights = band_book(weights, signal.isna(), band=band, hold=hold)
     elif hold > 1:
         weights = weights.where(rebalance, axis=0).ffill()
     positions = weights.shift(1)
