@@ -207,6 +207,24 @@ def test_a_thin_sic_group_falls_back_to_its_division():
     assert sectors.loc[(day, 10002)] == "finance"
 
 
+def test_sector_neutrality_handles_stocks_outside_the_universe():
+    # Real panels always have out-of-universe cells; pandas 3's stack() keeps
+    # their NaN, which must not reach the int cast. A universe stock with no
+    # SIC code has no sector and is not held under sector neutrality.
+    rows = fake_rows(n_stocks=12, n_days=20)
+    dates = rows.date.unique()
+    rows.loc[(rows.permno == 10000) & (rows.date == dates[3]), "in_universe"] = False
+    rows.loc[(rows.permno == 10001) & (rows.date == dates[4]), "siccd"] = np.nan
+    panel = build_panel(rows)
+    sectors = ev.sector_groups(panel)
+    assert sectors.notna().all()
+    assert (dates[3], 10000) not in sectors.index and (dates[4], 10001) not in sectors.index
+    weights = ev.factor_weights(parse("volume"), panel, neutral="sector")
+    assert weights.loc[dates[3], 10000] == 0 and weights.loc[dates[4], 10001] == 0
+    result = factor_returns(parse("volume"), panel, ev.TradingSpec(1, "sector"))
+    assert result.net.iloc[1:].notna().all()
+
+
 def test_a_bad_spec_is_refused():
     with pytest.raises(ValueError):
         ev.TradingSpec(hold=0)
