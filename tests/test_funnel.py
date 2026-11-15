@@ -7,6 +7,8 @@ explicitly. Stages 1-3 never see a holdout date.
 
 from __future__ import annotations
 
+import json
+import typing
 import warnings
 
 import numpy as np
@@ -15,7 +17,7 @@ import pytest
 
 from capstone import calibration, funnel
 from capstone.evaluate import sharpe_test
-from capstone.funnel import family_statistics
+from capstone.funnel import Thresholds, family_statistics, run_funnel, thresholds_dict
 
 SEARCH_END = pd.Timestamp("2004-12-31")
 HOLDOUT_START = pd.Timestamp("2005-01-01")
@@ -155,3 +157,90 @@ class TestHoldoutStatistics:
         ho = funnel.holdout_statistics(poisoned, chosen)
         assert np.isfinite(ho.loc["h0"]).all()
         assert ho.loc["h1"].isna().all()
+
+
+class TestOneFunnel:
+    def test_calibration_uses_the_funnel_objects(self):
+        assert calibration.Thresholds is funnel.Thresholds
+        assert calibration.run_funnel is funnel.run_funnel
+        assert calibration._final_gate is funnel._final_gate
+        assert calibration.STAGE1_METHODS == funnel.STAGE1_METHODS
+
+
+class TestThresholds:
+    def test_defaults_are_the_test_runs_best_set_on_rho(self):
+        th = Thresholds()
+        assert (th.q1, th.stage1, th.alpha2, th.final, th.q4) == (0.10, "rho", 1.0, "bh", 0.30)
+
+    def test_modes_are_literals(self):
+        hints = typing.get_type_hints(Thresholds)
+        assert typing.get_origin(hints["final"]) is typing.Literal
+        assert set(typing.get_args(hints["final"])) == {"dsr", "bh"}
+        assert set(typing.get_args(hints["stage1"])) == {"independent", "rho", "bootstrap"}
+        assert set(typing.get_args(hints["final_trials"])) == {"searched", "survivors"}
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"final": "holm"},
+            {"stage1": "lfdr"},
+            {"final_trials": "half"},
+            {"q1": 0.0},
+            {"q4": 1.0},
+            {"alpha2": 0.0},
+        ],
+    )
+    def test_bad_settings_raise_at_construction(self, kwargs):
+        with pytest.raises(ValueError):
+            Thresholds(**kwargs)
+
+    def test_thresholds_dict_is_plain_data_that_rebuilds_the_setting(self):
+        th = Thresholds(q1=0.05, stage1="bootstrap", final="dsr", d4=0.9)
+        d = thresholds_dict(th)
+        assert set(d) == set(funnel._REGISTERED_FIELDS)
+        assert json.loads(json.dumps(d)) == d
+        assert Thresholds(**d) == th
+
+
+class TestRunningTheFunnel:
+    def test_default_funnel_on_rho_p_values(self):
+        returns, family = _dated(drift={"h0": 0.003})
+        stats = family_statistics(
+            returns, family, search_end=SEARCH_END, holdout_start=HOLDOUT_START, n_boot=0
+        )["reuse"]
+        stages = run_funnel(stats, Thresholds())
+        assert stages.loc["h0"].all()
+        assert (stages["stage2"] == stages["stage1"]).all()  # no stage-2 gate
+
+    def test_missing_stage1_p_values_raise(self):
+        returns, family = _dated()
+        stats = family_statistics(
+            returns, family, search_end=SEARCH_END, holdout_start=HOLDOUT_START, n_boot=0
+        )["reuse"]
+        with pytest.raises(ValueError, match="bootstrap"):
+            run_funnel(stats, Thresholds(stage1="bootstrap"))
+
+    def test_stage4_without_holdout_statistics_raises(self):
+        returns, family = _dated(drift={"h0": 0.003})
+        stats = family_statistics(
+            returns.loc[:SEARCH_END], family, search_end=SEARCH_END, n_boot=0
+        )["reuse"]
+        with pytest.raises(ValueError, match="holdout"):
+            run_funnel(stats, Thresholds(q1=0.5))
+
+    def test_screen_is_run_funnels_first_three_stages(self):
+        returns, family = _dated(drift={"h0": 0.003, "h1": 0.001})
+        stats = family_statistics(
+            returns, family, search_end=SEARCH_END, holdout_start=HOLDOUT_START, n_boot=199
+        )["reuse"]
+        for th in (Thresholds(), Thresholds(stage1="bootstrap", alpha2=0.05)):
+            pd.testing.assert_frame_equal(
+                funnel.screen(stats, th), run_funnel(stats, th)[["stage1", "stage2", "stage3"]]
+            )
+
+    def test_screen_needs_no_holdout(self):
+        returns, family = _dated(drift={"h0": 0.003})
+        stats = family_statistics(
+            returns.loc[:SEARCH_END], family, search_end=SEARCH_END, n_boot=0
+        )["reuse"]
+        assert funnel.screen(stats, Thresholds()).loc["h0"].all()
