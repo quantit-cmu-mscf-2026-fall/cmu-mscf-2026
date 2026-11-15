@@ -63,7 +63,9 @@ def backtest_frame(
     `cost_bps` is the cost of trading one unit of weight, in basis points:
     one rate for every asset and date, or a dates x assets table (a stock's
     half quoted spread that day, say). A trade made at date t's close pays
-    date t's rate. An asset with no rate that day pays that day's median.
+    date t's rate. An asset with no rate that day pays that day's median. A
+    trade on a date where no asset has a rate raises `ValueError` rather than
+    trading for free.
 
     `hold` rebalances every `hold`-th period, counted from the first date,
     and holds the book in between; `hold=1` rebalances every period. Between
@@ -96,7 +98,22 @@ def backtest_frame(
         rate = cost_bps.reindex(index=dates, columns=assets) / 10000.0
         rate = rate.where(rate.notna(), rate.median(axis=1), axis=0)
         # positions[t] - positions[t-1] was traded at date t-1's close.
-        costs = (trades * rate.shift(1)).sum(axis=1)
+        charged = rate.shift(1)
+        # A date with no rate for any asset has no median either. `.sum` would
+        # read its trades as free, overstating net returns without a word, so
+        # refuse instead: a missing date, a table that ends early or an index
+        # of a different type (strings, not Timestamps) all land here.
+        unpriced = (trades > 0) & charged.isna()
+        if unpriced.to_numpy().any():
+            when = unpriced.any(axis=1)
+            first = when.idxmax()
+            raise ValueError(
+                f"cost_bps has no rate for trades on {int(when.sum())} date(s), the first "
+                f"made at the close before {first}: no asset has a rate that day, so there "
+                "is no median to fall back on. Fill the table (e.g. carry the last rate "
+                "forward) or check that its index matches the returns' dates."
+            )
+        costs = (trades * charged).sum(axis=1)
     else:
         costs = cost_bps / 10000.0 * turnover
     net_returns = gross_returns - costs
