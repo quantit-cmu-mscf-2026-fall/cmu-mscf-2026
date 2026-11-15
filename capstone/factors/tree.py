@@ -1,6 +1,6 @@
 """Factor expressions as syntax trees: a closed grammar, two canonical keys.
 
-A factor is a string in a small grammar over daily stock fields (`FIELDS`),
+A factor is a string in a small grammar over daily stock and market fields (`FIELDS`),
 parsed into an immutable tree. `parse` is the only way in for a string: anything outside
 the grammar raises `ParseError`, and nothing calls eval or exec.
 

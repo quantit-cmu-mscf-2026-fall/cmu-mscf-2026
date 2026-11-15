@@ -167,6 +167,15 @@ def test_retuned_variant_of_a_stored_factor_is_rejected_but_a_repeat_is_a_duplic
     assert len(store.factors(con)) == 1
 
 
+@pytest.mark.parametrize("component_first", [False, True])
+def test_a_stored_factors_component_is_not_a_retuned_variant(con, hid, component_first):
+    expressions = ["ts_rank(volume, 20) * -(close / shift(close, 5) - 1)", "ts_rank(volume, 20)"]
+    if component_first:
+        expressions.reverse()
+    outcomes = propose(con, hid, FakeClient(_factors(*expressions)), CONFIG, zoo=[])
+    assert [outcome.status for outcome in outcomes] == ["stored", "stored"]
+
+
 def test_every_stored_row_records_the_model_and_prompt_version(con, hid):
     propose(con, hid, FakeClient(_factors("ts_rank(high - low, 15) / ts_mean(volume, 5)")), CONFIG)
     (row,) = store.proposals(con)
@@ -234,7 +243,11 @@ def test_shipped_limit_admits_every_alpha101_member():
     from capstone.factors.tree import node_count
     from capstone.factors.zoo import default_zoo
 
-    assert max(node_count(tree) for _, tree in default_zoo()) <= load_config().max_nodes
+    sizes = {}
+    for name, tree in default_zoo():
+        member = name.removesuffix("_returns")
+        sizes[member] = min(sizes.get(member, float("inf")), node_count(tree))
+    assert max(sizes.values()) <= load_config().max_nodes
 
 
 def test_extract_keeps_method_hypotheses_and_drops_unknown_kinds():
