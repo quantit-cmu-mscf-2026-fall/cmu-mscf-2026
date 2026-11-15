@@ -81,8 +81,9 @@ def test_stocks_outside_the_universe_are_never_held():
     rows.loc[rows.permno == 10003, "in_universe"] = False
     panel = build_panel(rows)
     result = factor_returns(parse("volume"), panel)
-    signal_held = ev.to_weights(ev.evaluate(parse("volume"), panel.fields).where(panel.universe))
-    assert (signal_held[10003].fillna(0) == 0).all()
+    weights = ev.factor_weights(parse("volume"), panel)
+    assert (weights[10003].fillna(0) == 0).all()
+    assert (weights.drop(columns=10003).fillna(0) != 0).any().all()
     assert result.net.iloc[1:].notna().all()
 
 
@@ -115,6 +116,23 @@ def test_the_market_return_is_cap_weighted_on_the_previous_day():
     t = returns.index[10]
     w = cap.shift(1).loc[t]
     assert panel.fields["mkt_return"].loc[t] == pytest.approx((w * returns.loc[t]).sum() / w.sum())
+
+
+def test_the_market_return_leaves_out_stocks_outside_that_days_universe():
+    rows = fake_rows(n_stocks=3, n_days=10)
+    dates = rows.date.unique()
+    rows.loc[(rows.permno == 10000) & (rows.date < dates[5]), "in_universe"] = False
+    rows.loc[(rows.permno == 10001) & (rows.date >= dates[7]), "in_universe"] = False
+    panel = build_panel(rows)
+    cap, returns, universe = panel.fields["cap"], panel.fields["returns"], panel.universe
+    mkt = panel.fields["mkt_return"]
+    for t in dates[1:]:
+        # That day's universe, each stock weighted by its previous day's cap
+        # (tree.py's definition): 10000 counts from the day it joins, 10001
+        # stops counting the day it leaves.
+        members = universe.loc[t]
+        w = cap.shift(1).loc[t][members]
+        assert mkt.loc[t] == pytest.approx((w * returns.loc[t][members]).sum() / w.sum())
 
 
 def test_the_holdout_is_refused():
