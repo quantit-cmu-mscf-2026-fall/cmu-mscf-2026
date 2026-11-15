@@ -31,7 +31,7 @@ from capstone.factors.deepen import (
 )
 from capstone.factors.llm import FactorConfig
 from capstone.factors.memory import PRODUCIBLE_MOTIFS, memory_events
-from capstone.factors.tree import factor_id, identity_key, parse
+from capstone.factors.tree import factor_id, identity_key, parse, unparse
 
 CONFIG = FactorConfig(model="test-model", alignment_model="", max_repairs=1)
 
@@ -444,6 +444,32 @@ def test_the_agent_decides_and_its_reason_is_recorded_before_scoring(con, ledger
     assert record["by"] == "agent" and record["motif"] == "nesting"
     assert record["reason"] and record["evidence_used"]
     assert {o.motif_intended for o in outcomes} == {"nesting"}
+
+
+def test_agent_decision_and_repairs_include_the_chosen_parents_lineage(con, ledger):
+    ancestor = "rank(close / open)"
+    expression = "log(cap)"
+    hid = con.execute("SELECT id FROM hypotheses").fetchone()[0]
+    store.add_factor(
+        con,
+        parse(expression),
+        hid,
+        parent_factor_id=factor_id(parse(ancestor)),
+        edge_type="refined",
+    )
+    client = AgentClient(
+        _decision(expression, "nesting", ["ts_mean(log(cap),"]),
+        {"edits": [{"expression": "ts_mean(log(cap), 5)", "rationale": "repair"}]},
+    )
+    d = deepener(con, ScriptedEditor(), parents=[expression], children=1)
+    d.agent = DeepenAgent(client, CONFIG, max_calls=2, usage=Counter())
+    d.step()
+    lineage = "Lineage, oldest first: " + " -> ".join(
+        unparse(parse(e)) for e in (ancestor, expression)
+    )
+    assert len(client.calls) == 2
+    for call in client.calls:
+        assert lineage in call["messages"][0]["content"]
 
 
 def test_a_vetoed_edit_is_refused_then_asked_again(con, ledger):
