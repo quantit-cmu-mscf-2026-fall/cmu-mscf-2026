@@ -39,7 +39,7 @@ description.
 | Unit tests | `tests/test_funnel.py`, 21 tests | pass | `pytest -q tests/test_funnel.py` |
 | Holdout blindness | shock holdout dates, compare stage-1/2 numbers | unchanged | `pytest -q tests/test_funnel.py -k only_search` |
 | Calibration unchanged | old vs new `calibration.family_statistics`, 4 sets x 2 `n_boot` x 2 designs | exactly equal | see the PR description |
-| Scorecard and report | `tests/test_scorecard.py`, 7 tests (9 cases), hand-built result | pass, pandas 3.1 and 2.2 | `pytest -q tests/test_scorecard.py` |
+| Scorecard and report | `tests/test_scorecard.py`, 9 tests (14 cases), hand-built result | pass, pandas 3.1 and 2.2 | `pytest -q tests/test_scorecard.py` |
 | Calibration runs unchanged | old vs new `run_funnel`/`run_naive_stack`/`gates_alone`, 96 settings | exactly equal | see the PR description |
 | pandas 3 | all-NaN family, nothing passes the naive stack | no warning | `pytest -q tests/test_funnel.py -k Pandas3` |
 
