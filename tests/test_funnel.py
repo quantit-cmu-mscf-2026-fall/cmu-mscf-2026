@@ -239,6 +239,22 @@ class TestRunningTheFunnel:
         with pytest.raises(ValueError, match="holdout"):
             run_funnel(stats, Thresholds(q1=0.5))
 
+    def test_a_survivor_flat_in_the_holdout_fails_stage4_alone(self):
+        # h1 goes flat out of sample: its holdout is observed but has no
+        # p-value. It fails stage 4; h0 is still decided (#64's class).
+        returns, family = _dated(drift={"h0": 0.003, "h1": 0.003})
+        returns.loc[HOLDOUT_START:, family[family == "h1"].index] = 0.0
+        stats = family_statistics(
+            returns, family, search_end=SEARCH_END, holdout_start=HOLDOUT_START, n_boot=0
+        )["reuse"]
+        assert stats.loc["h1", "ho_n_obs"] > 0 and pd.isna(stats.loc["h1", "ho_p"])
+        for th in (Thresholds(), Thresholds(final="dsr")):
+            stages = run_funnel(stats, th)
+            assert stages.loc["h1", "stage3"] and not stages.loc["h1", "stage4"]
+            assert stages.loc["h0", "stage4"]
+        alone = calibration.gates_alone(stats.assign(truth=family.unique() == "h0"), Thresholds())
+        assert alone.loc["stage4", "pass_rate_real"] == 1.0
+
     def test_screen_is_run_funnels_first_three_stages(self):
         returns, family = _dated(drift={"h0": 0.003, "h1": 0.001})
         stats = family_statistics(
