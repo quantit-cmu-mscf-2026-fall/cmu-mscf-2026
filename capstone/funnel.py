@@ -137,7 +137,7 @@ def best_by_family(values: pd.Series, family: pd.Series) -> pd.Series:
     labels = family.reindex(values.index)
     present = values.dropna()
     best = present.groupby(labels.reindex(present.index)).idxmax()
-    return best.reindex(pd.unique(labels.dropna()))
+    return best.reindex(pd.unique(family.dropna()))
 
 
 def _one_sided_p(returns: pd.DataFrame) -> pd.Series:
@@ -329,22 +329,27 @@ def _final_gate(
     `prefix` picks whose holdout statistics to read: "ho_" for the variant the
     funnel carried forward, "nv_" for the naive stack's. Raises when a live
     candidate has no holdout statistics: stage 4 never passes by default.
+
+    A candidate whose holdout was observed but gives no p-value (a variant
+    that went flat out of sample) fails: under BH it counts as p = 1, so it
+    stays in the family size; under DSR it does not pass.
     """
     n_alive = int(alive.sum())
     if n_alive == 0:
         return alive.copy()
-    missing = stats.loc[alive, f"{prefix}p"].isna()
+    missing = ~(stats.loc[alive, f"{prefix}n_obs"] > 0)
     if missing.any():
         raise ValueError(
             f"{int(missing.sum())} candidates reach stage 4 with no holdout statistics; "
             "compute family_statistics with holdout_start"
         )
+    p = stats.loc[alive, f"{prefix}p"]
     if th.final == "bh":
-        passed = benjamini_hochberg(stats.loc[alive, f"{prefix}p"], th.q4)
+        passed = benjamini_hochberg(p.fillna(1.0), th.q4)
         return passed.reindex(stats.index, fill_value=False)
     n_trials = stats.attrs["n_variants"] if th.final_trials == "searched" else n_alive
     passed = pd.Series(False, index=stats.index)
-    for h in alive[alive].index:
+    for h in p.dropna().index:
         r = stats.loc[h]
         dsr = deflated_sharpe_ratio(
             r[f"{prefix}sharpe"],
