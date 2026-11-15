@@ -117,3 +117,33 @@ def test_report_warns_below_thirty_labels(tmp_path, capsys):
     assert cal.main(["report", "--sheet", str(sheet)]) == 0
     captured = capsys.readouterr()
     assert "label at least 30" in captured.err and "misaligned caught" in captured.out
+
+
+def test_printed_thresholds_reproduce_the_report_in_the_proposer(db, tmp_path, capsys):
+    from capstone.factors import alignment, proposer
+
+    sheet = _sheet(tmp_path, [(0.6667, "1"), (0.6667, "1"), (0.3333, "0")])
+    table, _ = cal.report(sheet)
+    assert cal.main(["report", "--sheet", str(sheet)]) == 0
+    lines = capsys.readouterr().out.splitlines()[1:]
+    con = store.connect(db)
+    hypothesis = store.hypotheses(con)[0]
+    for row, line in zip(table, lines, strict=True):
+        threshold = float(line.split()[0])
+        config = FactorConfig(alignment_model="judge-model", min_alignment=threshold)
+        rejected = 0
+        for _ in range(2):
+            outcome = proposer._judge(
+                con,
+                parse("rank(open)"),
+                "rank(open)",
+                "r",
+                hypothesis,
+                config,
+                [],
+                Judge(_verdict(**{alignment.CHECKS[0]: True})),
+                None,
+            )
+            rejected += outcome.status == "rejected"
+        assert row["aligned_rejected"] == f"{rejected}/2"
+    con.close()
