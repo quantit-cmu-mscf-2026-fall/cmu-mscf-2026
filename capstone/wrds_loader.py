@@ -92,6 +92,10 @@ CIZ_COLUMN_ALIASES = {
 }
 
 # Same shape, against the CIZ membership table.
+# How far before `delistingdt` a permno's last admitted price row may sit for
+# its delisting return to be kept: a week of trading days, with holidays.
+DELIST_MAX_GAP = pd.Timedelta(days=10)
+
 _SP500_JOIN_CIZ = """join crsp.dsp500list_v2 as s
           on v.permno = s.permno
          and v.dlycaldt >= s.mbrstartdt
@@ -280,9 +284,12 @@ def crsp_daily_ciz(
     frame = conn.raw_sql(query, params=params, date_cols=["date"])
 
     # stkdelists carries no classification columns, so rather than reproduce the
-    # filter through another join we keep delisting rows for permnos the price
-    # pull already admitted. The merge is outer so a delisting return survives
-    # even if its last trading day fell outside the price rows pulled.
+    # filter through another join we keep a delisting row only when the price
+    # pull admitted that permno up to (near) its delisting date. A permno match
+    # alone is not enough: a name that left the S&P 500, or stopped qualifying
+    # as common stock, and delisted years later would get an orphan row. The
+    # merge is outer so a delisting return survives even if its last trading
+    # day itself fell just outside the price rows pulled.
     delist_query = """
         select d.delistingdt as date, d.permno, d.delret as dlret
         from crsp.stkdelists as d
@@ -290,7 +297,12 @@ def crsp_daily_ciz(
           and d.delret is not null
     """
     delist = conn.raw_sql(delist_query, params={"start": start, "end": end}, date_cols=["date"])
-    delist = delist[delist["permno"].isin(set(frame["permno"]))]
+    last_admitted = pd.to_datetime(frame["date"]).groupby(frame["permno"]).max().to_dict()
+    near_last_admitted = [
+        permno in last_admitted and last_admitted[permno] >= day - DELIST_MAX_GAP
+        for day, permno in zip(pd.to_datetime(delist["date"]), delist["permno"], strict=True)
+    ]
+    delist = delist.loc[pd.Series(near_last_admitted, index=delist.index, dtype=bool)]
     delist = delist.drop_duplicates(subset=["date", "permno"])
 
     frame = frame.merge(delist, on=["date", "permno"], how="outer", validate="one_to_one")

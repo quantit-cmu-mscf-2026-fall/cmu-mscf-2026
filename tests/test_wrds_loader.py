@@ -156,6 +156,47 @@ def test_ciz_delisting_rows_are_limited_to_permnos_the_price_pull_admitted():
     assert set(frame["permno"]) == {10001}
 
 
+def _price_row(day: str, permno: int, ticker: str) -> dict:
+    return dict.fromkeys(CIZ_COLUMNS, 0.01) | {
+        "date": pd.Timestamp(day),
+        "permno": permno,
+        "ticker": ticker,
+    }
+
+
+def test_ciz_drops_a_delisting_long_after_the_name_left_the_pull():
+    """#53 review: a permno match alone let an index leaver back in.
+
+    10001 is admitted only through 2016-02-29, its last member day, and
+    delists in 2018. Under sp500_only it must not reappear on 2018-06-29.
+    """
+    conn = ciz_conn(
+        price_rows=[_price_row("2016-02-26", 10001, "AAA"), _price_row("2016-02-29", 10001, "AAA")],
+        delist_rows=[{"date": pd.Timestamp("2018-06-29"), "permno": 10001, "dlret": -0.35}],
+    )
+    frame = wrds_loader.crsp_daily_ciz(conn, "2015-01-01", "2020-12-31", sp500_only=True)
+    assert frame["date"].max() == pd.Timestamp("2016-02-29")
+    assert frame["dlret"].isna().all()
+
+
+def test_ciz_keeps_a_delisting_next_to_the_last_admitted_day():
+    """The guard must not drop the delisting returns it exists to carry.
+
+    20002 trades through its delisting day; 30003's last admitted row is two
+    trading days before its delisting date, which then comes back as its own row.
+    """
+    conn = ciz_conn(
+        price_rows=[_price_row("2018-06-29", 20002, "BBB"), _price_row("2018-06-27", 30003, "CCC")],
+        delist_rows=[
+            {"date": pd.Timestamp("2018-06-29"), "permno": 20002, "dlret": -0.2},
+            {"date": pd.Timestamp("2018-06-29"), "permno": 30003, "dlret": -0.5},
+        ],
+    )
+    frame = wrds_loader.crsp_daily_ciz(conn, "2018-01-01", "2018-12-31", sp500_only=True)
+    kept = frame.dropna(subset=["dlret"]).set_index("permno")["dlret"]
+    assert kept.to_dict() == {20002: -0.2, 30003: -0.5}
+
+
 def test_ciz_membership_returns_the_same_column_names_as_legacy():
     """Callers must not branch on which family produced the membership frame."""
     conn = ciz_conn()
