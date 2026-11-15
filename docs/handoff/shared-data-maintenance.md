@@ -42,3 +42,15 @@ note on concurrent publishers) are all addressed. Details: the PR description.
 
 ## 6. Public-repo safety
 No data, credentials, account ids, machine paths or private notes.
+
+## 7. Follow-up: the CIZ pull in `wrds_loader` (QUANTIT-57)
+- Adds: `crsp_daily_ciz` (CRSP daily from `crsp.dsf_v2`, columns aliased to the
+  legacy names), `sp500_members_ciz`, `sp500_only=` scoping by a date-bounded
+  membership join, and cache keys that carry the scope and the table family.
+- Contract: a membership spell still open at the query end is clamped to it, and
+  `mbr_end_censored` says so (both table families).
+
+| Check | How | Result | Reproduce with |
+|---|---|---|---|
+| Unit tests | `tests/test_wrds_loader.py`, a recording stub checks each query; no WRDS | pass | `pytest -q tests/test_wrds_loader.py` |
+| Clamp tests fail without the clamp | revert `capstone/wrds_loader.py`, rerun | 5 fail | same command |
