@@ -8,19 +8,21 @@ shapes makes every proposal look original and turns the paper's central
 regularizer into a constant.
 
 This module carries the subset of Alpha101 expressible in this repo's
-closed OHLCV grammar, transcribed member by member. Excluded, and why:
+closed grammar (`FIELDS`), transcribed member by member. Excluded, and why:
 
-* anything using `vwap`, `cap`, or `IndClass.*` — the CRSP daily pull
-  carries no volume-weighted average price, market capitalisation, or
-  industry classification, and inventing a proxy would put a made-up
-  series into the originality baseline;
-* anything using a ternary or a comparison (`(x < 0) ? a : b`) — the
-  grammar has no conditional, by design: every operator must be
-  differentiable-in-spirit and cheap to canonicalise for Eq. 5.
+* anything using `vwap` or `IndClass.*` — the CRSP daily pull carries no
+  volume-weighted average price or industry classification, and inventing
+  a proxy would put a made-up series into the originality baseline
+  (`cap` is in the grammar, so alpha_056 is in the zoo);
+* anything using a ternary, a comparison (`(x < 0) ? a : b`) or an
+  element-wise `min`/`max` of two series — the grammar has no conditional,
+  by design: every operator must be differentiable-in-spirit and cheap to
+  canonicalise for Eq. 5.
 
 Transcription notes. Alpha101's `delay` is `shift`, `correlation` is
 `ts_corr`, `covariance` is `ts_cov`, `stddev` is `ts_std`, `sum` is
-`ts_sum`, `Ts_Rank` is `ts_rank`, and `adv{d}` is `ts_mean(volume, d)`.
+`ts_sum`, `Ts_Rank` is `ts_rank`, `product` is `ts_product`, `min(x, d)`
+is `ts_min(x, d)`, and `adv{d}` is `ts_mean(volume, d)`.
 `returns` is written out as `close / shift(close, 1) - 1`, which keeps
 the transcription over OHLCV and lets a proposal that rebuilds daily returns
 match the zoo on that subtree. Since the grammar also has a `returns` field,
@@ -71,6 +73,19 @@ ALPHA101_EXPRESSIONS: dict[str, str] = {
     "alpha_022": "-1 * delta(ts_corr(high, volume, 5), 5) * rank(ts_std(close, 20))",
     "alpha_026": "-1 * ts_max(ts_corr(ts_rank(volume, 5), ts_rank(high, 5), 5), 3)",
     "alpha_028": ("scale(ts_corr(ts_mean(volume, 20), low, 5) + (high + low) / 2 - close)"),
+    "alpha_029": (
+        "ts_min(ts_product(rank(rank(scale(log(ts_sum(ts_min(rank(rank("
+        "-1 * rank(delta(close - 1, 5)))), 2), 1))))), 1), 5) "
+        f"+ ts_rank(shift(-1 * ({RETURNS}), 6), 5)"
+    ),
+    "alpha_030": (
+        "(1 - rank(sign(close - shift(close, 1)) + sign(shift(close, 1) - shift(close, 2)) "
+        "+ sign(shift(close, 2) - shift(close, 3)))) * ts_sum(volume, 5) / ts_sum(volume, 20)"
+    ),
+    "alpha_031": (
+        "rank(rank(rank(decay_linear(-1 * rank(rank(delta(close, 10))), 10)))) "
+        "+ rank(-1 * delta(close, 3)) + sign(scale(ts_corr(ts_mean(volume, 20), low, 12)))"
+    ),
     "alpha_033": "rank(-1 * (1 - open / close))",
     "alpha_034": (
         f"rank((1 - rank(ts_std({RETURNS}, 2) / ts_std({RETURNS}, 5))) "
@@ -80,6 +95,7 @@ ALPHA101_EXPRESSIONS: dict[str, str] = {
         "ts_rank(volume, 32) * (1 - ts_rank(close + high - low, 16)) "
         f"* (1 - ts_rank({RETURNS}, 32))"
     ),
+    "alpha_037": "rank(ts_corr(shift(open - close, 1), close, 200)) + rank(open - close)",
     "alpha_038": "-1 * rank(ts_rank(close, 10)) * rank(close / open)",
     "alpha_039": (
         "-1 * rank(delta(close, 7) "
@@ -93,6 +109,10 @@ ALPHA101_EXPRESSIONS: dict[str, str] = {
         "-1 * rank(ts_sum(shift(close, 5), 20) / 20) * ts_corr(close, volume, 2) "
         "* rank(ts_corr(ts_sum(close, 5), ts_sum(close, 20), 2))"
     ),
+    "alpha_052": (
+        "(-1 * ts_min(low, 5) + shift(ts_min(low, 5), 5)) "
+        f"* rank((ts_sum({RETURNS}, 240) - ts_sum({RETURNS}, 20)) / 220) * ts_rank(volume, 5)"
+    ),
     "alpha_053": "-1 * delta(((close - low) - (high - close)) / (close - low), 9)",
     "alpha_054": (
         "-1 * ((low - close) * signed_power(open, 5)) / ((low - high) * signed_power(close, 5))"
@@ -100,6 +120,14 @@ ALPHA101_EXPRESSIONS: dict[str, str] = {
     "alpha_055": (
         "-1 * ts_corr(rank((close - ts_min(low, 12)) "
         "/ (ts_max(high, 12) - ts_min(low, 12))), rank(volume), 6)"
+    ),
+    "alpha_056": (
+        f"0 - 1 * (rank(ts_sum({RETURNS}, 10) / ts_sum(ts_sum({RETURNS}, 2), 3)) "
+        f"* rank(({RETURNS}) * cap))"
+    ),
+    "alpha_060": (
+        "0 - 1 * (2 * scale(rank(((close - low) - (high - close)) / (high - low) * volume)) "
+        "- scale(rank(ts_argmax(close, 10))))"
     ),
     "alpha_101": "(close - open) / ((high - low) + 0.001)",
 }

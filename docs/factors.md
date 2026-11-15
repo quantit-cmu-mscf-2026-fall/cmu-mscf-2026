@@ -21,13 +21,18 @@ papers (file or paperlog) -> hypotheses.extract -> store.hypotheses
   factors) or `method` (about how to search or validate, such as "simpler
   factors decay less"). Method hypotheses are stored and stop there.
 - **Complexity**: a formula with more than `max_nodes` tree nodes is rejected
-  (AlphaAgent's complexity control). Every Alpha101 member has at most 26.
+  (AlphaAgent's complexity control). Every Alpha101 member in the zoo has a
+  spelling with at most 28 nodes.
 - **Usage**: every paper's model calls and tokens go in the `usage` table,
   including for a paper that failed partway; `stats` totals them.
 - **Factors** are formulas in a closed grammar over daily open, high, low,
-  close, volume, `returns` (CRSP total return), `shares` (outstanding) and
-  `cap` (market cap), so turnover is `volume / shares` (`capstone/factors/tree.py`).
-  Evaluating them later needs split-adjusted prices and shares. A formula that does not parse goes back to
+  close, volume, `returns` (CRSP total return), `shares` (outstanding),
+  `cap` (market cap), and `mkt_return` (market return), so turnover is
+  `volume / shares` (`capstone/factors/tree.py`). A formula must use at least
+  one per-stock field; a market-only formula is refused. Evaluating them
+  later needs split-adjusted prices and shares. Construct `mkt_return` from
+  `sd.daily_returns`, weighted by the previous day's `dlycap` over
+  `in_universe` stocks. A formula that does not parse goes back to
   the model with the error, up to `max_repairs` times.
 - **Originality** (AlphaAgent Eq. 6) is the share of a formula inside its
   largest subtree shared with a reference, compared by shape, so a retuned
