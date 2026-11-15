@@ -174,6 +174,34 @@ def test_publish_failure_partway_publishes_nothing(drive, tmp_path, monkeypatch,
     assert sorted(p.name for p in drive.iterdir()) == ["SHA256SUMS", "a.parquet"]
 
 
+@pytest.mark.parametrize("fail_on", [1, 2, 3, 4])
+def test_publish_failure_during_swap_restores_the_old_set(drive, tmp_path, monkeypatch, fail_on):
+    # Round-2 review of #27: a failed os.replace while swapping files in left the
+    # first file replaced, SHA256SUMS stale and staged files in the folder.
+    # Calls in order: back up a, swap a in, swap b in, swap the manifest in.
+    changed, added = tmp_path / "a.parquet", tmp_path / "b.csv"
+    changed.write_bytes(b"updated")
+    added.write_bytes(b"new file")
+    manifest_before = (drive / sd.MANIFEST).read_bytes()
+    real_replace, calls = publish.os.replace, []
+
+    def flaky_replace(src, dst):
+        calls.append(src)
+        if len(calls) == fail_on:
+            raise PermissionError("file in use")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(publish.os, "replace", flaky_replace)
+    monkeypatch.setattr(
+        sys, "argv", ["publish_shared_data.py", str(changed), str(added), "--apply"]
+    )
+    with pytest.raises(PermissionError):
+        publish.main()
+    assert (drive / "a.parquet").read_bytes() == b"original"
+    assert (drive / sd.MANIFEST).read_bytes() == manifest_before
+    assert sorted(p.name for p in drive.iterdir()) == ["SHA256SUMS", "a.parquet"]
+
+
 def test_publish_unchanged_file_is_a_no_op(drive, monkeypatch, capsys):
     out = _run_publish(monkeypatch, capsys, drive / "a.parquet", "--apply")
     assert "unchanged" in out and "nothing to publish" in out
@@ -238,6 +266,16 @@ def test_fact_checks_catch_a_broken_claim():
     frame = _claims_frame()
     frame.loc[1, "dlyret"] = -0.2  # dlyret no longer equals delret on the delisting row
     with pytest.raises(AssertionError, match="dlyret no longer equals delret"):
+        build.check_claims(frame)
+
+
+@pytest.mark.parametrize("col", ["securitytype", "sharetype"])
+def test_fact_checks_catch_n_a_off_a_delisting_row(col):
+    # Round-2 review of #27: only sharetype was checked, but the "occurs only on
+    # delisting rows" label is printed for every coded column.
+    frame = _claims_frame()
+    frame[col] = ["N/A", "N/A"]  # row 0 is not a delisting row
+    with pytest.raises(AssertionError, match=f"{col} is N/A off a delisting row"):
         build.check_claims(frame)
 
 

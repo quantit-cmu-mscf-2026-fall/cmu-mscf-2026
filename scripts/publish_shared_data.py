@@ -7,8 +7,9 @@ Usage::
 
 Each FILE is copied into the synced `mscf-capstone-data` folder under its own
 name, replacing any file of that name, and SHA256SUMS is rewritten to match.
-Every copy is re-hashed before it replaces anything, and a failure publishes
-nothing, so Drive never holds a half-updated set. Teammates' next
+Every copy is re-hashed before it replaces anything. A failure at any step,
+including while files are being swapped in, puts the old files and SHA256SUMS
+back, so Drive never holds a half-updated set. Teammates' next
 `shared_data.sync()` picks the change up.
 
 Without --apply nothing is written: it prints what would be added, replaced or
@@ -63,25 +64,57 @@ def main() -> None:
         print("preview only; re-run with --apply to publish")
         return
 
-    # All or nothing: copy everything to temporary names and verify it first, so
-    # a failure leaves every published file and SHA256SUMS exactly as they were.
-    # Only then swap each into place, and rewrite the manifest last.
+    # All or nothing: copy everything to temporary names and verify it, then
+    # write the new manifest to a temporary name. Only then swap each file in,
+    # moving the one it replaces aside to .<name>.bak, and the manifest last.
+    # A failure at any step puts the originals back and removes the new files.
     staged = {name: drive / f".{name}.publishing" for name in changed}
+    temp_manifest = drive / f".{sd.MANIFEST}.publishing"
+    backups: dict[str, Path] = {}
+    swapped: list[str] = []
     try:
         for name, (path, digest, _) in changed.items():
             shutil.copyfile(path, staged[name])
             if sd._sha256(staged[name]) != digest:
                 raise SystemExit(f"copy of {name} did not verify; nothing was published")
+        sd.write_manifest(temp_manifest, new_entries)
+        for name, temp in staged.items():
+            target = drive / name
+            if target.exists():
+                backups[name] = drive / f".{name}.bak"
+                os.replace(target, backups[name])
+            os.replace(temp, target)
+            swapped.append(name)
+        os.replace(temp_manifest, manifest)
     except BaseException:
-        for temp in staged.values():
-            temp.unlink(missing_ok=True)
+        _roll_back(drive, staged, temp_manifest, backups, swapped)
         raise
-    for name, temp in staged.items():
-        os.replace(temp, drive / name)
-    temp_manifest = drive / f".{sd.MANIFEST}.publishing"
-    sd.write_manifest(temp_manifest, new_entries)
-    os.replace(temp_manifest, manifest)
+    for backup in backups.values():
+        backup.unlink(missing_ok=True)
     print(f"published {len(changed)} file(s); version is now {sd.manifest_version(manifest)}")
+
+
+def _roll_back(drive: Path, staged, temp_manifest, backups, swapped) -> None:
+    """Undo a partial publish: drop new files, restore the originals, clean up."""
+    stuck = []
+
+    def attempt(action, *paths):
+        try:
+            action(*paths)
+        except OSError as err:
+            stuck.append(str(err))
+
+    for name in swapped:
+        if name not in backups:  # a file this publish added
+            attempt(Path.unlink, drive / name)
+    for name, backup in backups.items():
+        attempt(os.replace, backup, drive / name)
+    for temp in [*staged.values(), temp_manifest]:
+        attempt(lambda path: path.unlink(missing_ok=True), temp)
+    if stuck:
+        print("rollback incomplete; fix these by hand (.bak files hold the originals):")
+        for line in stuck:
+            print(f"  {line}")
 
 
 if __name__ == "__main__":
