@@ -287,6 +287,23 @@ def test_bad_events_are_refused(con, bad):
     assert memory_events(con) == []
 
 
+@pytest.mark.parametrize(
+    ("quality", "baseline"),
+    [(v, 0.1) for v in (math.nan, math.inf, -math.inf)]
+    + [(0.2, v) for v in (math.nan, math.inf, -math.inf)]
+    + [(1e308, -1e308)],
+)
+def test_nonfinite_event_scores_cannot_poison_online_or_stored_statistics(con, quality, baseline):
+    online = MemoryState()
+    online.update(event(con, "admitted", 0.3, 0.1))
+    with pytest.raises(ValueError, match="finite"):
+        event(con, "admitted", quality, baseline)
+    online.update(event(con, "admitted", 0.2, 0.1))
+    batch = reduce_events(memory_events(con))
+    assert online.pairs == batch
+    assert online.stats("returns|q2|d0|u0", "nesting").mean == pytest.approx(0.15)
+
+
 def test_a_failed_parse_counts_under_the_intended_motif():
     assert event_motif({"motif_realized": None, "motif_intended": "nesting"}) == "nesting"
     assert event_motif({"motif_realized": "other", "motif_intended": "nesting"}) == "other"

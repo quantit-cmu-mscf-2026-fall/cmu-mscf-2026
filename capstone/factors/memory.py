@@ -383,6 +383,10 @@ def record_event(
     if (quality is None) != (baseline is None):
         raise ValueError("a scored child needs both its quality and its parent's baseline")
     residual = None if quality is None else quality - baseline
+    if any(
+        value is not None and not math.isfinite(value) for value in (quality, baseline, residual)
+    ):
+        raise ValueError("quality, baseline and residual must be finite when scored")
     row = {
         "run_id": run_id,
         "iteration": iteration,
