@@ -18,6 +18,9 @@ from capstone.factors import fundamentals as fu
 from capstone.factors import tree
 from capstone.factors.evaluation import build_panel, evaluate_factors, factor_returns
 from capstone.factors.interpret import EvaluationError, evaluate
+from capstone.factors.llm import grammar_help
+from capstone.factors.memory import FIELD_GROUPS, parent_context
+from capstone.factors.synthetic import PanelSpec, make_panel
 from capstone.factors.tree import (
     FIELDS,
     FUNDAMENTAL_FIELDS,
@@ -72,6 +75,35 @@ def test_a_tree_using_a_fundamental_parses_and_round_trips(expression):
     assert again == node
     assert identity_key(again) == identity_key(node)
     assert factor_id(again) == factor_id(node)
+
+
+def test_the_memory_groups_fundamentals_together():
+    for name in FUNDAMENTAL_FIELDS:
+        assert FIELD_GROUPS[name] == "fundamental"
+    context = parent_context(parse("rank(book / cap)"), quality=0.0, times_selected=0)
+    assert context.split("|")[0] == "fundamental+size"
+
+
+def test_the_model_is_told_about_fundamentals_only_when_asked():
+    assert "book" not in grammar_help()
+    text = grammar_help(fundamentals=True)
+    for name in FUNDAMENTAL_FIELDS:
+        assert name in text
+    assert "90 days" in text
+
+
+def test_the_synthetic_panel_has_deterministic_fundamentals():
+    spec = PanelSpec(n_stocks=20, n_days=600, seed=4)
+    a, b = make_panel(spec), make_panel(spec)
+    for name in FUNDAMENTAL_FIELDS:
+        np.testing.assert_array_equal(a[name].to_numpy(), b[name].to_numpy())
+        frame = a[name]
+        assert frame.index.equals(a["close"].index) and frame.columns.equals(a["close"].columns)
+        # Annual values: a stock's value changes at most once a year.
+        changes = frame.ne(frame.shift()).iloc[1:] & frame.iloc[1:].notna()
+        assert changes.sum().max() <= len(frame) // 252 + 1
+    assert a["book"].iloc[0].isna().all()  # nothing is available on day one
+    assert a["book"].iloc[-1].notna().all()
 
 
 @pytest.mark.parametrize("expression", ["rank(bookx)", "ebitda / cap", "rank(ceq)", "book(close)"])

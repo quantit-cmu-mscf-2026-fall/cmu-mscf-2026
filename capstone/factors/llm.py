@@ -22,6 +22,7 @@ from capstone.factors.tree import (
     BINARY_PARAMETER_FUNCS,
     BINARY_WINDOW_FUNCS,
     FUNCS,
+    FUNDAMENTAL_FIELDS,
     MARKET_FIELDS,
     STOCK_FIELDS,
     WINDOW_MAX,
@@ -150,14 +151,28 @@ def call_tool(
     raise ValueError(f"the model did not call {tool['name']}")
 
 
-def grammar_help() -> str:
-    """The factor grammar in words, generated from the parser's own tables."""
+def grammar_help(*, fundamentals: bool = False) -> str:
+    """The factor grammar in words, generated from the parser's own tables.
+
+    `fundamentals` adds the annual accounting fields; only for a run whose
+    panel was built with them (`evaluation.build_panel(fundamentals=...)`),
+    since a tree reading one fails to evaluate on a panel without them.
+    """
     windowed = sorted(name for name, takes in FUNCS.items() if takes)
     plain = sorted(name for name, takes in FUNCS.items() if not takes)
+    accounting = (
+        f"Annual accounting fields, per stock, in $ millions: {', '.join(FUNDAMENTAL_FIELDS)} "
+        "(book equity, income before extraordinary items, net sales, total assets); each "
+        "fiscal year's value is known from 90 days after the fiscal year end and held "
+        "until the next year's, so book / cap is book-to-market. "
+        if fundamentals
+        else ""
+    )
     return (
         f"Fields: {', '.join(STOCK_FIELDS)} (per stock), and {', '.join(MARKET_FIELDS)} "
         "(the value-weighted market return, the same for every stock on a date; market "
-        "volatility is ts_std(mkt_return, n)). Operators: + - * / and unary minus. "
+        "volatility is ts_std(mkt_return, n)). "
+        f"{accounting}Operators: + - * / and unary minus. "
         f"f(x, window): {', '.join(windowed)}. "
         f"f(x, y, window): {', '.join(sorted(BINARY_WINDOW_FUNCS))}. "
         f"f(x, exponent): {', '.join(sorted(BINARY_PARAMETER_FUNCS))}. "
