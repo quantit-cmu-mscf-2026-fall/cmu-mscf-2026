@@ -333,7 +333,7 @@ def program_weights(spec, panel, as_of):
     if formations.empty:
         raise contract.InsufficientHistoryError("no completed construction formation")
     formation = formations[-1]
-    # B3: the formation book reads only inputs as of `formation`, never `at` or costs.
+    # The formation book reads only inputs as of `formation`, never `at` or costs.
     book = input_memo.panel_cached(
         "formation",
         spec,
