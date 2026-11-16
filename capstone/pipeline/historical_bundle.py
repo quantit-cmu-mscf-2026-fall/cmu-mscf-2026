@@ -53,9 +53,9 @@ def save_inputs(path, inputs):
     manifest = {}
     for i, (label, frame) in enumerate(sorted(frames.items())):
         name = f"input-{i}.parquet"
-        if label not in DATE_COLUMNS:  # the date index is stored as the `date` column
-            frame = frame.rename_axis("date")
-        frame.to_parquet(root / name)
+        # the date index is stored as the `date` column
+        stored = frame if label in DATE_COLUMNS else frame.rename_axis("date")
+        stored.to_parquet(root / name)
         manifest[label] = {"file": name, "sha256": file_digest(root / name)}
     metadata = {
         "schema_version": 1,
