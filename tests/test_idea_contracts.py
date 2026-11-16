@@ -459,8 +459,8 @@ def test_large_review_needs_cited_subset_within_scope(archive):
     assert issue in assess(claim, archive, reviewed_methods=forged).completeness_issues
 
 
-def test_slice01_shaped_low_risk_review_replays_under_scope_rule(archive):
-    """Registered slice-01 low-risk-control: 64 reviewed spans, 2 cited method spans.
+def test_large_reviewed_method_replays_under_scope_rule(archive):
+    """A low-risk-control shape: 64 reviewed spans, 2 cited method spans.
 
     The saved v2 claim keeps its assessment-v1 outcome (old runs are immutable); the
     same content as a v3 claim clears the method-evidence axis. The Cohen-Frazzini
