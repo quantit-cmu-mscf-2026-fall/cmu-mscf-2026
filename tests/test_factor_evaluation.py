@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 
 from capstone import shared_data as sd
-from capstone.backtest import _backtest_components
+from capstone.backtest import backtest_components
 from capstone.factors import evaluation as ev
 from capstone.factors.evaluation import (
     HoldoutError,
@@ -92,16 +92,14 @@ def test_costs_match_the_backtest_when_every_spread_is_the_same():
     panel = build_panel(rows)
     result = factor_returns(parse("ts_mean(returns, 5)"), panel)
     signal = ev.evaluate(parse("ts_mean(returns, 5)"), panel.fields)
-    net, turnover = _backtest_components(
+    net, turnover = backtest_components(
         signal, panel.fields["returns"], cost_bps=10.0, demean=True, gross=1.0
     )  # half of a 20 bps spread is 10 bps per unit traded
-    # Same returns and turnover on every day a position is held. During the
-    # 5-day warm-up this module reports NaN; the backtest here still reports
-    # 0.0, which #55 changes to NaN too.
+    # Same returns and turnover on every day, warm-up NaNs included (#55).
     held = result.net.notna()
-    np.testing.assert_allclose(result.net[held], net[held], rtol=1e-9, atol=1e-12)
+    np.testing.assert_allclose(result.net, net, rtol=1e-9, atol=1e-12)
     np.testing.assert_allclose(result.turnover[held], turnover[held], rtol=1e-9)
-    assert (net.iloc[1:][~held.iloc[1:]] == 0.0).all() and (~held).sum() == 5
+    assert net[~held].isna().all() and (~held).sum() == 5
 
 
 def test_a_planted_factor_earns_and_its_opposite_loses():
