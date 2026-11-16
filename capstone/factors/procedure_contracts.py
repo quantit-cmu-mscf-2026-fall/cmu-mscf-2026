@@ -14,7 +14,16 @@ KINDS = ("proposal", "refinement", "comparison", "rerun")
 SECTIONS = (
     "version generator execution ownership sources qualification allocator feedback arms statistics"
 )
-VERSIONS = (1,)
+# Version 2 is version 1 plus a registered two-tier `evaluation` section. A version-1
+# record has no such section, so its bytes and identity are what they were.
+TWO_TIER_VERSION = 2
+VERSIONS = (1, TWO_TIER_VERSION)
+TWO_TIER_RULE = "two-tier-screen-v1"
+TWO_TIER_STATISTIC = "search-sharpe-v1"
+TWO_TIER_FIELDS = (
+    "rule tier1_id statistic survivors_per_family agreement_sample agreement_seed "
+    "min_rank_agreement calibration_tier1_error"
+)
 
 
 def fields(row, names):
@@ -43,6 +52,37 @@ def day(value):
 def limit(value):
     if type(value) is not int or value < 0:
         raise ValueError("bounded nonnegative integer required")
+
+
+def _real(value, low, high):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("a registered two-tier bound must be a number")
+    if not low <= value <= high:
+        raise ValueError("a registered two-tier bound is out of range")
+
+
+def two_tier_section(row):
+    """Validate a registered two-tier `evaluation` section.
+
+    `tier1_id` names the screen's implementation. The best `survivors_per_family`
+    variants of each family by the tier-1 statistic get the exact replay. A sample of
+    `agreement_sample` variants, drawn with `agreement_seed` before any result is seen,
+    gets the exact replay too; the screen is switched off (every variant replayed) when
+    the Spearman rank agreement of tier 1 against tier 2 on it is below
+    `min_rank_agreement`. `calibration_tier1_error` is the tier-1 approximation error the
+    whole-procedure calibration simulates (noise sd as a multiple of each variant's sd)."""
+    fields(row, TWO_TIER_FIELDS)
+    if row["rule"] != TWO_TIER_RULE or row["statistic"] != TWO_TIER_STATISTIC:
+        raise ValueError("unsupported two-tier evaluation rule")
+    identity(row["tier1_id"])
+    for name in ("survivors_per_family", "agreement_sample", "agreement_seed"):
+        limit(row[name])
+    if row["survivors_per_family"] < 1:
+        raise ValueError("every family keeps at least one tier-1 survivor")
+    if row["agreement_sample"] < 3:
+        raise ValueError("a rank-agreement check needs at least three sampled variants")
+    _real(row["min_rank_agreement"], -1.0, 1.0)
+    _real(row["calibration_tier1_error"], 0.0, 100.0)
 
 
 def _normalized(row):
@@ -74,7 +114,7 @@ class ProcedureSpec:
         row = self.to_record()
         if type(row.get("version")) is not int or row["version"] not in VERSIONS:
             raise ValueError("unsupported procedure version")
-        fields(row, SECTIONS)
+        fields(row, SECTIONS + (" evaluation" if row["version"] == TWO_TIER_VERSION else ""))
         if self.payload_json != canonical(row):
             raise ValueError("procedure bytes must be canonical")
         generator = row["generator"]
@@ -246,13 +286,18 @@ class ProcedureSpec:
                 raise ValueError("inherited effective-scope rule identity changed")
         else:
             raise ValueError("unknown original trial scope cannot be discarded")
+        if row["version"] == TWO_TIER_VERSION:
+            two_tier_section(row["evaluation"])
         if row != _normalized(row):
             raise ValueError("procedure inventories must use canonical ordering")
 
     @classmethod
     def freeze(cls, **sections):
+        """Version 1 without an `evaluation` section (every existing identity, unchanged);
+        version 2 when the procedure opts in to the registered two-tier evaluation."""
+        version = TWO_TIER_VERSION if "evaluation" in sections else 1
         try:
-            return cls(canonical(_normalized({"version": 1, **sections})))
+            return cls(canonical(_normalized({"version": version, **sections})))
         except (KeyError, TypeError, AttributeError) as exc:
             raise ValueError("invalid procedure structure") from exc
 
@@ -260,7 +305,14 @@ class ProcedureSpec:
     def from_record(cls, row):
         if row.get("version") not in VERSIONS:
             raise ValueError("unsupported procedure version")
+        if (row["version"] == TWO_TIER_VERSION) != ("evaluation" in row):
+            raise ValueError("a two-tier evaluation section needs procedure version 2, and only it")
         return cls.freeze(**{key: value for key, value in row.items() if key != "version"})
+
+    @property
+    def two_tier(self):
+        """The registered two-tier evaluation section, or None (exact replay of every variant)."""
+        return self.to_record().get("evaluation")
 
     def to_record(self):
         return json.loads(self.payload_json)
@@ -280,3 +332,51 @@ class ProcedureSpec:
             if row["name"] == name:
                 return row
         raise ValueError("arm was not registered")
+
+
+SCOPE_RESOLUTION = "procedure_scope_resolution_v1"
+
+
+def scope_evidence(legacy):
+    """The saved `procedure_scope_resolution_v1` payload a registered resolution must cite."""
+    return {
+        "rule_id": legacy["resolution_rule_id"],
+        "inherited_classification_id": legacy["inherited_classification_id"],
+        "reported_counts": legacy["reported_counts"],
+        "unresolved_scope_items": [],
+        "justification": legacy["justification"],
+        "effective_scope": legacy["effective_scope"],
+    }
+
+
+def whole_procedure_resolution(legacy, *, calibration_rule_id, justification, scope_description):
+    """Resolve the original reported scope by whole-procedure calibration.
+
+    No scalar inherited count is invented (`prior_effective_trials` stays None); the
+    procedure's error rate is instead measured end to end under `calibration_rule_id`.
+    Returns (resolved legacy_scope, the evidence payload to save before registration).
+    """
+    if legacy.get("state") != "unresolved":
+        raise ValueError("only an unresolved legacy scope can be resolved")
+    scope = {
+        "combination_rule": "whole_procedure_calibration",
+        "prior_effective_trials": None,
+        "calibration_rule_id": identity(calibration_rule_id),
+        "scope_description": scope_description,
+    }
+    rule = {
+        "reported_counts": legacy["reported_counts"],
+        "inherited_classification_id": legacy["inherited_classification_id"],
+        "justification": justification,
+        "effective_scope": scope,
+    }
+    resolved = {
+        **legacy,
+        "state": "registered_resolution",
+        "resolution_rule_id": digest(rule),
+        "justification": justification,
+        "effective_scope": scope,
+    }
+    evidence = scope_evidence(resolved)
+    resolved["evidence_ids"] = [digest({"kind": SCOPE_RESOLUTION, "payload": evidence})]
+    return resolved, evidence

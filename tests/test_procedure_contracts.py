@@ -9,7 +9,14 @@ import copy
 
 import pytest
 
-from capstone.factors.procedure_contracts import ProcedureSpec
+from capstone.factors.procedure_contracts import (
+    SCOPE_RESOLUTION,
+    TWO_TIER_RULE,
+    TWO_TIER_STATISTIC,
+    ProcedureSpec,
+    scope_evidence,
+    whole_procedure_resolution,
+)
 from capstone.factors.research_contracts import canonical, digest
 
 COUNTS = [11, 7]  # caller-supplied scope counts; any positive integers are accepted
@@ -318,3 +325,130 @@ def test_a_resolution_needs_a_justification_evidence_and_a_known_combination_rul
         ),
         resolved=True,
     )
+
+
+# Pinned from a version-1 record: adding the two-tier section must not move this identity.
+VERSION_1_IDENTITY = "8e8c30bfa37b08b8f4121433fa555f1698888e53dd97ebad57883a0f3ceaf688"
+
+
+def two_tier(**change):
+    return {
+        "rule": TWO_TIER_RULE,
+        "tier1_id": h("tier1"),
+        "statistic": TWO_TIER_STATISTIC,
+        "survivors_per_family": 2,
+        "agreement_sample": 5,
+        "agreement_seed": 3,
+        "min_rank_agreement": 0.5,
+        "calibration_tier1_error": 0.25,
+    } | change
+
+
+def test_a_version_1_procedure_keeps_its_exact_identity():
+    procedure = spec()
+    assert procedure.identity == VERSION_1_IDENTITY
+    assert procedure.to_record()["version"] == 1 and procedure.two_tier is None
+    assert '"evaluation"' not in procedure.payload_json
+
+
+def test_a_two_tier_section_makes_a_version_2_procedure_with_its_own_identity():
+    old = spec()
+    new = ProcedureSpec.freeze(**spec_record(), evaluation=two_tier())
+    assert new.to_record()["version"] == 2 and new.two_tier == two_tier()
+    assert new.identity != old.identity
+    assert ProcedureSpec.from_record(new.to_record()) == new
+    changed = ProcedureSpec.freeze(**spec_record(), evaluation=two_tier(agreement_seed=4))
+    assert changed.identity != new.identity
+
+
+def test_two_tier_version_and_section_must_agree():
+    record = spec().to_record()
+    with pytest.raises(ValueError, match="needs procedure version 2"):
+        ProcedureSpec.from_record({**record, "evaluation": two_tier()})
+    with pytest.raises(ValueError, match="needs procedure version 2"):
+        ProcedureSpec.from_record({**record, "version": 2})
+
+
+@pytest.mark.parametrize(
+    ("change", "match"),
+    [
+        ({"rule": "other"}, "unsupported two-tier"),
+        ({"statistic": "other"}, "unsupported two-tier"),
+        ({"tier1_id": "not-a-digest"}, "content-addressed"),
+        ({"survivors_per_family": 0}, "at least one"),
+        ({"agreement_sample": 2}, "at least three"),
+        ({"agreement_seed": -1}, "nonnegative"),
+        ({"min_rank_agreement": 1.5}, "out of range"),
+        ({"min_rank_agreement": "high"}, "must be a number"),
+        ({"min_rank_agreement": True}, "must be a number"),
+        ({"calibration_tier1_error": -0.1}, "out of range"),
+        ({"calibration_tier1_error": 101}, "out of range"),
+    ],
+)
+def test_a_malformed_two_tier_section_is_refused(change, match):
+    with pytest.raises(ValueError, match=match):
+        ProcedureSpec.freeze(**spec_record(), evaluation=two_tier(**change))
+
+
+def test_a_two_tier_section_with_missing_or_extra_fields_is_refused():
+    row = two_tier()
+    row.pop("agreement_seed")
+    with pytest.raises(ValueError, match="incomplete or unknown"):
+        ProcedureSpec.freeze(**spec_record(), evaluation=row)
+    with pytest.raises(ValueError, match="incomplete or unknown"):
+        ProcedureSpec.freeze(**spec_record(), evaluation=two_tier() | {"extra": 1})
+
+
+def unresolved_legacy():
+    return spec().to_record()["statistics"]["legacy_scope"]
+
+
+def test_whole_procedure_resolution_invents_no_scalar_count():
+    legacy = unresolved_legacy()
+    resolved, evidence = whole_procedure_resolution(
+        legacy,
+        calibration_rule_id=h("calibration-rule"),
+        justification="Synthetic fixture justification.",
+        scope_description="Measured end to end under a fixture rule.",
+    )
+    scope = resolved["effective_scope"]
+    assert resolved["state"] == "registered_resolution"
+    assert scope["prior_effective_trials"] is None
+    assert scope["combination_rule"] == "whole_procedure_calibration"
+    assert evidence == scope_evidence(resolved)
+    assert resolved["evidence_ids"] == [digest({"kind": SCOPE_RESOLUTION, "payload": evidence})]
+    record = spec_record()
+    record["statistics"]["legacy_scope"] = resolved
+    registered = ProcedureSpec.freeze(**record)
+    assert registered.to_record()["statistics"]["legacy_scope"]["effective_scope"] == scope
+
+
+def test_only_an_unresolved_scope_can_be_resolved_and_the_rule_must_be_an_identity():
+    resolved, _ = whole_procedure_resolution(
+        unresolved_legacy(),
+        calibration_rule_id=h("rule"),
+        justification="j",
+        scope_description="s",
+    )
+    with pytest.raises(ValueError, match="only an unresolved"):
+        whole_procedure_resolution(
+            resolved, calibration_rule_id=h("rule"), justification="j", scope_description="s"
+        )
+    with pytest.raises(ValueError, match="content-addressed"):
+        whole_procedure_resolution(
+            unresolved_legacy(),
+            calibration_rule_id="not-a-digest",
+            justification="j",
+            scope_description="s",
+        )
+
+
+def test_a_scalar_count_cannot_ride_along_a_whole_procedure_rule():
+    resolved, _ = whole_procedure_resolution(
+        unresolved_legacy(), calibration_rule_id=h("rule"), justification="j", scope_description="s"
+    )
+    resolved["effective_scope"]["prior_effective_trials"] = 9
+    record = spec_record()
+    record["statistics"]["legacy_scope"] = resolved
+    with pytest.raises(ValueError, match="cannot invent a scalar count"):
+        ProcedureSpec.freeze(**record)
