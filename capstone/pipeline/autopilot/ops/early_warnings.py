@@ -18,9 +18,12 @@ names something the run will run into later, while a person can still act on it:
 
 Each warning row has the shape of a `report.problems` row with `status = "warning"`.
 `deliver` keeps the current warnings in `<run>/autopilot/ops/warnings.json` (no clock:
-the same state gives the same bytes) and sends each warning once per run, keyed like an
-alert (`alert.problem_key`), to the `[alert]` notifier (`services["notifier"]` in
-tests) as a document of `severity = "warning"` whose `problems` are the new warnings.
+the same state gives the same bytes). Warnings are keyed like alerts (`alert.problem_key`)
+and sent to the `[alert]` notifier (`services["notifier"]` in tests) as a document of
+`severity = "warning"` whose `problems` are the unacknowledged warnings. Persisted
+acknowledgements suppress later sends. A callback can complete before its acknowledgement
+is saved, so failure or a kill in that gap can send the same warning again. Delivery is
+at least once across retries; notifier callbacks must handle warning keys idempotently.
 Warnings never write `<run>/ALERT.json`. A notifier that fails is the ops problem
 `alert_notifier_failed` at the end of the tick; the warning is sent again next tick.
 """
@@ -170,10 +173,13 @@ def _notify(ctx, rows):
 
 
 def deliver(ctx, report=None):
-    """Record the run's current warnings and send each new one once; returns the new ones.
+    """Record current warnings and send unacknowledged ones; returns those attempted.
 
     `report` (the tick's, in the ops hook) receives `alert_notifier_failed` when the
-    notifier fails; `daily` passes none (the hook retries at the end of the tick)."""
+    notifier fails; `daily` passes none (the hook retries at the end of the tick).
+    Notification precedes its persisted acknowledgement, so an interrupted attempt may
+    be delivered again. Callbacks must be idempotent; this is not exactly-once delivery.
+    """
     rows = check(ctx)
     path = ops_dir(ctx.run_root) / FILE
     saved = read_json(path, None) or {}
