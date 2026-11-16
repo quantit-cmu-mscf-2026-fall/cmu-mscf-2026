@@ -10,7 +10,7 @@ import threading
 
 from capstone.factors.paper_pool import current_slot
 
-__all__ = ["PRICES", "PromptCaching", "UsageRecorder", "cost_estimate"]
+__all__ = ["CACHE_READ", "CACHE_WRITE", "PRICES", "PromptCaching", "UsageRecorder", "cost_estimate"]
 
 # USD per million tokens, (input, output): list prices, an estimate only.
 # Source constants, not a team-approved rate table; the console's bill is the real one.
@@ -20,6 +20,12 @@ PRICES: dict[str, tuple[float, float]] = {
     "claude-opus-5-5": (4.0, 20.0),
     "claude-haiku-5-5": (0.10, 0.50),
 }
+
+# Prompt-cache tokens, as multiples of the model's input price (list prices, 5-minute
+# cache): a cache write costs 1.25x, a cache read 0.1x. Source constants, not a team-approved
+# rate table.
+CACHE_WRITE = 1.25
+CACHE_READ = 0.1
 
 _TOKENS = (
     "input_tokens",
@@ -91,17 +97,29 @@ class PromptCaching:
 
 
 def cost_estimate(records: list[dict], prices: dict[str, tuple[float, float]] = PRICES) -> dict:
-    """Tokens per model and their cost at `prices`; models without a price are named."""
+    """Tokens per model and their cost at `prices`; models without a price are named.
+
+    Prompt-cache tokens are priced from the input price: a cache write
+    (`cache_creation_input_tokens`) at `CACHE_WRITE` times it, a cache read
+    (`cache_read_input_tokens`) at `CACHE_READ` times it. Their totals are kept
+    per model when the records carry them (`UsageRecorder` always does).
+    """
     by_model: dict[str, dict] = {}
     for r in records:
         m = by_model.setdefault(r["model"], dict(calls=0, input_tokens=0, output_tokens=0))
         m["calls"] += 1
-        m["input_tokens"] += r["input_tokens"]
-        m["output_tokens"] += r["output_tokens"]
-    usd = sum(
-        (m["input_tokens"] * prices[name][0] + m["output_tokens"] * prices[name][1]) / 1e6
-        for name, m in by_model.items()
-        if name in prices
-    )
+        for key in _TOKENS:
+            if key in r:
+                m[key] = m.get(key, 0) + r[key]
+
+    def _usd(name: str, m: dict) -> float:
+        inp, out = prices[name]
+        cached = (
+            m.get("cache_creation_input_tokens", 0) * CACHE_WRITE
+            + m.get("cache_read_input_tokens", 0) * CACHE_READ
+        )
+        return (m["input_tokens"] * inp + m["output_tokens"] * out + cached * inp) / 1e6
+
+    usd = sum(_usd(name, m) for name, m in by_model.items() if name in prices)
     unpriced = sorted(name for name in by_model if name not in prices)
     return {"usd": round(usd, 4), "by_model": by_model, "unpriced": unpriced}
