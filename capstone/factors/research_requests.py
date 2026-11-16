@@ -6,11 +6,16 @@ import json
 from types import MappingProxyType, SimpleNamespace
 
 from capstone.artifacts import canonical, digest
+from capstone.faults import maybe_fault
 from capstone.journal_db import locked_journal
 
 
 class ResearchPaused(RuntimeError):
     """The saved study needs credits, credentials, or explicit request resolution."""
+
+
+class RequestAbandoned(ResearchPaused):
+    """An operator abandoned an uncertain request; retain it as an incomplete case."""
 
 
 def _plain(response):
@@ -56,6 +61,8 @@ class RequestJournal:
             CREATE TABLE IF NOT EXISTS request_events
               (seq INTEGER PRIMARY KEY, request_id TEXT NOT NULL, state TEXT NOT NULL,
                detail TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS request_resolutions
+              (request_id TEXT PRIMARY KEY, decision TEXT NOT NULL, reason TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS response_receipts
               (request_id TEXT PRIMARY KEY, digest TEXT NOT NULL);
             CREATE TRIGGER IF NOT EXISTS immutable_request_events_update
@@ -71,6 +78,18 @@ class RequestJournal:
                     self.db.execute(
                         "INSERT INTO request_manifest VALUES (?)",
                         (canonical(self.manifest),),
+                    )
+                interrupted = self.db.execute(
+                    "SELECT id FROM model_requests WHERE state='inflight'"
+                ).fetchall()
+                for (rid,) in interrupted:
+                    self.db.execute(
+                        "UPDATE model_requests SET state='uncertain',"
+                        "error='interrupted_before_checkpoint' WHERE id=?",
+                        (rid,),
+                    )
+                    self._event(
+                        rid, "uncertain", "previous owner exited before a response checkpoint"
                     )
         except BaseException:
             self.close()
@@ -102,6 +121,12 @@ class RequestJournal:
             (request, state, detail),
         )
 
+    def _blocked(self):
+        return self.db.execute("""SELECT id,state FROM model_requests r
+            WHERE state IN ('inflight','uncertain')
+              AND NOT EXISTS(SELECT 1 FROM request_resolutions s WHERE s.request_id=r.id)
+            LIMIT 1""").fetchone()
+
     def _response_checked(self, request_id, payload):
         receipt = self.db.execute(
             "SELECT digest FROM response_receipts WHERE request_id=?", (request_id,)
@@ -109,6 +134,22 @@ class RequestJournal:
         if receipt is None or receipt[0] != digest(json.loads(payload)):
             raise ValueError("response checkpoint contents changed")
         return _response(payload)
+
+    def resolve(self, request_id, decision, reason):
+        """Explicit operator decision; immutable, and a retry consumes capacity again."""
+        if decision not in ("retry", "abandon") or not reason.strip():
+            raise ValueError("explicit retry/abandon decision and reason required")
+        with self.db:
+            row = self.db.execute(
+                "SELECT state FROM model_requests WHERE id=?", (request_id,)
+            ).fetchone()
+            if row is None or row[0] not in ("inflight", "uncertain"):
+                raise ValueError("request is not awaiting resolution")
+            self.db.execute(
+                "INSERT INTO request_resolutions VALUES (?,?,?)",
+                (request_id, decision, reason),
+            )
+            self._event(request_id, "resolved", decision + ": " + reason)
 
     def call(self, client, bucket, task, ordinal, kwargs):
         """Send once, or replay the saved response for this (bucket, task, ordinal)."""
@@ -127,18 +168,30 @@ class RequestJournal:
         if rows and rows[-1][3] == "completed":
             return self._response_checked(rows[-1][0], rows[-1][2])
         if rows:
-            raise ResearchPaused("request needs explicit resolution: " + rows[-1][0])
+            resolution = self.db.execute(
+                "SELECT decision FROM request_resolutions WHERE request_id=?",
+                (rows[-1][0],),
+            ).fetchone()
+            if resolution is not None and resolution[0] == "abandon":
+                raise RequestAbandoned("request explicitly abandoned: " + rows[-1][0])
+            if resolution is None:
+                raise ResearchPaused("request needs explicit resolution: " + rows[-1][0])
+        blocked = self._blocked()
+        if blocked:
+            raise ResearchPaused(f"study paused: {blocked[0]} ({blocked[1]})")
         if self.count(bucket) >= self.limits[bucket]:
             from capstone.pipeline.budget import CallBudgetExceeded
 
             raise CallBudgetExceeded(f"frozen {bucket} allowance exhausted")
-        rid = digest({"logical": logical, "attempt": 0})
+        attempt = len(rows)
+        rid = digest({"logical": logical, "attempt": attempt})
         with self.db:
             self.db.execute(
                 "INSERT INTO model_requests VALUES (?,?,?,?,?,NULL,'inflight',NULL)",
-                (rid, logical, bucket, 0, request),
+                (rid, logical, bucket, attempt, request),
             )
             self._event(rid, "reserved", "outbound request counted before sending")
+        maybe_fault("runner:after_reserve")  # reserved, response not saved
         try:
             response = client.messages.create(**kwargs)
             payload = canonical(_plain(response))
@@ -185,6 +238,7 @@ class RequestJournal:
             "limits": dict(self.limits),
             "requests": result,
             "outbound_reservations": len(result),
+            "blocked": self._blocked() is not None,
             "events": [
                 {"sequence": seq, "request_id": rid, "state": state, "detail": detail}
                 for seq, rid, state, detail in self.db.execute(
