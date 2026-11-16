@@ -47,7 +47,7 @@ def _synthetic(bundle, plan, market=None):
     if not data["data_version"].startswith("synthetic-"):
         try:
             from capstone.pipeline.autopilot import live_receipt
-        except ModuleNotFoundError as error:
+        except ImportError as error:  # `from package import missing` is not ModuleNotFoundError
             if not (error.name or "").startswith("capstone.pipeline.autopilot"):
                 raise
             raise ValueError(
