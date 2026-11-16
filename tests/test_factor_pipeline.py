@@ -97,23 +97,99 @@ def test_run_stores_the_chain_and_marks_only_finished_papers(tmp_path):
     assert citation == "A et al., 2025"
 
 
-def test_process_paper_over_a_source_equals_run(tmp_path):
-    papers = [{"key": "arxiv:ok", "title": "Works"}, {"key": "arxiv:bad", "title": "FAIL here"}]
-    con_run = store.connect(tmp_path / "run.db")
-    source = ListSource(papers)
-    expected = run(con_run, source, ScriptedClient(), CONFIG)
+class MeteredClient(ScriptedClient):
+    """Reports 100 input and 10 output tokens per call, so usage is not all zeros."""
 
-    con_each = store.connect(tmp_path / "each.db")
-    other = ListSource(papers)
-    summary, zoo = RunSummary(), default_zoo()
-    for paper in other.papers():
-        process_paper(
-            con_each, paper, ScriptedClient(), CONFIG, zoo, "ListSource", summary, other.done
+    def create(self, **kwargs):
+        response = super().create(**kwargs)
+        response.usage = SimpleNamespace(input_tokens=100, output_tokens=10)
+        return response
+
+
+class RefusingSource(ListSource):
+    """Cannot record the hand-off for one paper (as when paperlog's database is locked)."""
+
+    def done(self, keys):
+        if "arxiv:locked" in keys:
+            raise OSError("database is locked")
+        super().done(keys)
+
+
+# Written out by hand from the pipeline's contract, not computed by the code under test:
+# "ok" and "locked" each cost an extraction and a proposal call (two calls); "bad" fails
+# on its first call, which is never metered. A paper whose hand-off fails is failed, not
+# done, but its spend is still recorded.
+PAPERS = [
+    {"key": "arxiv:ok", "title": "Works"},
+    {"key": "arxiv:bad", "title": "FAIL here"},
+    {"key": "arxiv:locked", "title": "Hand-off fails"},
+]
+EXPECTED_DONE = ["arxiv:ok"]
+EXPECTED_FAILED = {
+    "arxiv:bad": "RuntimeError: model unavailable",
+    "arxiv:locked": "OSError: database is locked",
+}
+EXPECTED_HYPOTHESES = {"market": 2}
+EXPECTED_USAGE = {"calls": 4, "input_tokens": 400, "output_tokens": 40}
+EXPECTED_USAGE_ROWS = [
+    ("arxiv:ok", "test-model", 2, 200, 20),
+    ("arxiv:locked", "test-model", 2, 200, 20),
+]
+
+
+def _what_was_kept(con):
+    papers = [r[0] for r in con.execute("SELECT key FROM papers ORDER BY key")]
+    spend = [
+        tuple(r)
+        for r in con.execute(
+            "SELECT paper_key, model, calls, input_tokens, output_tokens FROM usage ORDER BY id"
         )
+    ]
+    return papers, spend, len(store.factors(con))
 
-    assert summary == expected
-    assert other.marked == source.marked
-    assert [f["id"] for f in store.factors(con_each)] == [f["id"] for f in store.factors(con_run)]
+
+def _check_summary(summary):
+    assert summary.papers_done == EXPECTED_DONE
+    assert summary.papers_failed == EXPECTED_FAILED
+    assert dict(summary.hypotheses) == EXPECTED_HYPOTHESES
+    assert sum(summary.outcomes.values()) == 2  # one proposal per market hypothesis
+    assert dict(summary.usage) == EXPECTED_USAGE
+
+
+def test_run_over_a_source_matches_the_hand_written_expectation(tmp_path):
+    con = store.connect(tmp_path / "run.db")
+    source = RefusingSource(PAPERS)
+    _check_summary(run(con, source, MeteredClient(), CONFIG))
+    assert source.marked == EXPECTED_DONE
+    papers, spend, n_factors = _what_was_kept(con)
+    assert papers == ["arxiv:bad", "arxiv:locked", "arxiv:ok"]
+    assert spend == EXPECTED_USAGE_ROWS
+    assert n_factors == 1  # both papers propose the same expression: one factor
+
+
+def test_process_paper_one_at_a_time_matches_the_same_expectation(tmp_path):
+    con = store.connect(tmp_path / "each.db")
+    source = RefusingSource(PAPERS)
+    summary, zoo = RunSummary(), default_zoo()
+    for paper in source.papers():
+        process_paper(
+            con, paper, MeteredClient(), CONFIG, zoo, "RefusingSource", summary, source.done
+        )
+    _check_summary(summary)
+    assert source.marked == EXPECTED_DONE
+    papers, spend, n_factors = _what_was_kept(con)
+    assert papers == ["arxiv:bad", "arxiv:locked", "arxiv:ok"]
+    assert spend == EXPECTED_USAGE_ROWS
+    assert n_factors == 1
+
+
+def test_process_paper_without_a_hand_off_still_finishes_the_paper(tmp_path):
+    con = store.connect(tmp_path / "solo.db")
+    summary = RunSummary()
+    process_paper(
+        con, PAPERS[0], MeteredClient(), CONFIG, default_zoo(), "ListSource", summary, None
+    )
+    assert summary.papers_done == ["arxiv:ok"] and not summary.papers_failed
 
 
 def test_paperlog_source_claims_papers_through_its_api(monkeypatch):
