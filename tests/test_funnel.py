@@ -225,6 +225,26 @@ class TestThresholds:
         assert json.loads(json.dumps(d)) == d
         assert Thresholds(**d) == th
 
+    @pytest.mark.parametrize("equal", [1, 1.0, np.float64(1.0), np.float32(1.0), np.int64(1)])
+    def test_equal_thresholds_have_one_plain_data_form(self, equal):
+        th = Thresholds(alpha2=equal)
+        assert th == Thresholds()
+        d = thresholds_dict(th)
+        assert json.dumps(d, sort_keys=True) == json.dumps(
+            thresholds_dict(Thresholds()), sort_keys=True
+        )
+        assert all(type(d[k]) is float for k in ("q1", "alpha2", "d4", "q4"))
+
+    def test_numpy_thresholds_serialize(self):
+        d = thresholds_dict(Thresholds(q1=np.float32(0.25), q4=np.float64(0.5)))
+        assert json.loads(json.dumps(d)) == d
+
+    @pytest.mark.parametrize("bad", [True, np.bool_(True), "0.1", None, 0.1 + 0.2j, [0.1]])
+    @pytest.mark.parametrize("name", ["q1", "alpha2", "d4", "q4"])
+    def test_non_real_thresholds_are_rejected(self, name, bad):
+        with pytest.raises(TypeError, match=name):
+            Thresholds(**{name: bad})
+
 
 class TestRunningTheFunnel:
     def test_default_funnel_on_rho_p_values(self):
@@ -243,6 +263,27 @@ class TestRunningTheFunnel:
         )["reuse"]
         with pytest.raises(ValueError, match="bootstrap"):
             run_funnel(stats, Thresholds(stage1="bootstrap"))
+
+    def test_baseline_and_gates_alone_refuse_a_missing_family_p_value(self):
+        # BH over fewer families is more lenient for the rest, so the baseline
+        # would be compared to the funnel on a different family set (#98).
+        returns, family = _dated(drift={"h0": 0.003})
+        stats = family_statistics(
+            returns, family, search_end=SEARCH_END, holdout_start=HOLDOUT_START, n_boot=0
+        )["reuse"]
+        stats.loc["h3", "p1_rho"] = np.nan
+        truth = pd.Series(family.unique() == "h0", index=stats.index)
+        stats = stats.assign(truth=truth)
+        with pytest.raises(ValueError, match="p1_rho"):
+            run_funnel(stats, Thresholds())
+        with pytest.raises(ValueError, match="p1_rho"):
+            calibration.run_baseline(stats)
+        with pytest.raises(ValueError, match="p1_rho"):
+            calibration.gates_alone(stats, Thresholds())
+        with pytest.raises(ValueError, match="bootstrap"):
+            calibration.run_baseline(stats, stage1="bootstrap")
+        with pytest.raises(ValueError, match="stage1 must be"):
+            calibration.run_baseline(stats, stage1="lfdr")
 
     def test_stage4_without_holdout_statistics_raises(self):
         returns, family = _dated(drift={"h0": 0.003})

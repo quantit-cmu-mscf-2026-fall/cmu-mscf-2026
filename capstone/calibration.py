@@ -39,7 +39,7 @@ import pandas as pd
 
 from capstone import funnel
 from capstone.evaluate import benjamini_hochberg
-from capstone.funnel import STAGE1_METHODS, Thresholds, _final_gate, run_funnel
+from capstone.funnel import STAGE1_METHODS, Thresholds, _final_gate, run_funnel, stage1_pvalues
 from capstone.synth import make_return_matrix
 
 __all__ = [
@@ -207,8 +207,11 @@ def run_baseline(stats: pd.DataFrame, *, q: float = 0.10, stage1: str = "rho") -
     """BH at `q` on each family's search-adjusted p-value (#50, Q5).
 
     Pass "reuse" statistics, so the p-values cover the whole search period.
+    Reads the p-values through `funnel.stage1_pvalues`, so a missing one
+    raises here as it does in the funnel, and the two never run over
+    different family sets.
     """
-    return benjamini_hochberg(stats[f"p1_{stage1}"], q).rename("accepted")
+    return benjamini_hochberg(stage1_pvalues(stats, stage1), q).rename("accepted")
 
 
 def run_naive_stack(stats: pd.DataFrame, th: Thresholds) -> pd.Series:
@@ -286,7 +289,7 @@ def gates_alone(stats: pd.DataFrame, th: Thresholds, *, stage1: str = "rho") -> 
     everyone = pd.Series(True, index=stats.index)
     alone = pd.DataFrame(
         {
-            "stage1": benjamini_hochberg(stats[f"p1_{stage1}"], th.q1),
+            "stage1": benjamini_hochberg(stage1_pvalues(stats, stage1), th.q1),
             "stage2": stats["p2"] <= th.alpha2,
             "stage4": _final_gate(stats, everyone, th),
         }
