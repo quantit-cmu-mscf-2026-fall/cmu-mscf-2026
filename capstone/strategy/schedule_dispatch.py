@@ -26,6 +26,8 @@ def _due(spec, panel, as_of):
     from capstone.strategy.contract import StrategySpec
     from capstone.strategy.diversified import DiversifiedStrategySpec
     from capstone.strategy.diversified import decision_due as diversified_due
+    from capstone.strategy.program import ProgramStrategySpec
+    from capstone.strategy.program import decision_due as program_due
     from capstone.strategy.program_schedule import session_date
     from capstone.strategy.recorded import require_current_implementation
     from capstone.strategy.reference import BenchmarkSpec, ReferenceStrategySpec
@@ -39,6 +41,7 @@ def _due(spec, panel, as_of):
     if panel.calendar is not None and at not in pd.DatetimeIndex(panel.calendar):
         raise ValueError("formation decision is absent from the authoritative calendar")
     leaf_types = (
+        ProgramStrategySpec,
         CompiledStrategySpec,
         DiversifiedStrategySpec,
         StrategySpec,
@@ -49,6 +52,8 @@ def _due(spec, panel, as_of):
     if isinstance(spec, leaf_types):
         if at < session_date(spec.anchor, "anchor"):
             raise ValueError("formation decision must be on or after anchor")
+    if isinstance(spec, ProgramStrategySpec):
+        return program_due(spec, panel, at)
     if isinstance(spec, CompiledStrategySpec):
         return compiled_due(spec, panel, at)
     if isinstance(spec, DiversifiedStrategySpec):

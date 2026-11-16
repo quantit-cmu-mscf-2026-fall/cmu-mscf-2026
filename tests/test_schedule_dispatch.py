@@ -11,6 +11,8 @@ from capstone.factors.research_contracts import canonical
 from capstone.strategy.compiled import COMMON, RULES, CompiledStrategySpec
 from capstone.strategy.contract import StrategySpec
 from capstone.strategy.diversified import DiversifiedStrategySpec
+from capstone.strategy.program import ProgramStrategySpec
+from capstone.strategy.program_schedule import ProgramSchedule
 from capstone.strategy.reference import BenchmarkSpec, ReferenceStrategySpec
 from capstone.strategy.research import contracts
 from capstone.strategy.research_spec import ResearchStrategySpec
@@ -30,6 +32,19 @@ def panel():
     )
 
 
+def program():
+    return ProgramStrategySpec(
+        expression="close",
+        source_ids=("1" * 64,),
+        method_spec_id="2" * 64,
+        claim_id="3" * 64,
+        mechanism_id="controller-owned/family",
+        data_version="fixture",
+        anchor="2020-06-23",
+        schedule=ProgramSchedule(interval=3),
+    )
+
+
 def compiled(method):
     return CompiledStrategySpec(
         method,
@@ -42,11 +57,12 @@ def compiled(method):
     )
 
 
-def test_legacy_anchored_calendar(panel):
+def test_program_and_legacy_anchored_calendars(panel):
     legacy = StrategySpec("close", TradingSpec(hold=3), "fixture", "2020-06-23")
-    assert decision_due(legacy, panel, "2020-06-23")
-    assert decision_due(legacy, panel, "2020-06-26")
-    assert not decision_due(legacy, panel, "2020-06-24")
+    for spec in (program(), legacy):
+        assert decision_due(spec, panel, "2020-06-23")
+        assert decision_due(spec, panel, "2020-06-26")
+        assert not decision_due(spec, panel, "2020-06-24")
 
 
 def test_compiled_weekly_cannot_fall_through_to_month_end(panel):
@@ -93,6 +109,7 @@ def test_unknown_types_fail_closed(panel):
 def test_all_recognized_leaves_reject_pre_anchor_and_non_session_decisions(panel):
     claim = next(row["id"] for row in contracts()["claims"] if row["status"] == "executable")
     leaves = (
+        program(),
         compiled("turn_of_month"),
         compiled("weekly_reversal"),
         DiversifiedStrategySpec("weekly_reversal", "fixture", "2020-06-23"),
