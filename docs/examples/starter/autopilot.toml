@@ -1,0 +1,26 @@
+# Starter autopilot.toml for a first run, written by
+#   python -m capstone.pipeline.autopilot init --dir <folder>
+# It is docs/examples/autopilot.example.toml with the safe defaults for a first run:
+# model calls off and both spend ceilings at zero.
+#
+# Every value a person must choose is marked TODO(person). `preflight` reports each marker
+# still in this file as `missing`: choose the value, then delete the marker. Paths are
+# resolved against this file's folder. Keep this folder outside the code checkout.
+#   python -m capstone.pipeline.autopilot preflight --config autopilot.toml
+
+[autopilot]
+run_root = "runs/first-run"         # TODO(person): one folder per run
+policy_id = "policy-v1"             # TODO(person): frozen at the first tick; reviewer = autopilot:<policy_id>
+checkout = "registry"               # TODO(person): a separate git clone holding deploy/strategies.yml (never the code checkout)
+input_archive = "archive/qualified" # TODO(person): the qualified input archive, obtained out of band
+max_crashes = 3
+real_model_calls = false            # a person's opt-in; false = only an injected client
+
+[spend]                             # no model call is possible until a person raises these
+run_ceiling = 0
+global_ceiling = 0
+accounting_roots = []
+
+[resources]
+max_workers = 0                     # 0 = the machine's cores; results never depend on it
+memory_budget_mb = 0                # 0 = a share of the RAM available
