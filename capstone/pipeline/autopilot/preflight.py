@@ -12,7 +12,9 @@ Offline checks (the only ones in this module): the config through the same loade
 `tick` (paths resolved against the config's folder); every `TODO(person)` marker still in
 the config and the files it names (`init` writes them); every configured path; the
 registry checkout (a separate git clone holding `deploy/strategies.yml`, never the code
-checkout); the input archive's folder; and `[spend]` against `real_model_calls`.
+checkout); the input archive's folder; the sources inbox (when a `[sources]` section is
+configured); `[spend]` against `real_model_calls`; and, only with real model calls on,
+whether the model API key variable is SET or UNSET (its value is never read into a row).
 
 Checks that need a broker, a data provider or a model are not part of this module; a
 later change adds them behind their own flags and imports them lazily, so the offline
@@ -23,10 +25,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from capstone.pipeline import model_key
 from capstone.pipeline.autopilot import config as config_module
 
 STATUSES = ("ok", "missing", "wrong", "skipped")
@@ -52,7 +56,9 @@ CODES = {
     "registry_not_git": "clone the registry repository there (git clone)",
     "registry_file_missing": "the registry clone needs deploy/strategies.yml",
     "archive_not_set": "set [autopilot] input_archive (obtained out of band)",
+    "inbox_missing": "create the [sources] inbox folder and drop the sources in",
     "spend_inconsistent": "fix [spend] as the detail says",
+    "api_key_unset": "set the model API key in the run's environment (real model calls only)",
     "not_applicable": "nothing to do",
 }
 
@@ -181,7 +187,19 @@ def _archive(checks, config):
         checks.add("input_archive", "missing", "path_missing", archive)
 
 
-def _spend(checks, config):
+def _inbox(checks, config):
+    section = config.sections.get("sources")
+    if section is None:
+        checks.skip("inbox", "no [sources] section is configured")
+        return
+    inbox = section.get("inbox")
+    if inbox and Path(inbox).is_dir():
+        checks.ok("inbox", inbox)
+    else:
+        checks.add("inbox", "missing", "inbox_missing", str(inbox))
+
+
+def _spend(checks, config, env):
     section, real = config.sections["spend"], config.core["real_model_calls"]
     problems = []
     if section["run_ceiling"] > section["global_ceiling"]:
@@ -196,6 +214,12 @@ def _spend(checks, config):
     else:
         mode = "real model calls" if real else "no model calls (real_model_calls = false)"
         checks.ok("spend", f"{mode}; run_ceiling {section['run_ceiling']}")
+    if not real:  # the key is not looked at while model calls are off
+        checks.skip("api_key", "model calls are off (real_model_calls = false)")
+    elif model_key.key_state(env) == "SET":
+        checks.ok("api_key", "the key variable is SET")
+    else:
+        checks.add("api_key", "missing", "api_key_unset", "the key variable is UNSET")
 
 
 # the command
@@ -209,9 +233,11 @@ def report_path(config_path, config=None):
     return _config_folder(config_path) / REPORT
 
 
-def run(config_path, *, stages=(), extra=None):
+def run(config_path, *, stages=(), extra=None, env=None):
     """(rows, config or None) of every offline check; nothing is written. `stages` and
-    `extra` are the stage list and extra config sections the config is loaded against."""
+    `extra` are the stage list and extra config sections the config is loaded against;
+    `env` is the environment the key check reads (default: the process's)."""
+    env = os.environ if env is None else env
     checks = Checks()
     try:
         config = config_module.load(config_path, list(stages), extra=extra)
@@ -227,7 +253,8 @@ def run(config_path, *, stages=(), extra=None):
     _paths(checks, config, config_module.schemas(list(stages), extra))
     _registry(checks, config)
     _archive(checks, config)
-    _spend(checks, config)
+    _inbox(checks, config)
+    _spend(checks, config, env)
     return checks.rows, config
 
 
