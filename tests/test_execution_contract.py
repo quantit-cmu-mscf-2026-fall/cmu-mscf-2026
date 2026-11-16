@@ -115,8 +115,8 @@ def test_old_implementation_hashes_are_inspectable_but_never_executable():
 def test_a_module_that_lands_later_changes_what_old_records_verify_against(
     monkeypatch, tmp_path, fresh_registry
 ):
+    monkeypatch.setitem(sys.modules, "capstone.execution.frozen", None)  # absent from this build
     record = execution_contract(diversified())
-    monkeypatch.setitem(sys.modules, "capstone.execution.frozen", None)
     assert verify_execution_contract(record) is record
     fake_module(monkeypatch, tmp_path, "capstone.execution.frozen")
     assert "frozen_plan" in implementation_paths(record["version"])
