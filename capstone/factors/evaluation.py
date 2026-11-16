@@ -91,6 +91,11 @@ def _check_dates(dates: pd.Index) -> None:
         raise HoldoutError(f"dates after {DISCOVERY_END} are the holdout; they are not loaded here")
 
 
+def require_discovery(panel: Panel) -> None:
+    """Raise `HoldoutError` if `panel` holds a date after `DISCOVERY_END`."""
+    _check_dates(pd.Index(panel.universe.index))
+
+
 def build_panel(daily: pd.DataFrame, data_version: str = "") -> Panel:
     """The panel from daily rows (the `COLUMNS` of the shared daily file)."""
     _check_dates(pd.Index(daily["date"]))
