@@ -1,1 +1,1 @@
-"""Strategy programs: typed factor expressions and their schedules."""
+"""Strategy programs, schedules and contracts: typed factor expressions, orders and specs."""

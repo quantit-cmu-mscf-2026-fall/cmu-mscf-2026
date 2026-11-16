@@ -26,15 +26,23 @@ validation stack), one column per `factor_id`.
   holding period and sector neutrality; a (factor, spec) is a variant,
   recorded in the store's `variants` table with lineage to its factor. Each
   variant evaluated is a trial with its own matrix column, so a grid of
-  specs is counted, not hidden. Costs are half the quoted spread; the full
+  specs is counted, not hidden. A spec may add a no-trade band (`band`),
+  traded by the same backtest. Costs are half the quoted spread; the full
   spread is reported alongside as a robustness view, not a separate trial.
 - **Ledger** (`evaluate_factors`): every evaluated variant is logged with
   `log_run` as soon as its series exists, before anything uses it, with
   `sd.data_version()` in its params.
+- **Screen statistic** (`screen_pvalue`): each variant's one-sided HAC
+  p-value against a Sharpe ratio of zero, on its net returns. It is the
+  per-variant input to the validation funnel's stage 1 and the deepen move's
+  reward. The stage 1 gate itself (each hypothesis family's search-adjusted
+  p-value, then BH across families) belongs to validation, so the summary
+  only adds each variant's `hypothesis_id`, the family it belongs to.
 """
 
 from __future__ import annotations
 
+import math
 import sqlite3
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -44,7 +52,8 @@ import numpy as np
 import pandas as pd
 
 from capstone import shared_data as sd
-from capstone.backtest import backtest_frame, to_weights
+from capstone.backtest import backtest_frame, sharpe_ratio, to_weights
+from capstone.evaluate import sharpe_test
 from capstone.factors import store
 from capstone.factors.interpret import evaluate
 from capstone.factors.tree import Node, unparse
@@ -179,10 +188,12 @@ class FactorReturns:
         """Net of the full quoted spread instead of half: a pessimistic cost view."""
         return (self.gross - 2 * self.cost).rename("net_full_spread")
 
-    def sharpe(self, which: str = "net") -> float:
-        r = getattr(self, which).dropna()
-        sd_ = r.std(ddof=1)
-        return float(r.mean() / sd_ * np.sqrt(PERIODS_PER_YEAR)) if sd_ > 0 else float("nan")
+    def sharpe(
+        self, which: Literal["net", "gross", "cost", "turnover", "net_full_spread"] = "net"
+    ) -> float:
+        """Annualised Sharpe of one of the series: `backtest.sharpe_ratio`, the
+        project's one definition (the one `backtest.summarize` reports)."""
+        return sharpe_ratio(getattr(self, which), PERIODS_PER_YEAR)
 
 
 # ---------------------------------------------------------------------------
@@ -211,24 +222,45 @@ _DIVISIONS = (  # SIC divisions by 2-digit major group
 class TradingSpec:
     """How a factor is traded: rebalance every `hold` trading days; `neutral`
     "sector" demeans the signal within sector each day. Weights are always
-    proportional to the (demeaned) signal, dollar-neutral, gross exposure 1."""
+    proportional to the (demeaned) signal, dollar-neutral, gross exposure 1.
+
+    `band` is a no-trade band, in units of weight of the gross-1 book: on a
+    rebalance a name trades to its target only when |target - held| > band
+    (`backtest.band_book`). 0, the default, is no band; a spec without one
+    has the dict and variant id it had before bands existed."""
 
     hold: int = 1
     neutral: Neutral = "none"
+    band: float = 0.0
 
     def __post_init__(self) -> None:
         if self.hold < 1:
             raise ValueError("hold must be at least 1 day")
         if self.neutral not in NEUTRALITY:
             raise ValueError(f"neutral must be one of {NEUTRALITY}, got {self.neutral!r}")
+        band = self.band
+        if isinstance(band, bool) or not isinstance(band, int | float):
+            raise ValueError(f"band must be a number, got {band!r}")
+        if not (math.isfinite(band) and 0.0 <= band < 1.0):
+            raise ValueError(f"band must be in [0, 1), got {band!r}")
+        object.__setattr__(self, "band", float(band))
 
     def as_dict(self) -> dict:
-        return {"hold": self.hold, "neutral": self.neutral, "weighting": "signal"}
+        spec = {"hold": self.hold, "neutral": self.neutral, "weighting": "signal"}
+        return {**spec, "band": self.band} if self.band > 0 else spec
 
 
-def grid(holds, neutral) -> list[TradingSpec]:
-    """Every combination of the given holding periods and neutralities."""
-    return [TradingSpec(h, n) for n in neutral for h in holds]
+def grid(holds, neutral, bands=(0.0,)) -> list[TradingSpec]:
+    """Every combination of the given holding periods, neutralities and bands
+    (bands innermost; the default is no band)."""
+    return [TradingSpec(h, n, b) for n in neutral for h in holds for b in bands]
+
+
+def spec_from_summary(row) -> TradingSpec:
+    """The spec of one `evaluate_factors` summary row (no "band", or NaN: none)."""
+    band = row.get("band", 0.0)
+    band = 0.0 if band is None or pd.isna(band) else float(band)
+    return TradingSpec(int(row["hold"]), row["neutral"], band)
 
 
 def _division(sic2: float) -> str:
@@ -318,6 +350,7 @@ def _backtest(traded: pd.DataFrame, panel: Panel, spec: TradingSpec) -> FactorRe
         demean=spec.neutral == "none",
         gross=1.0,
         hold=spec.hold,
+        band=spec.band,
     )
     return FactorReturns(frame["net"], frame["gross"], frame["cost"], frame["turnover"])
 
@@ -328,12 +361,38 @@ def factor_returns(tree: Node, panel: Panel, spec: TradingSpec | int = 1) -> Fac
     return signal_returns(factor_signal(tree, panel), panel, spec)
 
 
+def screen_pvalue(net: pd.Series) -> float:
+    """One-sided p-value of H0: Sharpe ratio <= 0, with a HAC variance (`sharpe_test`).
+
+    Computed as 1 - PSR, which equals `sharpe_test(...).pvalue_greater` on the
+    validation stack (#31) to rounding; switch to that field once #31 is on
+    `main`. NaN when the series has no variance.
+    """
+    clean = net.dropna()
+    if len(clean) < 2 or not clean.std(ddof=1) > 0:
+        return float("nan")
+    p = 1.0 - sharpe_test(clean, periods_per_year=PERIODS_PER_YEAR).psr
+    return float(p) if np.isfinite(p) else float("nan")
+
+
+def hypothesis_of(con: sqlite3.Connection, fid: str) -> str | None:
+    """The hypothesis a factor belongs to: the one whose proposal first stored it.
+
+    A factor proposed again under another hypothesis is recorded as a
+    duplicate there and stays in its first family.
+    """
+    rows = store.lineage(con, fid)
+    stored = [r for r in rows if r["status"] == "stored"] or rows
+    return stored[0]["hypothesis_id"] if stored else None
+
+
 def evaluate_factors(
     trees: Mapping[str, Node],
     panel: Panel,
     *,
     specs: Sequence[TradingSpec] = (TradingSpec(),),
     con: sqlite3.Connection | None = None,
+    families: Mapping[str, str | None] | None = None,
     extra_params: dict | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Every variant's net returns, side by side: each factor traded by each spec.
@@ -344,11 +403,15 @@ def evaluate_factors(
     are recorded in the store's `variants` table. A factor that cannot be
     computed is logged once per spec (each was a trial) and gets no column.
     Costs are half the quoted spread; the full-spread Sharpe is reported
-    alongside as a robustness view, not a separate candidate. Returns
+    alongside as a robustness view, not a separate candidate. Each variant's
+    screen p-value (`screen_pvalue`) is logged with its metrics, and the
+    summary names its hypothesis family from `families` (factor id ->
+    hypothesis id, as `hypothesis_of` gives). Returns
     (matrix: dates x variant net returns, summary: one row per variant).
     """
     columns, summary = {}, []
     for fid, tree in trees.items():
+        family = (families or {}).get(fid)
         try:
             signal, error = factor_signal(tree, panel), ""
         except (ValueError, ArithmeticError) as exc:
@@ -384,18 +447,14 @@ def evaluate_factors(
                     LEDGER_NAME, params=params, metrics={"error": str(exc)}, tags=["evaluation"]
                 )
                 raise
-            full = result.net_full_spread.dropna()
             metrics = {
                 "sharpe_net": result.sharpe("net"),
                 "sharpe_gross": result.sharpe("gross"),
-                "sharpe_net_full_spread": float(
-                    full.mean() / full.std(ddof=1) * np.sqrt(PERIODS_PER_YEAR)
-                )
-                if full.std(ddof=1) > 0
-                else float("nan"),
+                "sharpe_net_full_spread": result.sharpe("net_full_spread"),
                 "mean_turnover": float(result.turnover.mean()),
                 "mean_cost": float(result.cost.mean()),
                 "days": int(result.net.notna().sum()),
+                "pvalue_screen": screen_pvalue(result.net),
             }
             log_run(LEDGER_NAME, params=params, metrics=metrics, tags=["evaluation"])
             columns[vid] = result.net
@@ -403,8 +462,10 @@ def evaluate_factors(
                 {
                     "variant_id": vid,
                     "factor_id": fid,
+                    "hypothesis_id": family,
                     "hold": spec.hold,
                     "neutral": spec.neutral,
+                    **({"band": spec.band} if spec.band > 0 else {}),
                     "expression": params["expression"],
                     **metrics,
                 }

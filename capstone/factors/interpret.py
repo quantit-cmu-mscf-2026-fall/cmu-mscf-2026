@@ -36,6 +36,10 @@ Every operator is causal: a value on day t uses no data after t (a test
 checks every one). Division by zero, log of a non-positive number and any
 other undefined result is NaN, never inf.
 
+`evaluate(..., strict_domains=True)` is the stricter mode new programs use: an operator
+never turns an undefined domain into a value. See `evaluate` for it and for the dated
+`cross_sectional_universe`.
+
 The panel's prices and shares must already be split-adjusted: a ratio of raw
 closes across a split is not a return. Building the panel from the shared
 data, including `mkt_return`, is the evaluator's job (QUANTIT-81).
@@ -69,10 +73,42 @@ class EvaluationError(ValueError):
     """The panel cannot evaluate this tree (a field is missing or misshapen)."""
 
 
-def evaluate(node: Node, panel: Panel) -> pd.DataFrame:
-    """The factor's value for every stock on every day, as a dates x stocks frame."""
+def evaluate(
+    node: Node,
+    panel: Panel,
+    *,
+    strict_domains: bool = False,
+    cross_sectional_universe: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """The factor's value for every stock on every day, as a dates x stocks frame.
+
+    `strict_domains` additionally refuses to let an operator invent a value from an
+    undefined domain: a constant argument is broadcast explicitly, scale normalises by
+    the largest magnitude first, and zscore, winsorize and ts_corr are undefined
+    wherever their moments are. `cross_sectional_universe` is a dated boolean frame on
+    the panel's axes; with it, rank, scale and winsorize see only each date's members
+    (and are undefined on a date whose member has no value). It needs strict mode.
+    """
     template = _template(panel)
-    out = _eval(node, panel, template)
+    if cross_sectional_universe is not None:
+        mask = cross_sectional_universe
+        if (
+            not strict_domains
+            or not mask.index.equals(template.index)
+            or not mask.columns.equals(template.columns)
+        ):
+            raise EvaluationError(
+                "dated cross-sectional universe requires strict mode and matching axes"
+            )
+        if mask.isna().any().any() or not mask.isin([True, False]).all().all():
+            raise EvaluationError("dated cross-sectional membership must be explicitly known")
+    out = _eval(
+        node,
+        panel,
+        template,
+        strict_domains=strict_domains,
+        cross_sectional_universe=cross_sectional_universe,
+    )
     if not isinstance(out, pd.DataFrame):  # a tree of constants only; parse forbids it
         out = pd.DataFrame(float(out), index=template.index, columns=template.columns)
     return out.replace([np.inf, -np.inf], np.nan)
@@ -105,24 +141,36 @@ def _field(name: str, panel: Panel, template: pd.DataFrame) -> pd.DataFrame:
     return value.astype(float)
 
 
-def _eval(node: Node, panel: Panel, template: pd.DataFrame):
+def _eval(node: Node, panel: Panel, template: pd.DataFrame, **mode):
     # A parent must never rank, sign or scale an undefined child's infinity.
     with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
-        out = _eval_node(node, panel, template)
+        out = _eval_node(node, panel, template, **mode)
     if isinstance(out, pd.DataFrame):
         return out.replace([np.inf, -np.inf], np.nan)
     return out if np.isfinite(out) else np.float64(np.nan)
 
 
-def _eval_node(node: Node, panel: Panel, template: pd.DataFrame):
+def _eval_node(
+    node: Node,
+    panel: Panel,
+    template: pd.DataFrame,
+    *,
+    strict_domains: bool = False,
+    cross_sectional_universe: pd.DataFrame | None = None,
+):
+    mode = {
+        "strict_domains": strict_domains,
+        "cross_sectional_universe": cross_sectional_universe,
+    }
     if isinstance(node, Field_):
         return _field(node.name, panel, template)
     if isinstance(node, Const):
         return np.float64(node.value)
     if isinstance(node, Unary):
-        return -_eval(node.operand, panel, template)
+        return -_eval(node.operand, panel, template, **mode)
     if isinstance(node, BinOp):
-        left, right = _eval(node.left, panel, template), _eval(node.right, panel, template)
+        left = _eval(node.left, panel, template, **mode)
+        right = _eval(node.right, panel, template, **mode)
         with np.errstate(divide="ignore", invalid="ignore"):
             if node.op == "+":
                 return left + right
@@ -132,19 +180,24 @@ def _eval_node(node: Node, panel: Panel, template: pd.DataFrame):
                 return left * right
             return left / right
     if isinstance(node, Call):
-        x = _eval(node.arg, panel, template)
+        x = _eval(node.arg, panel, template, **mode)
+        if strict_domains and np.isscalar(x) and node.func not in BINARY_PARAMETER_FUNCS:
+            x = pd.DataFrame(x, index=template.index, columns=template.columns)
         if node.func in BINARY_WINDOW_FUNCS:
-            return _pair(node.func, x, _eval(node.arg2, panel, template), node.window)
+            y = _eval(node.arg2, panel, template, **mode)
+            if strict_domains and np.isscalar(y):
+                y = pd.DataFrame(y, index=template.index, columns=template.columns)
+            return _pair(node.func, x, y, node.window, strict_domains=strict_domains)
         if node.func in BINARY_PARAMETER_FUNCS:
-            exponent = _eval(node.arg2, panel, template)
+            exponent = _eval(node.arg2, panel, template, **mode)
             return np.sign(x) * np.abs(x) ** exponent
         if FUNCS.get(node.func):
-            return _windowed(node.func, x, node.window)
-        return _plain(node.func, x)
+            return _windowed(node.func, x, node.window, strict_domains=strict_domains)
+        return _plain(node.func, x, **mode)
     raise TypeError(f"not a Node: {node!r}")
 
 
-def _windowed(func: str, x: pd.DataFrame, d: int) -> pd.DataFrame:
+def _windowed(func: str, x: pd.DataFrame, d: int, *, strict_domains=False) -> pd.DataFrame:
     if func == "shift":
         return x.shift(d)
     if func == "delta":
@@ -176,11 +229,20 @@ def _windowed(func: str, x: pd.DataFrame, d: int) -> pd.DataFrame:
         return roll.apply(lambda w: float(np.dot(w, weights)), raw=True)
     if func == "zscore":
         with np.errstate(divide="ignore", invalid="ignore"):
-            return (x - roll.mean()) / roll.std()
+            mean, std = roll.mean(), roll.std()
+            result = (x - mean) / std
+            return result.where(np.isfinite(mean) & np.isfinite(std)) if strict_domains else result
     raise EvaluationError(f"no implementation for {func}")
 
 
-def _plain(func: str, x: pd.DataFrame) -> pd.DataFrame:
+def _plain(
+    func: str, x: pd.DataFrame, *, strict_domains=False, cross_sectional_universe=None
+) -> pd.DataFrame:
+    if func in {"rank", "scale", "winsorize"} and cross_sectional_universe is not None:
+        mask = cross_sectional_universe.astype(bool)
+        x = x.where(mask)
+        complete = (x.notna() | ~mask).all(axis=1)
+        x = x.where(complete, axis=0)
     if func == "rank":
         return x.rank(axis=1, pct=True)
     if func == "log":
@@ -191,14 +253,32 @@ def _plain(func: str, x: pd.DataFrame) -> pd.DataFrame:
     if func == "sign":
         return np.sign(x)
     if func == "scale":
+        if strict_domains:
+            largest = x.abs().max(axis=1)
+            scaled = x.div(largest.where(largest > 0), axis=0)
+            total = scaled.abs().sum(axis=1)
+            return scaled.div(total.where(total > 0), axis=0)
         total = x.abs().sum(axis=1)
         return x.div(total.where(total > 0), axis=0)
     if func == "winsorize":
         mean, std = x.mean(axis=1), x.std(axis=1)
-        return x.clip(mean - WINSOR_SIGMAS * std, mean + WINSOR_SIGMAS * std, axis=0)
+        result = x.clip(mean - WINSOR_SIGMAS * std, mean + WINSOR_SIGMAS * std, axis=0)
+        return (
+            result.where(np.isfinite(mean) & np.isfinite(std), axis=0) if strict_domains else result
+        )
     raise EvaluationError(f"no implementation for {func}")
 
 
-def _pair(func: str, x: pd.DataFrame, y: pd.DataFrame, d: int) -> pd.DataFrame:
+def _pair(
+    func: str, x: pd.DataFrame, y: pd.DataFrame, d: int, *, strict_domains=False
+) -> pd.DataFrame:
     roll = x.rolling(d, min_periods=d)
+    if strict_domains and func == "ts_corr":
+        cov, var_x = roll.cov(y), roll.var()
+        var_y = y.rolling(d, min_periods=d).var()
+        valid = (
+            np.isfinite(cov) & np.isfinite(var_x) & np.isfinite(var_y) & (var_x > 0) & (var_y > 0)
+        )
+        result = cov / np.sqrt(var_x) / np.sqrt(var_y)
+        return result.where(valid & (result.abs() <= 1 + 1e-10))
     return roll.corr(y) if func == "ts_corr" else roll.cov(y)
