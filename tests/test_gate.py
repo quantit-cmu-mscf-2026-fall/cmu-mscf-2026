@@ -1,7 +1,8 @@
 """Tests for capstone.gate: registering a gate configuration before scoring.
 
 - the config's hash is its content, the same in every process;
-- `register` logs the config and hash to the ledger once, tagged "gate";
+- `register` logs the config and hash to the ledger once, tagged "gate" and
+  "synthetic" so it is not a trial under runlog's own convention;
 - the gate's own entries never count as trials;
 - the input checks refuse returns past the search period, columns with no
   family, and too few bootstrap draws for stage 1.
@@ -18,6 +19,7 @@ import subprocess
 import sys
 from datetime import UTC, datetime
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -125,6 +127,40 @@ class TestGateConfig:
         ):
             assert config_for(market, **change).config_hash != a.config_hash, change
 
+    @pytest.mark.parametrize("name", ["seed", "n_boot"])
+    @pytest.mark.parametrize("bad", [1.7, 1.0, True, "3", None])
+    def test_seed_and_draws_must_be_integers(self, market, name, bad):
+        with pytest.raises(TypeError, match=name):
+            config_for(market, **{name: bad})
+
+    def test_numpy_integers_hash_like_ints(self, market):
+        a = config_for(market, seed=3, n_boot=399)
+        b = config_for(market, seed=np.int64(3), n_boot=np.int32(399))
+        assert a.config_hash == b.config_hash
+        assert json.loads(json.dumps(b.to_dict())) == b.to_dict()
+
+    def test_equal_thresholds_hash_alike(self, market):
+        hashes = {
+            config_for(market, thresholds=Thresholds(alpha2=v)).config_hash
+            for v in (1, 1.0, np.float32(1.0), np.float64(1.0))
+        }
+        assert len(hashes) == 1
+        numpy_th = config_for(market, thresholds=Thresholds(q1=np.float32(0.25)))
+        assert len(numpy_th.config_hash) == 64
+
+    def test_tag_order_and_duplicates_do_not_change_the_hash(self, market):
+        a = config_for(market, trial_scope=TrialScope(exclude_tags=("a", "b")))
+        b = config_for(market, trial_scope=TrialScope(exclude_tags=("b", "a", "a")))
+        assert a == b and a.config_hash == b.config_hash
+        assert a.to_dict()["trial_scope"]["exclude_tags"] == ["a", "b"]
+        i = config_for(market, trial_scope=TrialScope(include_tags=("y", "x")))
+        assert i.to_dict()["trial_scope"]["include_tags"] == ["x", "y"]
+        assert GateConfig.from_dict(i.to_dict()) == i
+
+    def test_tags_must_be_strings(self, market):
+        with pytest.raises(TypeError, match="exclude_tags"):
+            config_for(market, trial_scope=TrialScope(exclude_tags=(1, 2)))
+
     def test_hash_is_stable_across_processes(self, market):
         # A hash of the content, not of Python's per-process hash seed.
         config = config_for(market)
@@ -184,7 +220,7 @@ class TestRegistration:
         assert entry["params"]["config_hash"] == config.config_hash
         assert entry["params"]["config"] == config.to_dict()
         assert entry["params"]["data_version"] == "synthetic"
-        assert entry["tags"] == [gate.GATE_TAG]
+        assert entry["tags"] == [gate.GATE_TAG, "synthetic"]
         assert [e["name"] for e in runlog.read_entries()] == [gate.REGISTRATION_NAME]
 
     def test_registering_twice_logs_once(self, ledger, market):
@@ -199,6 +235,13 @@ class TestRegistration:
         assert gate._entries_for(gate.REGISTRATION_NAME, changed.config_hash) == []
         register(changed)
         assert len(runlog.read_entries()) == 2
+
+    def test_registrations_do_not_inflate_the_general_trial_count(self, ledger, market):
+        log_trials(3)
+        for seed in range(4):
+            register(config_for(market, seed=seed))
+        assert runlog.trial_count(exclude_tags=["synthetic"]) == 3
+        assert gate._trial_count(TrialScope()) == 3
 
     def test_gate_entries_are_not_trials(self, ledger, market):
         log_trials(12)
