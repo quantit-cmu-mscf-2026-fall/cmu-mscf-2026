@@ -80,6 +80,7 @@ def log_run(
     seed: int | None = None,
     tags: list[str] | None = None,
     notes: str = "",
+    ledger_dir: str | Path | None = None,
 ) -> dict:
     """Append one experiment run to the ledger and return the entry written.
 
@@ -95,6 +96,7 @@ def log_run(
         tags: free-form labels for later filtering. A bare string is one tag,
             stored as a one-item list, so `trial_count`'s tag filters see it.
         notes: anything the fields above cannot express.
+        ledger_dir: explicit private study ledger; otherwise use the existing default.
 
     Returns:
         The dict that was written, including the generated bookkeeping fields.
@@ -111,7 +113,7 @@ def log_run(
         "tags": [tags] if isinstance(tags, str) else list(tags or []),
         "notes": notes,
     }
-    ledger_dir = _ledger_dir()
+    ledger_dir = _ledger_dir() if ledger_dir is None else Path(ledger_dir)
     ledger_dir.mkdir(parents=True, exist_ok=True)
     path = ledger_dir / LEDGER_FILENAME
     # A run interrupted mid-write leaves a last line with no newline. Start on a
