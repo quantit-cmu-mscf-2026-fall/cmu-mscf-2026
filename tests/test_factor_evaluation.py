@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 
 from capstone import shared_data as sd
-from capstone.backtest import backtest_components
+from capstone.backtest import backtest_components, backtest_frame, sharpe_ratio, summarize
 from capstone.factors import evaluation as ev
 from capstone.factors.evaluation import (
     HoldoutError,
@@ -96,13 +96,11 @@ def test_costs_match_the_backtest_when_every_spread_is_the_same():
     net, turnover = backtest_components(
         signal, panel.fields["returns"], cost_bps=10.0, demean=True, gross=1.0
     )  # half of a 20 bps spread is 10 bps per unit traded
-    # Same returns and turnover on every day a position is held. During the
-    # 5-day warm-up this module reports NaN; the backtest here still reports
-    # 0.0, which #55 changes to NaN too.
+    # Same returns and turnover on every day, warm-up NaNs included (#55).
     held = result.net.notna()
-    np.testing.assert_allclose(result.net[held], net[held], rtol=1e-9, atol=1e-12)
+    np.testing.assert_allclose(result.net, net, rtol=1e-9, atol=1e-12)
     np.testing.assert_allclose(result.turnover[held], turnover[held], rtol=1e-9)
-    assert (net.iloc[1:][~held.iloc[1:]] == 0.0).all() and (~held).sum() == 5
+    assert net[~held].isna().all() and (~held).sum() == 5
 
 
 def test_a_planted_factor_earns_and_its_opposite_loses():
@@ -257,19 +255,18 @@ def test_the_full_spread_view_doubles_the_cost():
 
 def test_holding_one_day_is_daily_rebalancing():
     panel = build_panel(fake_rows())
-    weights = ev.factor_weights(parse("ts_mean(returns, 5)"), panel)
-    daily = ev.returns_from_weights(weights, panel, 1)
+    signal = ev.factor_signal(parse("ts_mean(returns, 5)"), panel)
+    daily = ev.signal_returns(signal, panel, ev.TradingSpec(hold=1))
     np.testing.assert_allclose(daily.net, factor_returns(parse("ts_mean(returns, 5)"), panel).net)
 
 
 def test_a_longer_hold_trades_only_on_rebalance_days_and_less():
     panel = build_panel(fake_rows(n_days=200))
-    weights = ev.factor_weights(parse("ts_mean(returns, 5)"), panel)
-    weekly = ev.returns_from_weights(weights, panel, 5)
-    daily = ev.returns_from_weights(weights, panel, 1)
+    weekly = factor_returns(parse("ts_mean(returns, 5)"), panel, 5)
+    daily = factor_returns(parse("ts_mean(returns, 5)"), panel, 1)
     traded = weekly.turnover.fillna(0) > 0
     # Trades land the day after a rebalance day (the position is first held then).
-    rebalance_next = np.arange(len(weights)) % 5 == 1
+    rebalance_next = np.arange(len(panel.fields["returns"])) % 5 == 1
     assert not (traded & ~rebalance_next).any()
     assert weekly.turnover.sum() < daily.turnover.sum()
     assert weekly.cost.sum() < daily.cost.sum()
@@ -278,7 +275,7 @@ def test_a_longer_hold_trades_only_on_rebalance_days_and_less():
 def test_a_hold_below_one_day_is_refused():
     panel = build_panel(fake_rows(n_stocks=5, n_days=20))
     with pytest.raises(ValueError):
-        ev.returns_from_weights(ev.factor_weights(parse("volume"), panel), panel, 0)
+        factor_returns(parse("volume"), panel, 0)
 
 
 def test_the_research_script_end_to_end(tmp_path, monkeypatch):
@@ -322,7 +319,7 @@ def test_the_research_script_end_to_end(tmp_path, monkeypatch):
 
 
 def test_a_correction_excludes_entries_without_deleting_them(tmp_path, monkeypatch):
-    from capstone.runlog import _read_entries, log_run
+    from capstone.runlog import log_run, read_entries
 
     monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
     first = [log_run(ev.LEDGER_NAME, params={"factor_id": f}) for f in ("a", "b")]
@@ -340,7 +337,7 @@ def test_a_correction_excludes_entries_without_deleting_them(tmp_path, monkeypat
         },
     )
     assert ev.trial_count() == 1
-    assert len(_read_entries()) == 5  # nothing deleted
+    assert len(read_entries()) == 5  # nothing deleted
 
 
 # ---------------------------------------------------------------------------
@@ -415,9 +412,9 @@ def test_a_lookback_warming_up_is_not_counted_as_flat_days():
 def test_a_real_signal_with_zero_net_weight_still_earns_zero():
     # #25's rule: idleness comes from a missing signal, not from zero weights.
     panel = build_panel(fake_rows(n_stocks=10, n_days=30))
-    weights = ev.factor_weights(parse("volume"), panel)
-    weights.iloc[10:15] = 0.0  # a signal that is there but flat
-    result = ev.returns_from_weights(weights, panel)
+    signal = ev.factor_signal(parse("volume"), panel)
+    signal.iloc[10:15] = 1.0  # a signal that is there but the same for every stock
+    result = ev.signal_returns(signal, panel, ev.TradingSpec())
     assert (result.gross.iloc[12:16] == 0.0).all()
 
 
@@ -427,3 +424,116 @@ def test_the_warm_up_is_left_out_under_sector_neutrality_too():
     plain = factor_returns(tree, panel, ev.TradingSpec(hold=5))
     sector = factor_returns(tree, panel, ev.TradingSpec(hold=5, neutral="sector"))
     assert plain.net.isna().sum() == sector.net.isna().sum() > 60
+
+
+def per_stock_spread_rows(**kwargs):
+    """Rows where each stock quotes its own spread, 5 to 80 bps."""
+    rows = fake_rows(**kwargs)
+    width = 0.0005 + 0.0015 * (rows.permno - 10000) % 0.0076
+    mid = rows.dlyprc
+    rows["dlybid"], rows["dlyask"] = mid * (1 - width / 2), mid * (1 + width / 2)
+    return rows
+
+
+@pytest.mark.parametrize("hold", [1, 5])
+def test_every_column_is_the_shared_backtest_with_each_stocks_own_spread(hold):
+    panel = build_panel(per_stock_spread_rows(n_stocks=20, n_days=120))
+    tree = parse("ts_mean(returns, 5)")
+    frame = backtest_frame(
+        ev.factor_signal(tree, panel),
+        panel.fields["returns"],
+        cost_bps=panel.half_spread * 1e4,
+        demean=True,
+        gross=1.0,
+        hold=hold,
+    )
+    result = factor_returns(tree, panel, hold)
+    for name, series in (("net", result.net), ("gross", result.gross), ("cost", result.cost)):
+        np.testing.assert_allclose(series, frame[name], rtol=1e-12, atol=1e-15, equal_nan=True)
+    np.testing.assert_allclose(result.turnover, frame["turnover"], equal_nan=True)
+    # The spreads differ by stock, so the cost is not turnover times one rate.
+    assert result.cost.sum() != pytest.approx(
+        result.turnover.sum() * panel.half_spread.stack().mean()
+    )
+
+
+def test_a_trade_pays_each_stocks_half_spread_and_a_missing_one_pays_the_days_median():
+    panel = build_panel(per_stock_spread_rows(n_stocks=12, n_days=40))
+    tree = parse("volume")
+    weights = ev.factor_weights(tree, panel).fillna(0.0)
+    t = 20  # trade at the close of day t, held (and charged) from day t+1
+    gap = panel.half_spread.columns[:3]
+    panel.half_spread.iloc[t, panel.half_spread.columns.get_indexer(gap)] = np.nan
+    spread = panel.half_spread.iloc[t]
+    spread = spread.fillna(spread.median())
+    expected = ((weights.iloc[t] - weights.iloc[t - 1]).abs() * spread).sum()
+    assert factor_returns(tree, panel).cost.iloc[t + 1] == pytest.approx(expected, rel=1e-12)
+
+
+def test_a_trading_day_with_no_cost_rate_is_refused_not_traded_for_free():
+    panel = build_panel(fake_rows(n_stocks=10, n_days=40))
+    panel.half_spread.iloc[15] = np.nan  # no stock has a spread that day
+    with pytest.raises(ValueError, match="no rate"):
+        factor_returns(parse("volume"), panel)
+
+
+def test_a_refused_trial_is_logged_and_not_swallowed(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    panel = build_panel(fake_rows(n_stocks=10, n_days=40), data_version="v-test")
+    panel.half_spread.iloc[15] = np.nan
+    with pytest.raises(ValueError, match="no rate"):
+        evaluate_factors(
+            {"f1": parse("volume")}, panel, specs=ev.grid(holds=(1, 5), neutral=("none",))
+        )
+    entries = [json.loads(line) for line in (tmp_path / "runs.jsonl").read_text().splitlines()]
+    assert [(e["params"]["factor_id"], e["params"]["spec"]["hold"]) for e in entries] == [("f1", 1)]
+    assert "no rate" in entries[0]["metrics"]["error"]
+
+
+def test_a_day_when_no_stock_has_a_return_still_pays_its_cost():
+    # An intended difference from the module's old loop, which read the day's
+    # gross as NaN and dropped the net with the cost: the backtest's gross is 0.0.
+    panel = build_panel(fake_rows(n_stocks=10, n_days=40))
+    panel.fields["returns"].iloc[20] = np.nan
+    result = factor_returns(parse("volume"), panel)
+    assert result.gross.iloc[20] == 0.0
+    assert result.cost.iloc[20] > 0
+    assert result.net.iloc[20] == pytest.approx(-result.cost.iloc[20])
+
+
+def test_a_day_with_signals_but_no_sectors_is_flat_not_missing():
+    # Sector-neutral, a day whose stocks have a signal but no SIC code holds
+    # an empty book: a 0.0 day, not a NaN day as if the factor had no value.
+    rows = fake_rows(n_stocks=30, n_days=40)
+    days = rows.date.unique()[20:23]
+    rows.loc[rows.date.isin(days), "siccd"] = np.nan
+    panel = build_panel(rows)
+    result = factor_returns(parse("volume"), panel, ev.TradingSpec(neutral="sector"))
+    assert result.net.iloc[1:].notna().all()
+    assert (result.gross.iloc[22:24] == 0.0).all()
+
+
+def test_factor_sharpe_is_the_backtest_summary_sharpe():
+    # One Sharpe ratio, `backtest.sharpe_ratio`, for returns, summaries and the
+    # full-spread metric alike.
+    result = factor_returns(parse("volume"), build_panel(fake_rows(n_days=300, planted=0.002)))
+    for which in ("net", "gross", "net_full_spread"):
+        series = getattr(result, which)
+        assert result.sharpe(which) == sharpe_ratio(series, ev.PERIODS_PER_YEAR)
+        assert abs(result.sharpe(which) - summarize(series).sharpe) < 1e-12
+
+
+def test_the_logged_full_spread_sharpe_is_the_shared_sharpe(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    panel = build_panel(fake_rows(n_days=300, planted=0.002), data_version="v-test")
+    _, summary = evaluate_factors({"f1": parse("volume")}, panel)
+    net_full = factor_returns(parse("volume"), panel).net_full_spread
+    expected = sharpe_ratio(net_full, ev.PERIODS_PER_YEAR)
+    assert summary["sharpe_net_full_spread"].iloc[0] == expected
+
+
+def test_a_constant_return_series_has_no_sharpe():
+    # The shared Sharpe is NaN without spread; a mean over a rounding-error sd is not a Sharpe.
+    flat = pd.Series(0.001, index=pd.date_range("2020-01-01", periods=50))
+    result = ev.FactorReturns(flat, flat, flat, flat)
+    assert np.isnan(result.sharpe("net"))

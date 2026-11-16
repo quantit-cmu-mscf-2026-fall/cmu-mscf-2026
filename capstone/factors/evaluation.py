@@ -15,11 +15,13 @@ validation stack), one column per `factor_id`.
 - **Holdout guard**: the discovery period ends `DISCOVERY_END`; nothing after
   it is loaded, and a panel holding a later date is refused.
 - **Factor to returns** (`factor_returns`): the factor's value on universe
-  stocks, as dollar-neutral weights with gross exposure 1 (`backtest.to_weights`);
-  a weight set at day t's close earns day t+1's return, as in
-  `backtest.run_backtest`. The book is rebalanced every `hold` trading days,
+  stocks, traded by the project's one backtest (`backtest.backtest_frame`)
+  as dollar-neutral weights with gross exposure 1; a weight set at day t's
+  close earns day t+1's return, and a lookback's warm-up is no position
+  (NaN), not flat days. The book is rebalanced every `hold` trading days,
   an option, not a fixed choice. Each trade pays half the stock's quoted
-  spread that day (`sd.quoted_spread`): costs per stock and per day.
+  spread that day (`sd.quoted_spread`): costs per stock and per day. This
+  module keeps no positions, trades or cost loop of its own.
 - **Variants** (`TradingSpec`, `grid`): a factor is traded by a spec, its
   holding period and sector neutrality; a (factor, spec) is a variant,
   recorded in the store's `variants` table with lineage to its factor. Each
@@ -42,12 +44,13 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import Literal, get_args
 
 import numpy as np
 import pandas as pd
 
 from capstone import shared_data as sd
-from capstone.backtest import to_weights
+from capstone.backtest import backtest_frame, sharpe_ratio, to_weights
 from capstone.evaluate import sharpe_test
 from capstone.factors import store
 from capstone.factors.interpret import evaluate
@@ -171,16 +174,19 @@ class FactorReturns:
         """Net of the full quoted spread instead of half: a pessimistic cost view."""
         return (self.gross - 2 * self.cost).rename("net_full_spread")
 
-    def sharpe(self, which: str = "net") -> float:
-        r = getattr(self, which).dropna()
-        sd_ = r.std(ddof=1)
-        return float(r.mean() / sd_ * np.sqrt(PERIODS_PER_YEAR)) if sd_ > 0 else float("nan")
+    def sharpe(
+        self, which: Literal["net", "gross", "cost", "turnover", "net_full_spread"] = "net"
+    ) -> float:
+        """Annualised Sharpe of one of the series: `backtest.sharpe_ratio`, the
+        project's one definition (the one `backtest.summarize` reports)."""
+        return sharpe_ratio(getattr(self, which), PERIODS_PER_YEAR)
 
 
 # ---------------------------------------------------------------------------
 # Trading specs: how a factor is traded. A (factor, spec) is a variant.
 
-NEUTRALITY = ("none", "sector")
+Neutral = Literal["none", "sector"]
+NEUTRALITY: tuple[Neutral, ...] = get_args(Neutral)
 # A 2-digit SIC group with fewer universe stocks than this on a day falls back
 # to its SIC division for that day. A division's fallback group can still be thin.
 MIN_SECTOR_SIZE = 5
@@ -205,7 +211,7 @@ class TradingSpec:
     proportional to the (demeaned) signal, dollar-neutral, gross exposure 1."""
 
     hold: int = 1
-    neutral: str = "none"
+    neutral: Neutral = "none"
 
     def __post_init__(self) -> None:
         if self.hold < 1:
@@ -245,85 +251,78 @@ def sector_groups(panel: Panel) -> pd.Series:
 
 
 def factor_signal(tree: Node, panel: Panel) -> pd.DataFrame:
-    """The factor's value on universe stocks (NaN elsewhere)."""
+    """The factor's value on the stocks that may be held that day, NaN elsewhere."""
     return evaluate(tree, panel.fields).where(panel.universe)
 
 
-def signal_weights(signal: pd.DataFrame, panel: Panel, neutral: str = "none") -> pd.DataFrame:
+def trading_signal(signal: pd.DataFrame, panel: Panel, neutral: Neutral = "none") -> pd.DataFrame:
+    """The signal the backtest trades: `signal` itself, or with neutral="sector"
+    the signal less its sector's mean each day (traded without a further
+    demean). A stock with a signal but no sector gets 0, not NaN, so a day
+    with any signal is never mistaken for a day with none.
+    """
+    if neutral == "none":
+        return signal
+    long = signal.stack().dropna()  # dropna: pandas 3's stack() keeps NaN cells
+    sectors = sector_groups(panel).reindex(long.index)
+    dates = long.index.get_level_values(0)
+    demeaned = long - long.groupby([dates, sectors.values]).transform("mean")
+    demeaned = demeaned.unstack().reindex_like(signal)
+    return demeaned.where(signal.isna(), demeaned.fillna(0.0))
+
+
+def signal_weights(signal: pd.DataFrame, panel: Panel, neutral: Neutral = "none") -> pd.DataFrame:
     """Dollar-neutral weights, gross 1, proportional to the signal demeaned across
-    all universe stocks or, with neutral="sector", within each sector.
+    all universe stocks or, with neutral="sector", within each sector: the
+    book `signal_returns` trades on each rebalance day.
 
     A day with no signal on any universe stock (a lookback still warming up,
-    say) is a row of NaN, not of zeros, so `returns_from_weights` can tell
-    "no signal" from "a signal that nets to zero weight".
+    say) is a row of NaN, not of zeros: "no signal" is not "a signal that
+    nets to zero weight".
     """
-    has_signal = signal.notna().any(axis=1)
-    if neutral == "sector":
-        long = signal.stack().dropna()
-        sectors = sector_groups(panel).reindex(long.index)
-        dates = long.index.get_level_values(0)
-        demeaned = long - long.groupby([dates, sectors.values]).transform("mean")
-        signal = demeaned.unstack().reindex_like(signal)
-        weights = to_weights(signal, demean=False, gross=1.0).fillna(0.0)
-    else:
-        weights = to_weights(signal, demean=True, gross=1.0).fillna(0.0)
-    return weights.where(has_signal, axis=0)
+    traded = trading_signal(signal, panel, neutral)
+    weights = to_weights(traded, demean=neutral == "none", gross=1.0).fillna(0.0)
+    return weights.where(signal.notna().any(axis=1), axis=0)
 
 
-def factor_weights(tree: Node, panel: Panel, neutral: str = "none") -> pd.DataFrame:
+def factor_weights(tree: Node, panel: Panel, neutral: Neutral = "none") -> pd.DataFrame:
     """The factor as dollar-neutral weights (gross 1) on universe stocks, each day."""
     return signal_weights(factor_signal(tree, panel), panel, neutral)
 
 
-def returns_from_weights(weights: pd.DataFrame, panel: Panel, hold: int = 1) -> FactorReturns:
-    """Returns of trading `weights`, rebalancing every `hold` trading days.
+def signal_returns(signal: pd.DataFrame, panel: Panel, spec: TradingSpec) -> FactorReturns:
+    """Returns of trading `signal` by `spec`, from `backtest.backtest_frame`.
 
-    On a rebalance day (every `hold`-th day from the first) the book is set to
-    that day's weights and held until the next one; `hold=1` rebalances
-    daily. A weight set at day t's close earns day t+1's return (positions
-    are the weights shifted one day, as in `backtest.run_backtest`). Trading
-    the change in weight pays half that day's quoted spread. Between
-    rebalances the weights are held fixed, so the small trades that would
-    keep them fixed as prices drift are not charged.
-
-    A row of NaN weights means no signal that day. A day whose book came from
-    such a row, with nothing traded, holds no position: its returns, cost and
-    turnover are NaN, not 0.0, so a lookback's warm-up doesn't count as flat
-    days (the rule `backtest` adopts in #55). A real signal that nets to zero
-    weight still earns 0.0.
+    The book is `signal_weights`, set on every `spec.hold`-th day counted from
+    the panel's first (`hold=1` rebalances daily) and held in between; a
+    weight set at day t's close earns day t+1's return. Trading one unit of a
+    stock's weight pays half its quoted spread that day; a stock with no
+    spread pays that day's median, and a trade on a day where no stock has a
+    spread raises `ValueError` rather than trading for free. A day whose book
+    came from no signal, with nothing traded, holds no position: its returns,
+    cost and turnover are NaN, not 0.0, so a lookback's warm-up doesn't count
+    as flat days (#55). A real signal that nets to zero weight still earns 0.0.
     """
-    if hold < 1:
-        raise ValueError("hold must be at least 1 day")
-    has_signal = weights.notna().any(axis=1).astype(float)
-    weights = weights.fillna(0.0)
-    if hold > 1:
-        rebalance = pd.Series(np.arange(len(weights)) % hold == 0, index=weights.index)
-        weights = weights.where(rebalance, axis=0).ffill()
-        has_signal = has_signal.where(rebalance).ffill()
-    returns = panel.fields["returns"]
-    positions = weights.shift(1)
-    gross = (positions * returns).sum(axis=1, min_count=1)
-    trades = weights.diff().abs()
-    trades.iloc[0] = weights.iloc[0].abs()  # building the first book is a trade too
-    spread = panel.half_spread.reindex_like(trades)
-    # A stock with no spread that day (out of the data): that day's median spread.
-    spread = spread.where(spread.notna(), spread.median(axis=1), axis=0)
-    cost = (trades * spread).sum(axis=1).shift(1)  # charged on the day the position is first held
-    turnover = trades.sum(axis=1).shift(1)
-    gross.iloc[:1] = np.nan
-    # The book held on day t was set at t-1: idle if that came from no signal.
-    idle = (has_signal.shift(1) == 0) & (turnover == 0)
-    gross[idle] = np.nan
-    cost[idle] = np.nan
-    turnover[idle] = np.nan
-    net = gross - cost
-    return FactorReturns(net.rename("net"), gross.rename("gross"), cost.rename("cost"), turnover)
+    return _backtest(trading_signal(signal, panel, spec.neutral), panel, spec)
+
+
+def _backtest(traded: pd.DataFrame, panel: Panel, spec: TradingSpec) -> FactorReturns:
+    """`signal_returns` from `trading_signal`'s output for `spec.neutral`."""
+    frame = backtest_frame(
+        traded,
+        panel.fields["returns"],
+        cost_bps=panel.half_spread * 1e4,  # the backtest takes basis points
+        demean=spec.neutral == "none",
+        gross=1.0,
+        hold=spec.hold,
+    )
+    return FactorReturns(frame["net"], frame["gross"], frame["cost"], frame["turnover"])
 
 
 def factor_returns(tree: Node, panel: Panel, spec: TradingSpec | int = 1) -> FactorReturns:
     """The returns of trading the factor by `spec` (or a holding period in days)."""
     spec = spec if isinstance(spec, TradingSpec) else TradingSpec(hold=spec)
-    return returns_from_weights(factor_weights(tree, panel, spec.neutral), panel, spec.hold)
+    return signal_returns(factor_signal(tree, panel), panel, spec)
 
 
 def screen_pvalue(net: pd.Series) -> float:
@@ -381,7 +380,7 @@ def evaluate_factors(
             signal, error = factor_signal(tree, panel), ""
         except (ValueError, ArithmeticError) as exc:
             signal, error = None, str(exc)
-        weights_by_neutral: dict[str, pd.DataFrame] = {}
+        traded: dict[str, pd.DataFrame] = {}  # the sector demean is slow: once per factor
         for spec in specs:
             vid = (
                 store.add_variant(con, fid, spec.as_dict())
@@ -401,18 +400,21 @@ def evaluate_factors(
             if signal is None:
                 log_run(LEDGER_NAME, params=params, metrics={"error": error}, tags=["evaluation"])
                 continue
-            if spec.neutral not in weights_by_neutral:
-                weights_by_neutral[spec.neutral] = signal_weights(signal, panel, spec.neutral)
-            result = returns_from_weights(weights_by_neutral[spec.neutral], panel, spec.hold)
-            full = result.net_full_spread.dropna()
+            if spec.neutral not in traded:
+                traded[spec.neutral] = trading_signal(signal, panel, spec.neutral)
+            try:
+                result = _backtest(traded[spec.neutral], panel, spec)
+            except ValueError as exc:
+                # The backtest refused (no cost rate on a trading day): the trial
+                # was run, so it is counted, and the refusal is not swallowed.
+                log_run(
+                    LEDGER_NAME, params=params, metrics={"error": str(exc)}, tags=["evaluation"]
+                )
+                raise
             metrics = {
                 "sharpe_net": result.sharpe("net"),
                 "sharpe_gross": result.sharpe("gross"),
-                "sharpe_net_full_spread": float(
-                    full.mean() / full.std(ddof=1) * np.sqrt(PERIODS_PER_YEAR)
-                )
-                if full.std(ddof=1) > 0
-                else float("nan"),
+                "sharpe_net_full_spread": result.sharpe("net_full_spread"),
                 "mean_turnover": float(result.turnover.mean()),
                 "mean_cost": float(result.cost.mean()),
                 "days": int(result.net.notna().sum()),
@@ -460,9 +462,9 @@ def excluded_entries(entries: list[dict]) -> set[tuple[str, str]]:
 def trial_count(entries: list[dict] | None = None) -> int:
     """Evaluation trials in the ledger: `LEDGER_NAME` entries no correction excludes."""
     if entries is None:
-        from capstone.runlog import _read_entries
+        from capstone.runlog import read_entries
 
-        entries = _read_entries()
+        entries = read_entries()
     skip = excluded_entries(entries)
     return sum(
         1

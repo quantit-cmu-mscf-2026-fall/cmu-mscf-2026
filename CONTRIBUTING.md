@@ -60,6 +60,9 @@ wait for us. We read all of it as participants.
   supported by the diff and the results, (2) would a stranger be able to rerun
   this, (3) is the code clear enough to change later. Style nits come last;
   the formatter settles most of them.
+- What blocks a merge, how severe a finding is, which paths need a full
+  review, and when a review stops: `REVIEW.md`. The `review-pr` skill applies
+  it.
 - Target: first review within one working day. A blocked PR blocks a teammate.
 - Disagreement is content, not friction — argue in the PR thread, decide,
   merge. If the thread stalls, bring it to the weekly sync.
