@@ -25,6 +25,7 @@ For development: `claude --plugin-dir ./mscf-plugin`. The hook runs `python`, so
 | Skill | `null-calibration` | Null and power tests every new validation method ships with |
 | Skill | `research-pr` | Branch, checks, PR template with seeds and trial count, review and merge |
 | Skill | `paper-round` | Weekly paper one-pager, smallest experiment, report back |
+| Skill | `pipeline-view` | The live pipeline lab over the run ledger (local page or one-file snapshot), and how an experiment reports its progress (`mscf_progress.track`, `pipeline_run.py`) |
 | Command | `qp-check` | The pre-PR acceptance check: offline tests, ruff, and the trial count from `runlog stats` |
 | Agent | `ship-checker` | Read-only pre-push check of a branch against the PR rules (title, size, template, failing-without-change test, safety scan) |
 | Hook | `hooks/guard.py` | Denies holdout dates in commands, force pushes, printing secrets, committing working data, editing the ledger; warns on holdout dates in code; reports the ledger count after experiment scripts |
