@@ -25,7 +25,7 @@
 
 | Check | How | Result | Reproduce with |
 |---|---|---|---|
-| Unit tests | `tests/test_intake.py`, 18 tests | pass | `pytest -q tests/test_intake.py` |
+| Unit tests | `tests/test_intake.py` | pass | `pytest -q tests/test_intake.py` |
 | Holdout never seen by stages 1-3 | holdout rows poisoned with +1e6; bootstrap spied | stage 1-3 columns identical | `pytest -q tests/test_intake.py -k holdout` |
 | Null calibration | 20 null family sets each, iid, `rho=0.3`, `ar1=0.2`; BH at 0.10 on `p1_bootstrap` | mean share accepted <= 0.10 | `pytest -q tests/test_intake.py -k null` |
 | Power | 3 of 10 planted families, Sharpe 2 | all planted pass BH at 0.10 | `pytest -q tests/test_intake.py -k planted` |

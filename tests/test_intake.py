@@ -227,3 +227,75 @@ def test_stage1_on_null_families_accepts_at_most_q1_in_expectation(defect):
         any_accepted += bool(passed.any())
     assert np.mean(accepted) <= q1
     assert any_accepted <= 5  # BH under the complete null: P(any) <= q1, so ~2 of 20
+
+
+# ---------------------------------------------------------------------------
+# The funnel's date/period contract, applied at the boundary
+
+
+def _periods(seed=2):
+    fs = _family_set(4, 0.0, seed=seed, n_holdout=252)
+    return fs, fs.returns.index[fs.n_search - 1], fs.returns.index[fs.n_search]
+
+
+def test_timezone_aware_or_timed_dates_raise_at_intake():
+    returns, family = _tiny()
+    aware = returns.tz_localize("UTC")
+    with pytest.raises(ValueError, match="timezone"):
+        from_returns(aware, family, generator="g")
+    timed = returns.copy()
+    timed.index = timed.index + pd.Timedelta(hours=16)
+    with pytest.raises(ValueError, match="normalised"):
+        from_returns(timed, family, generator="g")
+    with pytest.raises(ValueError, match="timezone"):
+        FunnelInput(aware, family, "g", {})
+
+
+@pytest.mark.parametrize("period", ["search period", "holdout"])
+def test_a_candidate_short_of_returns_in_a_period_is_refused_by_name(period):
+    fs, search_end, holdout_start = _periods()
+    returns = fs.returns.copy()
+    victim = returns.columns[1]
+    if period == "holdout":
+        returns.loc[holdout_start:, victim] = np.nan
+    else:
+        returns.loc[:search_end, victim] = np.nan
+    # With the dates, intake itself refuses it ...
+    with pytest.raises(ValueError, match=rf"{period}.*{victim}"):
+        from_returns(
+            returns, fs.family, generator="g", search_end=search_end, holdout_start=holdout_start
+        )
+    # ... and without them stage_inputs does, before the funnel runs.
+    fi = from_returns(returns, fs.family, generator="g")
+    with pytest.raises(ValueError, match=rf"{period}.*{victim}"):
+        stage_inputs(
+            fi, search_end=search_end, holdout_start=holdout_start, n_boot=0, seed=0, q=0.05
+        )
+
+
+def test_one_return_in_a_period_is_not_enough():
+    fs, search_end, holdout_start = _periods()
+    returns = fs.returns.copy()
+    victim = returns.columns[2]
+    returns.loc[holdout_start:, victim] = np.nan
+    returns.loc[holdout_start, victim] = 0.001
+    with pytest.raises(ValueError, match=victim):
+        from_returns(
+            returns, fs.family, generator="g", search_end=search_end, holdout_start=holdout_start
+        )
+
+
+def test_adequate_periods_pass_and_match_the_unchecked_intake():
+    fs, search_end, holdout_start = _periods()
+    checked = from_returns(
+        fs.returns, fs.family, generator="g", search_end=search_end, holdout_start=holdout_start
+    )
+    plain = from_returns(fs.returns, fs.family, generator="g")
+    pd.testing.assert_frame_equal(checked.returns, plain.returns)
+
+
+def test_a_blank_family_label_raises_naming_the_candidate():
+    returns, family = _tiny()
+    family["b"] = " "
+    with pytest.raises(ValueError, match="blank family.*'b'"):
+        from_returns(returns, family, generator="g")
