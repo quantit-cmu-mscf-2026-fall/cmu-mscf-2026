@@ -12,6 +12,7 @@ from capstone.pipeline.actions import (
 )
 from capstone.pipeline.crsp_actions import HELD_VALUE_RULE, normalize
 from capstone.pipeline.event_checks import classify_event_returns, verify_event_returns
+from capstone.pipeline.evidence import cash_in_lieu_defaults
 from capstone.pipeline.historical import HistoricalInputs
 
 
@@ -161,6 +162,14 @@ def test_cash_in_lieu_default_recorded_and_counted():
         "fraction": 0.5,
         "price": 40.0,
         "amount": 20.0,
+    }
+    assert cash_in_lieu_defaults(book.history) == {
+        "rule": "cash_in_lieu_following_open_v1",
+        "count": 1,
+        "amount": 20.0,
+        "events": [
+            {"event_id": book.history[-1]["event_id"], "date": "2000-01-04", "amount": 20.0}
+        ],
     }
     # Without a valid open for the surviving security the default cannot apply.
     with pytest.raises(ValueError, match="cash-in-lieu"):
