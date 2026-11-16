@@ -1,17 +1,27 @@
 """The deploy registry: `deploy/strategies.yml` entries.
 
 The registry file's schema is in its header: one entry per strategy with
-`id`, `module`, `gate_report` and `enabled`. Rules:
+`id`, `module`, `gate_report` and `enabled`, and three optional keys, `role`,
+`state` and `version`, that are written only when they differ from their
+defaults. Rules:
 
 - No gate report, no entry: an entry without one is refused when built or
   read.
 - `enabled` defaults to false. Turning a strategy on is a reviewed edit of
   the registry file, never a side effect of reading or rewriting it.
-- A file that is read and rendered again is byte for byte what it was.
+- A file that is read and rendered again is byte for byte what it was. The
+  optional keys are never written at their defaults, so a file without them
+  reads and writes exactly as before.
+- `role`: "deploy" (the default), "incubation-only" for a family the gate
+  labelled incubate, or "plumbing-test" for an entry that tests plumbing and
+  claims no edge. Reading never changes a role.
+- `state`: "active" (the default), "suspended" or "retired". The state is
+  recorded here and changes only through the lifecycle events of a later change;
+  `version` is an optional label (for example an allocation version).
 
 The project has no YAML dependency, so this module reads and writes the
 registry's own narrow schema: a header of comments, then `strategies: []` or
-a block list of entries with the keys in `KEYS` whose values are plain,
+a block list of entries with the keys in `KEYS` (the first four always) whose values are plain,
 single-quoted or double-quoted scalars. Anything else is refused rather than
 guessed at.
 """
@@ -21,11 +31,18 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal, get_args
 
 MODULE = "capstone.strategy.contract"
 MODULES = (MODULE,)
 REGISTRY_FILE = Path("deploy") / "strategies.yml"
-KEYS = ("id", "module", "gate_report", "enabled")
+KEYS = ("id", "module", "gate_report", "enabled", "role", "state", "version")
+Role = Literal["deploy", "incubation-only", "plumbing-test"]
+ROLES: tuple[str, ...] = get_args(Role)
+INCUBATION_ONLY = "incubation-only"
+PLUMBING_TEST = "plumbing-test"
+State = Literal["active", "suspended", "retired"]
+STATES: tuple[str, ...] = get_args(State)
 
 
 @dataclass(frozen=True)
@@ -34,6 +51,9 @@ class RegistryEntry:
     module: str
     gate_report: str
     enabled: bool = False
+    role: Role = "deploy"
+    state: State = "active"
+    version: str = ""
 
     def __post_init__(self) -> None:
         if not self.gate_report:
@@ -46,6 +66,12 @@ class RegistryEntry:
             )
         if not isinstance(self.enabled, bool):
             raise ValueError("enabled must be true or false")
+        if self.role not in ROLES:
+            raise ValueError(f"strategy {self.id!r}: role must be one of {ROLES}: {self.role!r}")
+        if self.state not in STATES:
+            raise ValueError(f"strategy {self.id!r}: state must be one of {STATES}: {self.state!r}")
+        if not isinstance(self.version, str):
+            raise ValueError(f"strategy {self.id!r}: version must be a string")
 
 
 def basic_string(text: str) -> str:
@@ -121,6 +147,9 @@ def _render(header: str, entries: list[RegistryEntry]) -> str:
         f"    module: {basic_string(e.module)}\n"
         f"    gate_report: {basic_string(e.gate_report)}\n"
         f"    enabled: {'true' if e.enabled else 'false'}\n"
+        + (f"    role: {basic_string(e.role)}\n" if e.role != "deploy" else "")
+        + (f"    state: {basic_string(e.state)}\n" if e.state != "active" else "")
+        + (f"    version: {basic_string(e.version)}\n" if e.version else "")
         for e in entries
     )
     return header + "strategies:\n" + body
