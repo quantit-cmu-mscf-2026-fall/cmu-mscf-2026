@@ -34,6 +34,12 @@ from dataclasses import dataclass
 OHLCV = ("open", "high", "low", "close", "volume")
 FIELDS = (*OHLCV, "returns", "shares", "cap")
 
+# Annual accounting fields (QUANTIT-118), as dates x permno frames from
+# `factors.fundamentals`, each dated by when it could have been known. They are
+# not in `FIELDS` yet: the grammar accepts them only once the evaluator wires
+# them in, so every existing tree parses and evaluates exactly as before.
+FUNDAMENTAL_FIELDS = ("book", "earnings", "sales", "assets")
+
 # func name -> takes a window argument. Windows must be integer literals.
 FUNCS = {
     "shift": True,
