@@ -911,20 +911,32 @@ class TestLocalFdr:
             profile = evidence_profile(pvalues)
         assert profile["lfdr"].isna().all() and profile["bh"].notna().all()
 
-    def test_profile_leaves_lfdr_nan_when_most_p_values_are_tied(self):
-        # Many duplicate candidates (identical returns, so identical p-values)
-        # leave the histogram no spread: IQR 0, one bin's worth of data. The fit
-        # used to raise statsmodels' MissingDataError, which took the whole
-        # profile down instead of leaving lfdr NaN.
-        rng = np.random.default_rng(0)
-        tied = np.r_[np.full(165, 0.5), stats.norm.sf(rng.standard_normal(135))]
-        for pvalues in (pd.Series(tied), pd.Series(np.full(250, 0.3))):
-            with pytest.raises(ValueError, match="no spread"):
-                local_fdr(pvalues)
-            with pytest.warns(RuntimeWarning, match="no spread"):
+    @pytest.mark.parametrize("share", [0.40, 0.43, 0.50, 0.55, 1.0])
+    def test_profile_leaves_lfdr_nan_when_most_p_values_are_tied(self, share):
+        # The IQR can remain nonzero with a large point mass. Across null seeds
+        # 0-19, 43%/50% tied at p=.5 previously made false calls in 14/20 and
+        # 20/20 sets. Refuse the fit rather than calling the spike a null model.
+        for seed in range(20):
+            pvalues = pd.Series(stats.norm.sf(np.random.default_rng(seed).standard_normal(300)))
+            pvalues.iloc[: int(share * len(pvalues))] = 0.5
+            for fit in (empirical_null, local_fdr):
+                with pytest.raises(ValueError, match="tied"):
+                    fit(pvalues)
+            with pytest.warns(RuntimeWarning, match="tied"):
                 profile = evidence_profile(pvalues)
             assert profile["lfdr"].isna().all()
             assert profile[["holm", "by", "bh", "q"]].notna().all().all()
+
+    def test_tie_share_counts_only_usable_pvalues(self):
+        pvalues = pd.Series(stats.norm.sf(np.random.default_rng(0).standard_normal(300)))
+        pvalues.iloc[:120] = 0.5
+        pvalues = pd.concat([pvalues, pd.Series(np.nan, index=range(300, 400))])
+        with pytest.raises(ValueError, match="tied"):
+            local_fdr(pvalues)
+        with pytest.warns(RuntimeWarning, match="tied"):
+            profile = evidence_profile(pvalues)
+        assert profile["lfdr"].isna().all()
+        assert profile.loc[profile["p"].notna(), ["holm", "by", "bh", "q"]].notna().all().all()
 
     def test_all_null_return_matrices_rarely_flag_anything(self):
         # The null calibration on `make_return_matrix` with both defects on:
