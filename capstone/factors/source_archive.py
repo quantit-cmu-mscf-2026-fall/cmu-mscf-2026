@@ -38,15 +38,24 @@ class SourceArchive:
 
     Resume verifies cached artifacts without network access. ``refresh=True`` explicitly
     reacquires a source; changed bytes produce a new immutable revision.
+    ``create=False`` opens an existing layout for inspection without creating any files.
     """
 
-    def __init__(self, root: str | Path, *, max_bytes: int = 5_000_000):
+    def __init__(self, root: str | Path, *, max_bytes: int = 5_000_000, create: bool = True):
         if type(max_bytes) is not int or max_bytes < 1:
             raise ValueError("max_bytes must be a positive integer")
+        if type(create) is not bool:
+            raise ValueError("create must be a boolean")
         self.root = Path(root).absolute()
         self.max_bytes = max_bytes
+        self.readonly = not create
         for path in (self.root, self.root / "objects", self.root / "revisions"):
-            path.mkdir(parents=path == self.root, exist_ok=True, mode=0o700)
+            if path.is_symlink():
+                raise ArchiveIntegrityError("archive directory must not be a symlink")
+            if create:
+                path.mkdir(parents=path == self.root, exist_ok=True, mode=0o700)
+            elif not path.is_dir():
+                raise ArchiveIntegrityError("existing archive directory is missing or invalid")
         self.journal = self.root / "outcomes.jsonl"
 
     @staticmethod
@@ -65,6 +74,8 @@ class SourceArchive:
 
     @staticmethod
     def _read(path: Path, limit: int) -> bytes:
+        if path.is_symlink():
+            raise ArchiveIntegrityError("archive file must not be a symlink")
         with path.open("rb") as handle:
             raw = handle.read(limit + 1)
         if len(raw) > limit:
@@ -91,6 +102,8 @@ class SourceArchive:
 
     def history(self) -> tuple[dict, ...]:
         """Read and validate the append-only hash chain, including failed attempts."""
+        if self.journal.is_symlink():
+            raise ArchiveIntegrityError("outcome journal must not be a symlink")
         if not self.journal.exists():
             return ()
         events = []
@@ -185,7 +198,11 @@ class SourceArchive:
         refresh: bool = False,
     ) -> IntakeOutcome:
         """Capture or verify one request and journal its terminal outcome before return."""
+        if self.readonly:
+            raise PermissionError("archive was opened read-only")
         lock = self.root / "archive.lock"
+        if lock.is_symlink():
+            raise ArchiveIntegrityError("archive lock must not be a symlink")
         with exclusive_file(lock, message="another intake owns this archive"):
             return self._intake(request, acquire, refresh=refresh)
 
