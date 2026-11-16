@@ -54,6 +54,61 @@ _FINAL_TRIALS: tuple[str, ...] = get_args(FinalTrials)
 # The holdout statistics stage 4 reads, per carried-forward variant.
 _HOLDOUT_FIELDS = ("p", "sharpe", "n_obs", "skew", "kurtosis", "variance")
 
+# The fewest non-NaN returns `sharpe_test` can work with; every period a
+# variant is tested on needs this many (see `period_shortfalls`).
+MIN_PERIOD_OBS = 2
+
+
+def check_dates(index: pd.Index) -> None:
+    """Refuse a date index the funnel's date cuts cannot read.
+
+    The periods are cut by calendar date, so the index must be a
+    DatetimeIndex that is timezone-naive, normalised (midnight: a 16:00
+    stamp on `search_end` would fall in the gap between the periods) and
+    strictly increasing (a repeated date would count one day twice).
+    `family_statistics` applies this; the validation intake applies the same
+    check so it never accepts a frame the funnel then refuses.
+    """
+    if not isinstance(index, pd.DatetimeIndex):
+        raise TypeError("returns must be indexed by date (a DatetimeIndex)")
+    if index.tz is not None:
+        raise ValueError("returns' dates must be timezone-naive")
+    if not index.equals(index.normalize()):
+        raise ValueError("returns' dates must be normalised to midnight")
+    if not index.is_monotonic_increasing:
+        raise ValueError("returns' dates must be increasing")
+    if not index.is_unique:
+        raise ValueError(
+            f"returns' dates must be unique (strictly increasing), "
+            f"e.g. {index[index.duplicated()][0].date()} repeats"
+        )
+
+
+def period_shortfalls(periods: dict[str, pd.DataFrame]) -> dict[str, dict]:
+    """Per period, the columns with too few non-NaN returns to be tested.
+
+    `periods` maps a period's name to its frame. Returns {name: {column:
+    non-NaN count}}, only for columns under `MIN_PERIOD_OBS`.
+    """
+    out = {}
+    for name, frame in periods.items():
+        counts = frame.count()
+        short = counts[counts < MIN_PERIOD_OBS]
+        if len(short):
+            out[name] = short.to_dict()
+    return out
+
+
+def _tested(returns: pd.Series, period: str):
+    """`sharpe_test`, refusing (by name) a variant with too few returns."""
+    n = int(returns.count())
+    if n < MIN_PERIOD_OBS:
+        raise ValueError(
+            f"variant {returns.name!r} has {n} non-NaN returns in the {period}; "
+            f"need at least {MIN_PERIOD_OBS}"
+        )
+    return sharpe_test(returns)
+
 
 # ---------------------------------------------------------------------------
 # Thresholds
@@ -154,8 +209,8 @@ def best_by_family(values: pd.Series, family: pd.Series) -> pd.Series:
     return best.reindex(pd.unique(family.dropna()))
 
 
-def _one_sided_p(returns: pd.DataFrame) -> pd.Series:
-    return pd.Series({c: sharpe_test(returns[c]).pvalue_greater for c in returns.columns})
+def _one_sided_p(returns: pd.DataFrame, period: str) -> pd.Series:
+    return pd.Series({c: _tested(returns[c], period).pvalue_greater for c in returns.columns})
 
 
 def _stage1(
@@ -210,7 +265,7 @@ def holdout_statistics(holdout: pd.DataFrame, chosen: pd.Series) -> pd.DataFrame
     are the `ho_*` fields `family_statistics` returns, indexed like `chosen`.
     """
     picked = chosen.dropna().unique()
-    tests = {b: sharpe_test(holdout[b]) for b in picked}
+    tests = {b: _tested(holdout[b], "holdout") for b in picked}
     return pd.DataFrame(_holdout_fields(tests, chosen, "ho_"), index=chosen.index)
 
 
@@ -250,10 +305,9 @@ def family_statistics(
     stage 4 needs, the naive stack's `nv_*` fields and `naive_pass` (some
     variant passed every stacked screening gate on the whole search period).
     """
-    if not isinstance(returns, pd.DataFrame) or not isinstance(returns.index, pd.DatetimeIndex):
+    if not isinstance(returns, pd.DataFrame):
         raise TypeError("returns must be a DataFrame indexed by date")
-    if not returns.index.is_monotonic_increasing:
-        raise ValueError("returns' dates must be increasing")
+    check_dates(returns.index)
     # Every variant counts toward its family's k, so each needs a label. The
     # bootstrap checks this too, but n_boot=0 skips it.
     missing = returns.columns.difference(family.dropna().index)
@@ -267,7 +321,7 @@ def family_statistics(
                 f"returns run to {last_date.date()}, past search_end {search_end.date()}: "
                 "pass holdout_start explicitly to use the later dates as the holdout"
             )
-        holdout_tests = {}
+        holdout = None
     else:
         holdout_start = pd.Timestamp(holdout_start)
         if holdout_start <= search_end:
@@ -275,14 +329,13 @@ def family_statistics(
         holdout = returns.loc[returns.index >= holdout_start]
         if holdout.empty:
             raise ValueError(f"no dates on or after holdout_start {holdout_start.date()}")
-        holdout_tests = {c: sharpe_test(holdout[c]) for c in returns.columns}
     search = returns.loc[returns.index <= search_end]
     if search.empty:
         raise ValueError(f"no dates on or before search_end {search_end.date()}")
 
     # Naive stack: every screening method as a gate, at once, on every variant
     # over the whole search period.
-    full_tests = {c: sharpe_test(search[c]) for c in search.columns}
+    full_tests = {c: _tested(search[c], "search period") for c in search.columns}
     p_all = pd.Series({c: t.pvalue_greater for c, t in full_tests.items()})
     n_variants = len(p_all)
     dsr_all = pd.Series(
@@ -312,7 +365,7 @@ def family_statistics(
         second = search.loc[search.index >= stage2_start]
         if first.empty or second.empty:
             raise ValueError("stage2_start must leave search dates for both stages")
-        windows["split"] = (first, second, _one_sided_p(first))
+        windows["split"] = (first, second, _one_sided_p(first, "search period before stage2_start"))
 
     out = {}
     for design, (window1, window2, p1) in windows.items():
@@ -321,10 +374,19 @@ def family_statistics(
             p_all.reindex(s["best"]).to_numpy()
             if design == "reuse"
             else [
-                sharpe_test(window2[b]).pvalue_greater if pd.notna(b) else np.nan for b in s["best"]
+                _tested(window2[b], "search period from stage2_start").pvalue_greater
+                if pd.notna(b)
+                else np.nan
+                for b in s["best"]
             ]
         )
         nb = naive_best.reindex(s.index)
+        # Stage 4 reads only the variants carried forward; an unchosen
+        # variant with no holdout data is not tested (nor does it block).
+        carried = pd.unique(pd.concat([s["best"], nb]).dropna())
+        holdout_tests = (
+            {b: _tested(holdout[b], "holdout") for b in carried} if holdout is not None else {}
+        )
         for column, values in {
             **_holdout_fields(holdout_tests, s["best"], "ho_"),
             **_holdout_fields(holdout_tests, nb, "nv_"),

@@ -32,7 +32,7 @@ description.
 
 | Check | How | Result | Reproduce with |
 |---|---|---|---|
-| Unit tests | `tests/test_funnel.py`, 32 tests | pass | `pytest -q tests/test_funnel.py` |
+| Unit tests | `tests/test_funnel.py`, 73 tests | pass | `pytest -q tests/test_funnel.py` |
 | Holdout blindness | shock holdout dates, compare stage-1/2 numbers | unchanged | `pytest -q tests/test_funnel.py -k only_search` |
 | Calibration unchanged | old vs new `calibration.family_statistics`, 4 sets x 2 `n_boot` x 2 designs | exactly equal | see the PR description |
 | Calibration runs unchanged | old vs new `run_funnel`/`run_naive_stack`/`gates_alone`, 96 settings | exactly equal | see the PR description |
