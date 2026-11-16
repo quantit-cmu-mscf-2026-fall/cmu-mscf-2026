@@ -13,7 +13,10 @@ description.
   built, `stage1` a field, default "rho" as on `main`), `thresholds_dict`
   (plain data to register), `screen` (stages 1-3, no holdout),
   `stage1_pvalues`, `run_funnel`. `calibration` re-exports them.
-- Not yet: the scorecard, registration and the single-look run.
+- **The scorecard** (QUANTIT-35): `capstone/scorecard.py`, the row and
+  header shape (`SCORECARD_COLUMNS`, `GateHeader`, `TrialScope`,
+  `GateResult`) and the report (`write_report`/`read_report`, JSON + CSV).
+- Not yet: registration and the single-look run that fill the scorecard.
 
 ## 2. Contract
 - Input: a performance matrix (dates x variants, `docs/validation.md`) and a
@@ -27,6 +30,8 @@ description.
 - `screen` never reads `ho_*`. Stage 1 refuses a missing family p-value
   (BH would drop it); stage 4 refuses a live candidate with no holdout
   statistics. Stage 3 passes through (spanning test not built yet).
+- The report is standard JSON (NaN as null) and reads back to the same
+  result; `read_report` refuses an accepted list the scorecard disagrees with.
 
 ## 3. How it was vetted
 
@@ -35,6 +40,7 @@ description.
 | Unit tests | `tests/test_funnel.py`, 73 tests | pass | `pytest -q tests/test_funnel.py` |
 | Holdout blindness | shock holdout dates, compare stage-1/2 numbers | unchanged | `pytest -q tests/test_funnel.py -k only_search` |
 | Calibration unchanged | old vs new `calibration.family_statistics`, 4 sets x 2 `n_boot` x 2 designs | exactly equal | see the PR description |
+| Scorecard and report | `tests/test_scorecard.py`, 9 tests (14 cases), hand-built result | pass, pandas 3.1 and 2.2 | `pytest -q tests/test_scorecard.py` |
 | Calibration runs unchanged | old vs new `run_funnel`/`run_naive_stack`/`gates_alone`, 96 settings | exactly equal | see the PR description |
 | pandas 3 | all-NaN family, nothing passes the naive stack | no warning | `pytest -q tests/test_funnel.py -k Pandas3` |
 
