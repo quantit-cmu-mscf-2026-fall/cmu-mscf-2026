@@ -107,6 +107,8 @@ class Panel:
     # Optional inputs the research constructions read when a caller attaches them.
     company: pd.DataFrame | None = None  # permco by date, for company-level signals
     fundamentals: pd.DataFrame | None = None  # accounting vintages with their publication dates
+    # Opt-in, execution-scoped cache only for checksum-frozen research inputs.
+    target_cache: dict | None = field(default=None, repr=False, compare=False)
     # Raw closes a share planner sizes with; bound by a replay for formation eligibility.
     sizing_prices: pd.DataFrame | None = field(default=None, repr=False, compare=False)
     # How a panel past the discovery period was authorized; None for every discovery panel.
