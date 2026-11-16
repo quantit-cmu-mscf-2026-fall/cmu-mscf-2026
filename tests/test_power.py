@@ -209,3 +209,146 @@ class TestDeterminism:
         spec = PowerSpec(**SMALL)
         a, b = power.null_side(spec, seed=9), power.null_side(spec, seed=10)
         assert not a.fs.returns.equals(b.fs.returns)
+
+
+# ---------------------------------------------------------------------------
+# Synthetic defects: autocorrelation, fat tails, volatility clustering
+# ---------------------------------------------------------------------------
+
+LONG = {**SMALL, "search_periods": 20_000, "holdout_periods": 1_000, "n_boot": 99}
+
+
+def _lag1(x: np.ndarray) -> float:
+    """Mean lag-1 autocorrelation of the columns of `x`."""
+    x = x - x.mean(axis=0)
+    return float(((x[1:] * x[:-1]).sum(0) / (x * x).sum(0)).mean())
+
+
+def _excess_kurtosis(x: np.ndarray) -> float:
+    z = (x - x.mean(axis=0)) / x.std(axis=0)
+    return float(((z**4).mean(0) - 3).mean())
+
+
+class TestDefects:
+    def test_no_defects_is_the_gaussian_world_bit_for_bit(self):
+        spec = PowerSpec(**SMALL)
+        assert spec.defects == dict(rho=0.1, ar1=0.0, t_df=None, garch=None)
+        fs = power.null_world(spec, seed=3)
+        ref = make_family_set(
+            4, (3,) * 4, 0.0, 0.0, within_rho=spec.within_rho, rho=0.1,
+            n_search=spec.search_periods, n_holdout=spec.holdout_periods, seed=3,
+        )  # fmt: skip
+        np.testing.assert_array_equal(fs.returns.to_numpy(), ref.returns.to_numpy())
+
+    def test_ar1_worlds_are_autocorrelated(self):
+        iid = power.null_world(PowerSpec(**LONG), seed=1).returns.to_numpy()
+        ar = power.null_world(PowerSpec(**LONG, ar1=0.4), seed=1).returns.to_numpy()
+        assert abs(_lag1(iid)) < 0.03
+        assert _lag1(ar) == pytest.approx(0.4, abs=0.04)
+
+    def test_t_worlds_have_fat_tails(self):
+        iid = power.null_world(PowerSpec(**LONG), seed=1).returns.to_numpy()
+        fat = power.null_world(PowerSpec(**LONG, t_df=4.0), seed=1).returns.to_numpy()
+        assert abs(_excess_kurtosis(iid)) < 0.3
+        assert _excess_kurtosis(fat) > 1.0
+
+    def test_garch_worlds_cluster_volatility(self):
+        iid = power.null_world(PowerSpec(**LONG), seed=1).returns.to_numpy()
+        spec = PowerSpec(**LONG, garch=(0.1, 0.85))
+        g = power.null_world(spec, seed=1).returns.to_numpy()
+        assert abs(_lag1(iid**2)) < 0.03
+        assert _lag1(g**2) > 0.1
+        assert abs(_lag1(g)) < 0.03  # returns themselves stay uncorrelated
+
+    @pytest.mark.parametrize(
+        "defects",
+        [
+            dict(ar1=0.5),
+            dict(t_df=5.0),
+            dict(garch=(0.1, 0.8)),
+            dict(ar1=0.3, t_df=6, garch=(0.05, 0.9)),
+        ],
+    )
+    def test_defect_worlds_stay_null_with_unit_volatility(self, defects):
+        spec = PowerSpec(**LONG, **defects)
+        fs = power.null_world(spec, seed=2)
+        assert not fs.truth.any()
+        r = fs.returns.to_numpy()
+        assert r.std(axis=0).mean() == pytest.approx(power.VOL, rel=0.08)
+        assert abs(r.mean(axis=0)).max() < 4 * power.VOL / np.sqrt(len(r)) * 1.5
+
+    @pytest.mark.parametrize(
+        "defects", [dict(ar1=0.5), dict(t_df=5.0), dict(garch=(0.1, 0.8))]
+    )  # fmt: skip
+    def test_planting_matches_the_generator_under_defects(self, defects):
+        kwargs = dict(within_rho=0.7, rho=0.1, seed=2, **defects)
+        planted = make_family_set(5, 3, 0.2, 0.8, **kwargs)
+        null = make_family_set(5, 3, 0.0, 0.0, **kwargs)
+        target = planted.truth.index[planted.truth][0]
+        shifted = power.plant(null.returns, null.family, target, 0.8)
+        np.testing.assert_allclose(shifted.to_numpy(), planted.returns.to_numpy(), atol=1e-15)
+
+    def test_planted_side_equals_the_full_batch_recomputed_under_defects(self):
+        spec = PowerSpec(**SMALL, ar1=0.4, t_df=5.0, garch=(0.1, 0.8))
+        side = power.null_side(spec, seed=3)
+        target = side.stats.index[0]
+        planted = power.planted_side(side, [target], 1.0)
+        returns = power.plant(side.fs.returns, side.fs.family, target, 1.0)
+        full = funnel.family_statistics(returns, side.fs.family, **side.kwargs)["reuse"]
+        pd.testing.assert_frame_equal(planted, full[planted.columns], rtol=1e-12)
+
+    def test_an_ar1_null_is_not_flagged_as_power(self):
+        # The point of an AR(1) null: with no plant, stage 1's bootstrap should
+        # not reject families at a rate beyond its level across seeds.
+        spec = PowerSpec(**{**SMALL, "n_boot": 199}, ar1=0.3)
+        hits = [
+            (power.null_side(spec, seed=s).stats["p2"] < 0.05).mean() for s in range(6)
+        ]  # fmt: skip
+        assert np.mean(hits) < 0.3
+
+    def test_same_seed_same_defect_world(self):
+        spec = PowerSpec(**SMALL, ar1=0.4, t_df=5.0, garch=(0.1, 0.8))
+        a, b = power.null_side(spec, seed=9), power.null_side(spec, seed=9)
+        pd.testing.assert_frame_equal(a.fs.returns, b.fs.returns, rtol=0, atol=0)
+        pd.testing.assert_frame_equal(a.stats, b.stats, rtol=0, atol=0)
+        assert not a.fs.returns.equals(power.null_world(PowerSpec(**SMALL), seed=9).returns)
+
+    @pytest.mark.parametrize(
+        "change",
+        [
+            dict(ar1=1.0), dict(ar1=-1.0), dict(t_df=2.0), dict(t_df=float("nan")),
+            dict(garch=(0.5, 0.5)), dict(garch=(-0.1, 0.5)), dict(garch=(0.1, 0.2, 0.3)),
+        ],
+    )  # fmt: skip
+    def test_refuses_defects_the_generator_cannot_make(self, change):
+        with pytest.raises(ValueError):
+            PowerSpec(**SMALL, **change)
+
+    def test_garch_is_stored_as_a_tuple(self):
+        assert PowerSpec(**SMALL, garch=[0.1, 0.8]).garch == (0.1, 0.8)
+
+
+class TestPlantTargets:
+    def test_a_duplicate_target_is_refused_not_planted_twice(self):
+        side = power.null_side(PowerSpec(**SMALL), seed=5)
+        target = side.stats.index[0]
+        with pytest.raises(ValueError, match="duplicate"):
+            power.planted_side(side, [target, target], 1.0)
+
+    def test_an_unknown_target_is_named_not_a_holdout_error(self):
+        side = power.null_side(PowerSpec(**SMALL), seed=5)
+        with pytest.raises(ValueError, match="unknown plant targets.*nope"):
+            power.planted_side(side, ["nope"], 1.0)
+        with pytest.raises(ValueError, match="unknown plant targets"):
+            power.planted_side(side, [side.stats.index[0], "nope"], 1.0)
+
+    def test_plant_refuses_an_unknown_target(self):
+        fs = power.null_world(PowerSpec(**SMALL), seed=5)
+        with pytest.raises(ValueError, match="unknown plant target"):
+            power.plant(fs.returns, fs.family, "nope", 1.0)
+
+    def test_several_distinct_targets_still_plant(self):
+        side = power.null_side(PowerSpec(**SMALL), seed=5)
+        two = list(side.stats.index[:2])
+        stats = power.planted_side(side, two, 3.0)
+        assert (stats.loc[two, "p2"] < side.stats.loc[two, "p2"]).all()

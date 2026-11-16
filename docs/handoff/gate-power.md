@@ -3,7 +3,7 @@
 Details: the PR descriptions. Each PR in this track adds its rows here.
 
 ## 1. What this adds
-- QUANTIT-124. `capstone/power.py` builds the simulated worlds a power analysis of the acceptance gate runs on: a null batch of families (`null_world`, `null_side`), a target family planted at a true Sharpe (`plant`, `planted_side`). `PowerSpec` is the configuration measured.
+- QUANTIT-124. `capstone/power.py` builds the simulated worlds a power analysis of the acceptance gate runs on: a null batch of families (`null_world`, `null_side`), a target family planted at a true Sharpe (`plant`, `planted_side`). `PowerSpec` is the configuration measured, including the synthetic defects the worlds can carry: `ar1`, `t_df`, `garch` (`synth.make_return_matrix`'s ranges, refused outside them; none by default, which is the cross-correlated Gaussian world, unchanged). A plant target listed twice, or naming no family, raises `ValueError`.
 - `calibration.make_family_set` takes one variant count per family; a scalar `k` gives exactly the data it did.
 - Tests: `tests/test_power.py`, `TestVariantsPerFamily` in `tests/test_calibration.py`.
 - Not here: one world's stage-by-stage pass flags, the batched Sharpe grid, the power curves and minimum detectable Sharpe (next PR), the gate header and script (the one after), stage 3's spanning p-value (the stage-3 PR).
@@ -22,6 +22,7 @@ Details: the PR descriptions. Each PR in this track adds its rows here.
 | Correlations | `within_corr`/`across_corr` measured on a 58-year null world | within 0.02 / 0.03 | `pytest -q tests/test_power.py -k correlations` |
 | Determinism | same seed twice, `null_side` and `planted_side` | identical | `pytest -q tests/test_power.py -k Determinism` |
 | Generator | listed equal counts = scalar `k`, bit for bit | pass | `pytest -q tests/test_calibration.py -k VariantsPerFamily` |
+| Defects | AR(1) / t / GARCH worlds measured: lag-1 autocorrelation, excess kurtosis, squared-return autocorrelation; null stays null with unit volatility; planting equals the generator and the full-batch recompute under defects | pass | `pytest -q tests/test_power.py -k Defects` |
 | Null calibration and power | the curves are the next PR's | n/a here | n/a |
 
 ## 4. Provenance
