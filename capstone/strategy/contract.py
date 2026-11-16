@@ -228,6 +228,11 @@ def load_spec(path: Path) -> StrategySpec:
         from capstone.strategy.diversified import DiversifiedStrategySpec
 
         return DiversifiedStrategySpec.from_toml(text)
+    if schema == 3:
+        from capstone.strategy.recorded import load_compatible_spec
+        from capstone.strategy.research_spec import ResearchStrategySpec
+
+        return load_compatible_spec(ResearchStrategySpec, text)
     if schema == 2:
         from capstone.strategy.recorded import load_compatible_spec
         from capstone.strategy.reference import ReferenceStrategySpec
@@ -324,7 +329,10 @@ def _target_weights(spec: StrategySpec, panel: Panel, as_of) -> pd.Series:
         benchmark_target,
         reference_weights,
     )
+    from capstone.strategy.research_spec import ResearchStrategySpec, research_weights
 
+    if isinstance(spec, ResearchStrategySpec):
+        return research_weights(spec, panel, as_of)
     if isinstance(spec, BenchmarkSpec):
         return benchmark_target(spec, panel, as_of)
     if isinstance(spec, ReferenceStrategySpec):
