@@ -393,6 +393,7 @@ class Candidate:
     evidence: str  # the memory's table for its kind of parent (`memory.evidence_table`)
     allowed: tuple[str, ...]  # edit kinds it may get: applicable and not vetoed
     lineage: tuple[str, ...]  # oldest ancestor through this parent
+    limit: int | None = None  # edits its family may still take this round (None: no cap)
 
 
 @dataclass(frozen=True)
@@ -449,6 +450,8 @@ def decide_prompt(candidates: Sequence[Candidate], n: int) -> str:
             f"  hypothesis: {c.hypothesis}",
             f"  allowed edits: {', '.join(c.allowed)}",
         ]
+        if c.limit is not None and c.limit < n:
+            lines.append(f"  at most {c.limit} edit(s): its family is near its cap")
         if len(c.lineage) > 1:
             lines.append("  Lineage, oldest first: " + " -> ".join(c.lineage))
     lines += ["", "The memory's evidence, by kind of parent:"]
@@ -457,10 +460,12 @@ def decide_prompt(candidates: Sequence[Candidate], n: int) -> str:
         lines += ["", f"Kind {context}:", table]
     lines += ["", "What each kind of edit means:"]
     lines += [f"- {m}: {MOTIF_WORDS[m]}" for m in PRODUCIBLE_MOTIFS]
+    fewer = any(c.limit is not None and c.limit < n for c in candidates)
     lines += [
         "",
         f"Choose one parent and one allowed edit, say why and which evidence you used, "
-        f"and write {n} different edited formulas of that kind.",
+        f"and write {n} different edited formulas of that kind"
+        + (" (no more than the parent's 'at most', where it has one)." if fewer else "."),
     ]
     return "\n".join(lines)
 
@@ -487,7 +492,7 @@ class DeepenAgent(ModelEditor):
                     str(answer.get("evidence_used", "")),
                     self._repaired(
                         answer.get("edits", []),
-                        n,
+                        n if chosen.limit is None else min(n, chosen.limit),
                         parse(chosen.expression),
                         motif,
                         chosen.lineage,
@@ -704,8 +709,10 @@ class Deepener:
             self._open(self._views()),
             key=lambda v: (-ledger_score(v.quality, v.rho_max, v.times_selected), v.id),
         )[: self.candidates_shown]
+        n = self.config.memory_children_per_parent
         out = []
         for v in views:
+            left = self.children_left(v.id)
             vetoes = set(self._vetoes(v.context))
             allowed = tuple(m for m in PRODUCIBLE_MOTIFS if self._allowed(v, m) and m not in vetoes)
             if not allowed:
@@ -718,6 +725,7 @@ class Deepener:
                     evidence_table(evidence(self.memory, v.context, self.config)),
                     allowed,
                     tuple(self.lineage(v.id)),
+                    None if left is None else min(n, left),
                 )
             )
         return out

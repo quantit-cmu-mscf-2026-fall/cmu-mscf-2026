@@ -19,10 +19,10 @@ from collections import Counter
 from dataclasses import replace
 
 import pytest
-from test_deepen import CONFIG, FakeScorer, ScriptedEditor
+from test_deepen import CONFIG, AgentClient, FakeScorer, ScriptedEditor, _decision
 
 from capstone.factors import store
-from capstone.factors.deepen import Deepener, FamiliesCapped
+from capstone.factors.deepen import DeepenAgent, Deepener, FamiliesCapped, decide_prompt
 from capstone.factors.tree import factor_id, parse
 
 # One seed per family (hypothesis): three families.
@@ -135,6 +135,31 @@ def test_a_capped_family_offers_no_candidates_to_the_agent(tmp_path, ledger):
     capped = next(f for f, n in d.children_by_family.items() if n >= CHILDREN)
     shown = {d.family(c.view.id) for c in d.candidates()}
     assert capped not in shown and len(shown) == 2
+
+
+def test_the_agent_is_asked_only_for_what_the_family_has_left(tmp_path, ledger):
+    # Cap 1, two children a round. The agent answers two edits, the second broken:
+    # before the fix it was asked for 2, its broken extra cost a repair call, and the
+    # extra was then dropped unrecorded.
+    d, _, names = deepener(tmp_path / "a.db", cap=1)
+    parent = FAMILY_SEEDS["h3"]
+    client = AgentClient(_decision(parent, "nesting", ["ts_mean(rank(close / open), 5)", "(("]))
+    d.agent = DeepenAgent(client, d.config, max_calls=10, usage=Counter())
+    assert {c.limit for c in d.candidates()} == {1}
+    outcomes = d.step()
+    prompt = client.calls[0]["messages"][0]["content"]
+    assert "at most 1 edit" in prompt
+    assert len(client.calls) == 1  # no repair spent on an edit the cap would drop
+    assert len(outcomes) == 1
+    assert d.children_by_family == Counter({d.family(factor_id(parse(parent))): 1})
+    assert names[d.family(factor_id(parse(parent)))] == "h3"
+
+
+def test_without_a_cap_the_agent_prompt_is_unchanged(tmp_path, ledger):
+    d, _, _ = deepener(tmp_path / "a.db")
+    assert {c.limit for c in d.candidates()} == {None}
+    capped, _, _ = deepener(tmp_path / "b.db", cap=ROUNDS * CHILDREN)
+    assert decide_prompt(capped.candidates(), CHILDREN) == decide_prompt(d.candidates(), CHILDREN)
 
 
 def test_a_bad_cap_is_refused(tmp_path):
