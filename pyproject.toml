@@ -13,14 +13,18 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0", "ruff==0.15.5"]  # pinned: an unpinned linter reds CI on its own schedule
+dev = [
+    "pytest>=7.0",
+    "ruff==0.15.5",  # pinned: an unpinned linter reds CI on its own schedule
+    "matplotlib>=3.7",  # capstone.pipeline.reference_report draws its figures
+]
 
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["capstone", "capstone.incubation"]
+packages = ["capstone", "capstone.incubation", "capstone.pipeline"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
