@@ -11,7 +11,8 @@ Claude Code plugin for the Quantit x CMU MSCF 2026 alpha-discovery and validatio
 /plugin install mscf-pipeline@cmu-mscf-2026
 ```
 
-For development: `claude --plugin-dir ./mscf-plugin`.
+For development: `claude --plugin-dir ./mscf-plugin`. The hook runs `python`, so it must be on
+`PATH`.
 
 ## Contents
 
@@ -24,11 +25,24 @@ For development: `claude --plugin-dir ./mscf-plugin`.
 | Skill | `null-calibration` | Null and power tests every new validation method ships with |
 | Skill | `research-pr` | Branch, checks, PR template with seeds and trial count, review and merge |
 | Skill | `paper-round` | Weekly paper one-pager, smallest experiment, report back |
+| Agent | `ship-checker` | Read-only pre-push check of a branch against the PR rules (title, size, template, failing-without-change test, safety scan) |
+| Hook | `hooks/guard.py` | Denies holdout dates in commands, force pushes, printing secrets, committing working data, editing the ledger; warns on holdout dates in code; reports the ledger count after experiment scripts |
 
 The skills only describe rules that are written down in `CLAUDE.md`, `CONTRIBUTING.md`,
 `docs/validation.md` and `docs/shared_data.md`; they add no policy of their own. For PR review
 use the repository's own `/review-pr` skill and `pr-reviewer` agent (`.claude/`, see
-`REVIEW.md`); this plugin does not duplicate them.
+`REVIEW.md`); this plugin does not duplicate them, and `ship-checker` only covers the author's
+side before a push.
+
+## Guard settings
+
+The guard never grants anything; it denies or warns. Two rules are off until you set them
+(environment variables, e.g. in your shell profile or `.claude/settings.local.json`):
+
+| Variable | Effect |
+|---|---|
+| `MSCF_GUARD_DENY_PATHS` | Path prefixes (separated by `;` on Windows, `:` elsewhere) that commands and edits may not touch, e.g. a second checkout you want left alone. Unset: nothing is denied, and this repository is never denied by name. |
+| `MSCF_GUARD_NOREPLY_REMOTE` | A substring of a remote URL. A `git push` there is denied if a commit it sends has an author or committer email that is not a `users.noreply.github.com` address. Unset: not checked. |
 
 ## Adding a team member's skill
 
@@ -38,5 +52,6 @@ that every skill has frontmatter and that every `capstone.<module>.<function>` i
 
 ## Tests
 
-`pytest -q tests/test_mscf_plugin_layout.py`: manifest and marketplace entry, frontmatter, and
-that every `capstone` function a skill names still exists.
+`pytest -q tests/test_mscf_plugin_layout.py tests/test_mscf_plugin_guard.py`: manifest,
+marketplace entry and hook wiring, frontmatter, that every `capstone` function a skill names
+still exists, and the guard's deny/allow cases.

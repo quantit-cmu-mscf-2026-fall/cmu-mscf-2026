@@ -10,7 +10,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 PLUGIN = ROOT / "mscf-plugin"
 SKILLS = sorted(PLUGIN.glob("skills/*/SKILL.md"))
-MARKDOWN = [*SKILLS, *PLUGIN.glob("skills/*/references/*.md"), PLUGIN / "README.md"]
+AGENTS = sorted(PLUGIN.glob("agents/*.md"))
+MARKDOWN = [*SKILLS, *AGENTS, *PLUGIN.glob("skills/*/references/*.md"), PLUGIN / "README.md"]
 
 
 def frontmatter(path: Path) -> dict[str, str]:
@@ -23,6 +24,12 @@ def frontmatter(path: Path) -> dict[str, str]:
 def test_manifest_and_marketplace_entry():
     plugin = json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
     assert plugin["name"] == "mscf-pipeline" and plugin["version"]
+    hooks = json.loads((PLUGIN / plugin["hooks"]).read_text(encoding="utf-8"))
+    commands = [
+        h["command"] for groups in hooks["hooks"].values() for g in groups for h in g["hooks"]
+    ]
+    assert commands and all("${CLAUDE_PLUGIN_ROOT}/hooks/guard.py" in c for c in commands)
+    assert (PLUGIN / "hooks" / "guard.py").is_file()
     market = json.loads((ROOT / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8"))
     (entry,) = [p for p in market["plugins"] if p["name"] == "mscf-pipeline"]
     assert (ROOT / entry["source"] / ".claude-plugin" / "plugin.json").is_file()
@@ -45,6 +52,18 @@ def test_skills_have_usable_frontmatter():
             r"Use (when|before)", meta["description"]
         )
         assert len(path.read_text(encoding="utf-8").splitlines()) < 500
+
+
+def test_agents_are_read_only_and_defer_review_to_the_repo_harness():
+    assert [p.stem for p in AGENTS] == ["ship-checker"]  # review is the repo's pr-reviewer
+    assert (ROOT / ".claude" / "agents" / "pr-reviewer.md").is_file()
+    for path in AGENTS:
+        meta = frontmatter(path)
+        body = path.read_text(encoding="utf-8")
+        assert meta["name"] == path.stem and body.count("<example>") >= 2
+        tools = {t.strip() for t in meta["tools"].split(",")}
+        assert tools == {"Read", "Grep", "Glob", "Bash"}
+        assert "/review-pr" in body and "REVIEW.md" in body
 
 
 ALIASES = {"sd": "shared_data", "ev": "evaluate"}
@@ -85,5 +104,5 @@ def test_skills_point_at_repository_files_that_exist():
 
 def test_the_plugin_carries_no_private_or_host_specific_text():
     banned = re.compile(r"caleb|ibkr|interactive brokers|OMP_NUM_THREADS|[A-Za-z]:\\[A-Za-z]", re.I)
-    for path in [*MARKDOWN, *PLUGIN.rglob("*.json")]:
+    for path in [*MARKDOWN, *PLUGIN.rglob("*.json"), PLUGIN / "hooks" / "guard.py"]:
         assert not banned.search(path.read_text(encoding="utf-8")), path
