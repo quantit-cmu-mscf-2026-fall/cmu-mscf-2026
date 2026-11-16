@@ -14,6 +14,7 @@ import math
 import platform
 import re
 import tomllib
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -30,7 +31,12 @@ from capstone.strategy.program_schedule import (
     session_date,
 )
 
-CONSTRUCTIONS = ("fixed_tails_v1",)
+CONSTRUCTIONS = (
+    "fixed_tails_v1",
+    "fixed_tails_complete_history_v2",
+    # v2 history plus data-property eligibility: same-day qualified quote and sizing price.
+    "fixed_tails_qualified_v3",
+)
 
 
 def implementation_digest():
@@ -126,15 +132,16 @@ class ProgramStrategySpec:
             raise ValueError("unsupported weighting; no proxy weighting is substituted")
         if not isinstance(self.schedule, ProgramSchedule):
             raise ValueError("schedule must be a ProgramSchedule")
-        if isinstance(self.schedule, CalendarWindowSchedule):
-            raise ValueError("calendar_window schedules need the complete-history constructions")
+        window = isinstance(self.schedule, CalendarWindowSchedule)
+        if window != (self.exit_rule == "calendar_window_exit"):
+            raise ValueError("calendar_window schedules require exactly calendar_window_exit")
         # The grammar has no constant score; tail one declares the whole eligible universe.
-        if self.tail == 1:
+        if self.tail == 1 and (not window or (self.side, self.direction) != ("long_only", "high")):
             raise ValueError("whole-universe tail one needs a long-only high calendar window")
         if (
             type(self.construction) is not str
             or self.construction not in CONSTRUCTIONS
-            or self.exit_rule != "membership_or_rebalance"
+            or self.exit_rule not in {"membership_or_rebalance", "calendar_window_exit"}
             or self.universe_rule != "point_in_time_members"
         ):
             raise ValueError("unsupported cohort, event, holding or exit construction")
@@ -236,6 +243,67 @@ def _universe(panel, at):
     return row.astype(bool).sort_index()
 
 
+def eligible_members(panel, at, *, need_cap, sizing_prices=None):
+    """Point-in-time members that can be held and traded at a formation decision.
+
+    Data properties only, never returns or the cost scenario, so every scenario
+    shares one membership: a qualified same-day half-spread (``panel.half_spread``,
+    finite and nonnegative), a finite positive sizing close and, when weighting
+    needs it, positive capitalization. ``sizing_prices`` (default
+    ``panel.sizing_prices``) are the raw closes the share planner sizes with at
+    ``at``; without them the panel close stands in. Returns ``(eligible, exclusions)``.
+    """
+    if sizing_prices is None:
+        sizing_prices = panel.sizing_prices
+    at = pd.Timestamp(at)
+    membership = _universe(panel, at)
+    names = membership.index[membership]
+    checks = [
+        ("half_spread", panel.half_spread, "missing_qualified_quote"),
+        (
+            ("close", panel.fields.get("close"), "nonpositive_sizing_price")
+            if sizing_prices is None
+            else ("sizing_close", sizing_prices, "nonpositive_sizing_price")
+        ),
+    ]
+    if need_cap:
+        checks.append(("cap", panel.fields.get("cap"), "nonpositive_formation_capitalization"))
+    exclusions = []
+    for name, frame, reason in checks:
+        if (
+            not isinstance(frame, pd.DataFrame)
+            or frame.index.has_duplicates
+            or frame.columns.has_duplicates
+            or at not in frame.index
+        ):
+            raise ValueError(f"formation eligibility requires distinct {name} observations")
+        values = frame.loc[at].reindex(names).astype(float).to_numpy()
+        with np.errstate(invalid="ignore"):
+            bad = ~np.isfinite(values) | (values < 0 if name == "half_spread" else values <= 0)
+        exclusions += [{"field": name, "name": int(n), "reason": reason} for n in names[bad]]
+    excluded = {row["name"] for row in exclusions}
+    return names[~names.isin(excluded)], exclusions
+
+
+def _feature_lookbacks(node, offset=0):
+    if isinstance(node, tree.Field_):
+        return {node.name: offset}
+    if isinstance(node, tree.Unary):
+        return _feature_lookbacks(node.operand, offset)
+    if isinstance(node, tree.BinOp):
+        children = (node.left, node.right)
+    elif isinstance(node, tree.Call):
+        children = (node.arg,) if node.arg2 is None else (node.arg, node.arg2)
+        offset += contract.lookback(node) - max(contract.lookback(child) for child in children)
+    else:
+        return {}
+    result = {}
+    for child in children:
+        for name, need in _feature_lookbacks(child, offset).items():
+            result[name] = max(result.get(name, 0), need)
+    return result
+
+
 def _inputs(spec, panel, formation, dates, names):
     need = contract.lookback(spec.tree)
     at = dates.get_loc(formation)
@@ -254,9 +322,14 @@ def _inputs(spec, panel, formation, dates, names):
             raise ValueError("historical cross-sectional membership is unavailable")
         columns = historical.columns[historical.astype(bool).any(axis=0)].union(names).sort_values()
         historical = historical.reindex(columns=columns).astype(bool)
-    inputs = {}
+    inputs, exclusions, required_sessions = {}, [], {}
+    complete_history = spec.construction != "fixed_tails_v1"
+    feature_history = _feature_lookbacks(spec.tree) if complete_history else {}
     for name in spec.fields:
         required = window if name in tree.features_used(spec.tree) else window[-1:]
+        if complete_history:
+            required = window[-feature_history.get(name, 0) - 1 :]
+        required_sessions[name] = [str(day.date()) for day in required]
         if name not in panel.fields or panel.availability is None or name not in panel.availability:
             raise ValueError(f"qualified feature and availability history required for {name}")
         frame = panel.fields[name]
@@ -288,14 +361,66 @@ def _inputs(spec, panel, formation, dates, names):
             if isinstance(values, pd.DataFrame)
             else values.reindex(required)
         )
-        if (
+        if complete_history and isinstance(required_values, pd.DataFrame):
+            for instrument in names:
+                values_for_name = required_values[instrument]
+                reason = None
+                if values_for_name.isna().any():
+                    reason = "missing_required_history"
+                elif not np.isfinite(values_for_name.to_numpy()).all():
+                    reason = "nonfinite_required_history"
+                elif name == "cap" and spec.weighting == "capitalization":
+                    if values_for_name.loc[formation] <= 0:
+                        reason = "nonpositive_formation_capitalization"
+                if reason:
+                    exclusions.append({"field": name, "name": int(instrument), "reason": reason})
+        elif (
             name in tree.features_used(spec.tree)
             and not np.isfinite(required_values.to_numpy()).all()
         ):
             label = "capitalization" if name == "cap" else name
             raise ValueError(f"required {label} observations are missing or nonfinite")
         inputs[name] = values
-    return inputs, historical, names, None
+    if not complete_history:
+        return inputs, historical, names, None
+    qualified = spec.construction == "fixed_tails_qualified_v3"
+    if qualified:
+        _, rows = eligible_members(panel, formation, need_cap=spec.weighting == "capitalization")
+        seen = {(row["field"], row["name"]) for row in exclusions}
+        exclusions += [row for row in rows if (row["field"], row["name"]) not in seen]
+    excluded = {row["name"] for row in exclusions}
+    eligible = names[~names.isin(excluded)]
+    if historical is not None:
+        # Formation eligibility never rewrites membership in earlier cross sections.
+        historical.loc[formation, names] = names.isin(eligible)
+    evidence = {
+        "construction": spec.construction,
+        "program_id": spec.id,
+        "formation_session": str(formation.date()),
+        "formation_members": [int(value) for value in names],
+        "eligible_names": [int(value) for value in eligible],
+        "required_sessions": required_sessions,
+        "exclusions": exclusions,
+        "selection_basis": (
+            "finite_required_feature_history_positive_required_formation_cap_"
+            "qualified_same_day_quote_and_positive_sizing_price"
+            if qualified
+            else "finite_required_feature_history_and_positive_required_formation_cap"
+        ),
+        "returns_based_selection": False,
+    }
+    evidence["id"] = digest(evidence)
+    if len(eligible) < 2:
+        raise FormationEligibilityError("formation requires at least two eligible names", evidence)
+    return inputs, historical, eligible, evidence
+
+
+class FormationEligibilityError(ValueError):
+    """Retain the formation audit when eligible inputs cannot produce a valid book."""
+
+    def __init__(self, message, evidence):
+        super().__init__(message)
+        self.formation_eligibility = evidence
 
 
 def require_runtime_capabilities(spec):
@@ -333,14 +458,21 @@ def program_weights(spec, panel, as_of):
     if formations.empty:
         raise contract.InsufficientHistoryError("no completed construction formation")
     formation = formations[-1]
+    if spec.exit_rule == "calendar_window_exit":
+        if (spec.schedule.exits(dates, spec.anchor, at) >= formation).any():
+            # The window's exit decision and every session to the next entry are cash.
+            return pd.Series(
+                dtype=float, name="weight", index=pd.Index([], dtype="int64", name="permno")
+            )
     # B3: the formation book reads only inputs as of `formation`, never `at` or costs.
-    book = input_memo.panel_cached(
+    book, eligibility = input_memo.panel_cached(
         "formation",
         spec,
         panel,
         (str(formation),),
         lambda: _formation_book(spec, panel, formation, dates),
     )
+    eligibility = deepcopy(eligibility)
     held_sessions = dates[(dates >= formation) & (dates <= at)]
     membership = panel.universe
     if not held_sessions.isin(membership.index).all():
@@ -354,16 +486,18 @@ def program_weights(spec, panel, as_of):
     book.index.name = "permno"
     if not np.isfinite(book.to_numpy()).all() or book.abs().sum() > 1 + 1e-10:
         raise ValueError("constructed book violates fixed exposure")
+    if eligibility is not None:
+        book.attrs["formation_eligibility"] = {spec.id: eligibility}
     return book
 
 
 def _formation_book(spec, panel, formation, dates):
-    """The formation book before held-membership exits."""
+    """(book before held-membership exits, eligibility evidence) at one formation."""
     membership = _universe(panel, formation)
     names = membership.index[membership]
     if not len(names):
         raise ValueError("formation universe is empty")
-    inputs, historical, names, _ = _inputs(spec, panel, formation, dates, names)
+    inputs, historical, names, eligibility = _inputs(spec, panel, formation, dates, names)
     signal_inputs = {name: inputs[name] for name in tree.features_used(spec.tree)}
     score = (
         interpret.evaluate(
@@ -376,8 +510,16 @@ def _formation_book(spec, panel, formation, dates):
         .reindex(names)
     )
     if score.isna().any() or not np.isfinite(score.to_numpy()).all():
+        if eligibility is not None:
+            raise FormationEligibilityError(
+                "required formation scores are missing or nonfinite", eligibility
+            )
         raise ValueError("required formation scores are missing or nonfinite")
     if score.nunique() < 2 and spec.tail < 1:
+        if eligibility is not None:
+            raise FormationEligibilityError(
+                "formation has no cross-sectional score distinction", eligibility
+            )
         raise ValueError("formation has no cross-sectional score distinction")
     score = score.sort_index().sort_values(ascending=spec.direction == "high", kind="stable")
     count = max(1, math.floor(len(score) * spec.tail))
@@ -401,7 +543,7 @@ def _formation_book(spec, panel, formation, dates):
     book = leg(high)
     if spec.side == "long_short":
         book = book.mul(0.5).add(leg(low).mul(-0.5), fill_value=0)
-    return book
+    return book, eligibility
 
 
 def decision_due(spec, panel, as_of):
