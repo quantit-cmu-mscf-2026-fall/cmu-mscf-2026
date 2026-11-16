@@ -225,6 +225,26 @@ class TestThresholds:
         assert json.loads(json.dumps(d)) == d
         assert Thresholds(**d) == th
 
+    @pytest.mark.parametrize("equal", [1, 1.0, np.float64(1.0), np.float32(1.0), np.int64(1)])
+    def test_equal_thresholds_have_one_plain_data_form(self, equal):
+        th = Thresholds(alpha2=equal)
+        assert th == Thresholds()
+        d = thresholds_dict(th)
+        assert json.dumps(d, sort_keys=True) == json.dumps(
+            thresholds_dict(Thresholds()), sort_keys=True
+        )
+        assert all(type(d[k]) is float for k in ("q1", "alpha2", "d4", "q4"))
+
+    def test_numpy_thresholds_serialize(self):
+        d = thresholds_dict(Thresholds(q1=np.float32(0.25), q4=np.float64(0.5)))
+        assert json.loads(json.dumps(d)) == d
+
+    @pytest.mark.parametrize("bad", [True, np.bool_(True), "0.1", None, 0.1 + 0.2j, [0.1]])
+    @pytest.mark.parametrize("name", ["q1", "alpha2", "d4", "q4"])
+    def test_non_real_thresholds_are_rejected(self, name, bad):
+        with pytest.raises(TypeError, match=name):
+            Thresholds(**{name: bad})
+
 
 class TestRunningTheFunnel:
     def test_default_funnel_on_rho_p_values(self):
@@ -243,6 +263,27 @@ class TestRunningTheFunnel:
         )["reuse"]
         with pytest.raises(ValueError, match="bootstrap"):
             run_funnel(stats, Thresholds(stage1="bootstrap"))
+
+    def test_baseline_and_gates_alone_refuse_a_missing_family_p_value(self):
+        # BH over fewer families is more lenient for the rest, so the baseline
+        # would be compared to the funnel on a different family set (#98).
+        returns, family = _dated(drift={"h0": 0.003})
+        stats = family_statistics(
+            returns, family, search_end=SEARCH_END, holdout_start=HOLDOUT_START, n_boot=0
+        )["reuse"]
+        stats.loc["h3", "p1_rho"] = np.nan
+        truth = pd.Series(family.unique() == "h0", index=stats.index)
+        stats = stats.assign(truth=truth)
+        with pytest.raises(ValueError, match="p1_rho"):
+            run_funnel(stats, Thresholds())
+        with pytest.raises(ValueError, match="p1_rho"):
+            calibration.run_baseline(stats)
+        with pytest.raises(ValueError, match="p1_rho"):
+            calibration.gates_alone(stats, Thresholds())
+        with pytest.raises(ValueError, match="bootstrap"):
+            calibration.run_baseline(stats, stage1="bootstrap")
+        with pytest.raises(ValueError, match="stage1 must be"):
+            calibration.run_baseline(stats, stage1="lfdr")
 
     def test_stage4_without_holdout_statistics_raises(self):
         returns, family = _dated(drift={"h0": 0.003})
@@ -284,3 +325,93 @@ class TestRunningTheFunnel:
             returns.loc[:SEARCH_END], family, search_end=SEARCH_END, n_boot=0
         )["reuse"]
         assert funnel.screen(stats, Thresholds()).loc["h0"].all()
+
+
+def _score(returns, family, **kw):
+    return family_statistics(
+        returns, family, search_end=SEARCH_END, holdout_start=HOLDOUT_START, n_boot=0, **kw
+    )
+
+
+class TestVariantsWithoutPeriodData:
+    """An unchosen variant with no data in a period must not block scoring."""
+
+    def _unchosen(self, returns, family, stats):
+        carried = set(stats["reuse"]["best"].dropna()) | set(stats["split"]["best"].dropna())
+        return next(c for c in returns.columns if c not in carried)
+
+    def _base(self):
+        returns, family = _dated(drift={"h0": 0.003}, k=3)
+        stats = _score(returns, family, stage2_start="2003-01-01")
+        return returns, family, stats
+
+    def test_unchosen_variant_without_holdout_does_not_block(self):
+        returns, family, base = self._base()
+        victim = self._unchosen(returns, family, base)
+        blanked = returns.copy()
+        blanked.loc[blanked.index >= HOLDOUT_START, victim] = np.nan
+        got = _score(blanked, family, stage2_start="2003-01-01")
+        # The search period is untouched, so the whole result is unchanged.
+        for design in base:
+            pd.testing.assert_frame_equal(got[design], base[design])
+
+    def test_chosen_variant_without_holdout_is_refused_by_name(self):
+        returns, family, base = self._base()
+        chosen = base["reuse"]["best"].iloc[0]
+        blanked = returns.copy()
+        blanked.loc[blanked.index >= HOLDOUT_START, chosen] = np.nan
+        with pytest.raises(ValueError, match=f"{chosen}.*holdout"):
+            _score(blanked, family)
+
+    def test_holdout_statistics_refuses_a_chosen_variant_by_name(self):
+        returns, family, base = self._base()
+        chosen = base["reuse"]["best"]
+        holdout = returns.loc[HOLDOUT_START:].copy()
+        holdout[chosen.iloc[0]] = np.nan
+        with pytest.raises(ValueError, match=chosen.iloc[0]):
+            funnel.holdout_statistics(holdout, chosen)
+
+    @pytest.mark.parametrize("n_boot", [0, 199])
+    def test_variant_without_search_data_is_refused_by_name(self, n_boot):
+        returns, family, base = self._base()
+        victim = self._unchosen(returns, family, base)
+        blanked = returns.copy()
+        blanked.loc[blanked.index <= SEARCH_END, victim] = np.nan
+        with pytest.raises(ValueError, match=f"{victim}.*search period"):
+            family_statistics(
+                blanked, family, search_end=SEARCH_END, holdout_start=HOLDOUT_START, n_boot=n_boot
+            )
+
+    def test_period_shortfalls_counts_each_period(self):
+        returns, _ = _dated(n_families=1, k=2)
+        a = returns.iloc[:50].copy()
+        a.iloc[1:, 0] = np.nan
+        b = returns.iloc[50:100]
+        assert funnel.period_shortfalls({"search": a, "holdout": b}) == {"search": {"h0_v0": 1}}
+
+
+class TestDateContract:
+    """One date contract for the funnel and the intake in front of it."""
+
+    def test_duplicate_dates_are_refused(self):
+        returns, family = _dated()
+        dup = returns.iloc[list(range(len(returns))) + [10]].sort_index(kind="stable")
+        with pytest.raises(ValueError, match="unique"):
+            _score(dup, family)
+
+    def test_timezone_aware_dates_are_refused(self):
+        returns, family = _dated()
+        aware = returns.tz_localize("UTC")
+        with pytest.raises(ValueError, match="timezone"):
+            _score(aware, family)
+
+    def test_dates_with_a_time_of_day_are_refused(self):
+        # 16:00 on search_end would fall in the gap between the periods.
+        returns, family = _dated()
+        stamped = returns.copy()
+        stamped.index = stamped.index + pd.Timedelta(hours=16)
+        with pytest.raises(ValueError, match="normalised"):
+            _score(stamped, family)
+
+    def test_check_dates_accepts_a_clean_index(self):
+        funnel.check_dates(pd.bdate_range("2000-01-03", periods=5))
