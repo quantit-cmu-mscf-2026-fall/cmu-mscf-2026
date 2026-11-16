@@ -66,16 +66,16 @@ def test_promotion_requires_a_confirm_record_that_promotes(root):
     garbage = {"strategy_id": "momo", "confirm_state": {"nope": 1}}
     for bad in (None, {}, continuing, forged, garbage, promoting_record("someone-else")):
         with pytest.raises(ValueError, match="confirm"):
-            promote(root, "momo", confirm_record=bad, reviewer="cal", at=AT)
+            promote(root, "momo", confirm_record=bad, reviewer="reviewer-a", at=AT)
     assert path.read_bytes() == before and len(read_lifecycle(root)) == 1
-    entry = promote(root, "momo", confirm_record=record, reviewer="cal", at=AT)
+    entry = promote(root, "momo", confirm_record=record, reviewer="reviewer-a", at=AT)
     assert entry.role == "deploy" and entry.state == "active" and entry.enabled is False
     assert read_registry(root) == (entry,)
     event = read_lifecycle(root)[-1]
     assert event["field"] == "role" and (event["from"], event["to"]) == (INCUBATION_ONLY, "deploy")
     assert event["confirm_record"] == json.loads(canonical(record))  # the evidence is kept
     with pytest.raises(ValueError, match="incubation-only"):
-        promote(root, "momo", confirm_record=record, reviewer="cal", at=AT)
+        promote(root, "momo", confirm_record=record, reviewer="reviewer-a", at=AT)
     # a hand-restored role contradicts the promotion event
     path.write_bytes(path.read_bytes() + b'    role: "incubation-only"\n')
     with pytest.raises(ValueError, match="lifecycle"):
@@ -86,22 +86,26 @@ def test_promotion_leaves_enabled_alone_and_needs_an_active_entry(root):
     registered(root, role=INCUBATION_ONLY)
     path = root / REGISTRY_FILE
     path.write_bytes(path.read_bytes().replace(b"enabled: false", b"enabled: true"))
-    set_state(root, "momo", "suspended", reason="r", reviewer="cal", at=AT)
+    set_state(root, "momo", "suspended", reason="r", reviewer="reviewer-a", at=AT)
     with pytest.raises(ValueError, match="suspended"):
-        promote(root, "momo", confirm_record=promoting_record("momo"), reviewer="cal", at=AT)
-    set_state(root, "momo", "active", reason="r", reviewer="cal", at=AT)
-    entry = promote(root, "momo", confirm_record=promoting_record("momo"), reviewer="cal", at=AT)
+        promote(root, "momo", confirm_record=promoting_record("momo"), reviewer="reviewer-a", at=AT)
+    set_state(root, "momo", "active", reason="r", reviewer="reviewer-a", at=AT)
+    entry = promote(
+        root, "momo", confirm_record=promoting_record("momo"), reviewer="reviewer-a", at=AT
+    )
     assert entry.enabled is True and entry.role == "deploy"
     with pytest.raises(ValueError, match="reviewer and a timestamp"):
         promote(root, "momo", confirm_record=promoting_record("momo"), reviewer="", at=AT)
     registered(root, "plain")
     with pytest.raises(ValueError, match="only an incubation-only entry"):
-        promote(root, "plain", confirm_record=promoting_record("plain"), reviewer="cal", at=AT)
+        promote(
+            root, "plain", confirm_record=promoting_record("plain"), reviewer="reviewer-a", at=AT
+        )
 
 
 def test_a_role_event_is_checked_when_the_log_is_read(root):
     registered(root, role=INCUBATION_ONLY)
-    promote(root, "momo", confirm_record=promoting_record("momo"), reviewer="cal", at=AT)
+    promote(root, "momo", confirm_record=promoting_record("momo"), reviewer="reviewer-a", at=AT)
     entries = read_registry(root)
     genesis, role_line = lines(root)
     again = json.loads(role_line)
@@ -129,7 +133,7 @@ def test_a_deploy_entry_cannot_have_a_role_event(root):
         "from": INCUBATION_ONLY,
         "to": "deploy",
         "reason": "confirmed",
-        "reviewer": "cal",
+        "reviewer": "reviewer-a",
         "at": AT,
         "confirm_record": promoting_record("momo"),
         "prev_hash": digest(json.loads(genesis)),
