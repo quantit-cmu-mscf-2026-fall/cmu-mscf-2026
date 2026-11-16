@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+import types
 from dataclasses import replace
 from pathlib import Path
 
@@ -98,6 +99,23 @@ def test_a_fresh_simulation_needs_an_explicit_market_for_the_planned_session(bun
 
 
 def test_a_bundle_that_is_not_synthetic_is_refused_and_nothing_is_attached(tmp_path):
+    panel = reference_panel()
+    current = freeze(tmp_path / "bundle", replace(panel, data_version="vendor-current-fixture"))
+    plan = build_plan(current)
+    write_plan(plan, tmp_path / "plan.json")
+    with pytest.raises(ValueError, match="explicitly synthetic input bundle"):
+        offline.simulate(current, tmp_path / "plan.json", tmp_path / "sim", market=market_for(plan))
+    assert not (tmp_path / "sim" / "execution.sqlite").exists()
+
+
+def test_a_non_synthetic_bundle_is_refused_when_the_autopilot_package_lacks_the_receipt(
+    tmp_path, monkeypatch
+):
+    # With the autopilot package installed but no live receipt module, the lazy
+    # import raises a plain ImportError, not ModuleNotFoundError; it must still refuse.
+    monkeypatch.setitem(
+        sys.modules, "capstone.pipeline.autopilot", types.ModuleType("capstone.pipeline.autopilot")
+    )
     panel = reference_panel()
     current = freeze(tmp_path / "bundle", replace(panel, data_version="vendor-current-fixture"))
     plan = build_plan(current)
