@@ -180,12 +180,12 @@ def test_a_stop_halts_the_run_until_a_person_clears_it(tmp_path):
     assert again.ran == [] and again.exit_code == 2 and len(calls) == 1
     assert again.line().startswith("autopilot: stopped a: spend_stop: 301 > 300 (cleared by:")
     with pytest.raises(ValueError, match="not stopped"):
-        runner.clear(config, toys, "later", reviewer="cal", reason="x")
+        runner.clear(config, toys, "later", reviewer="reviewer-a", reason="x")
     with pytest.raises(ValueError, match="reviewer and a reason"):
         runner.clear(config, toys, "a", reviewer=" ", reason="x")
-    runner.clear(config, toys, "a", reviewer="cal", reason="new authorization")
+    runner.clear(config, toys, "a", reviewer="reviewer-a", reason="new authorization")
     cleared = Journal(config.run_root).events()[-1]
-    assert (cleared["kind"], cleared["reviewer"]) == ("stop_cleared", "cal")
+    assert (cleared["kind"], cleared["reviewer"]) == ("stop_cleared", "reviewer-a")
     assert cleared["was"]["reason"]["code"] == "spend_stop"
     assert runner.tick(config, toys).exit_code == 0 and len(calls) == 2
 
