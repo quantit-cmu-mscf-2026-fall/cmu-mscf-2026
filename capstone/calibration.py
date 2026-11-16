@@ -32,16 +32,30 @@ runs the grid.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
 
 from capstone import funnel
-from capstone.evaluate import benjamini_hochberg, deflated_sharpe_ratio
+from capstone.evaluate import benjamini_hochberg
+from capstone.funnel import STAGE1_METHODS, Thresholds, _final_gate, run_funnel, stage1_pvalues
 from capstone.synth import make_return_matrix
 
-STAGE1_METHODS = ("independent", "rho", "bootstrap")
+__all__ = [
+    "STAGE1_METHODS",
+    "FamilySet",
+    "Thresholds",
+    "family_statistics",
+    "gate_report",
+    "gates_alone",
+    "make_family_set",
+    "run_baseline",
+    "run_funnel",
+    "run_naive_stack",
+    "score",
+]
 
 # ---------------------------------------------------------------------------
 # Test signals with known truth
@@ -75,7 +89,7 @@ class FamilySet:
 
 def make_family_set(
     n_families: int,
-    k: int,
+    k: int | Sequence[int],
     share_real: float,
     sharpe_real: float,
     *,
@@ -87,7 +101,9 @@ def make_family_set(
 ) -> FamilySet:
     """Families of `k` variants of one idea, with realistic defects.
 
-    Each variant is sqrt(within_rho) x its family's series + sqrt(1 - within_rho)
+    `k` is every family's variant count, or a sequence of `n_families` counts
+    (families in order); a scalar `k` and `[k] * n_families` give the same
+    data. Each variant is sqrt(within_rho) x its family's series + sqrt(1 - within_rho)
     x its own, both from `synth.make_return_matrix` with the same `defects`
     (`rho`, `ar1`, `t_df`, `garch`, `vol`), so variants of one idea are
     near-copies and every defect carries through. A real family's series is
@@ -96,6 +112,9 @@ def make_family_set(
     """
     if not 0.0 < within_rho <= 1.0:
         raise ValueError("within_rho must be in (0, 1]")
+    counts = np.full(n_families, k) if np.ndim(k) == 0 else np.asarray(k)
+    if len(counts) != n_families or (counts < 1).any():
+        raise ValueError(f"k must be >= 1 for each of the {n_families} families, got {k!r}")
     n_obs = n_search + n_holdout
     n_real = int(round(share_real * n_families))
     base = make_return_matrix(
@@ -107,17 +126,17 @@ def make_family_set(
         **defects,
     )
     own = make_return_matrix(
-        n_obs=n_obs, n_candidates=n_families * k, n_real=0, seed=seed + 1_000_003, **defects
+        n_obs=n_obs, n_candidates=int(counts.sum()), n_real=0, seed=seed + 1_000_003, **defects
     )
-    b = base.returns.to_numpy()
-    e = own.returns.to_numpy().reshape(n_obs, n_families, k)
-    x = np.sqrt(within_rho) * b[:, :, None] + np.sqrt(1.0 - within_rho) * e
+    # Variant columns family by family: column j of family f is own column
+    # sum(counts[:f]) + j, as the scalar case's reshape laid them out.
+    which = np.repeat(np.arange(n_families), counts)
+    b = base.returns.to_numpy()[:, which]
+    x = np.sqrt(within_rho) * b + np.sqrt(1.0 - within_rho) * own.returns.to_numpy()
     hypotheses = list(base.returns.columns)
-    columns = [f"{h}_v{j}" for h in hypotheses for j in range(k)]
-    returns = pd.DataFrame(
-        x.reshape(n_obs, n_families * k), index=base.returns.index, columns=columns
-    )
-    family = pd.Series(np.repeat(hypotheses, k), index=columns, name="hypothesis")
+    columns = [f"{h}_v{j}" for h, n in zip(hypotheses, counts, strict=True) for j in range(n)]
+    returns = pd.DataFrame(x, index=base.returns.index, columns=columns)
+    family = pd.Series(np.repeat(hypotheses, counts), index=columns, name="hypothesis")
     return FamilySet(returns, family, base.truth.rename("truth"), n_search, n_holdout)
 
 
@@ -185,94 +204,20 @@ def family_statistics(
 
 
 # ---------------------------------------------------------------------------
-# The three pipelines, as filters over the summary
+# The three pipelines, as filters over the summary (the funnel's Thresholds,
+# stages and final gate are capstone.funnel's)
 # ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class Thresholds:
-    """One threshold setting for the funnel.
-
-    The defaults are the best set from the method's synthetic test runs
-    (q1 = 0.10, no stage-2 gate, BH at q4 = 0.30; formula p-values at stage
-    1): a starting point, not registered thresholds. The values used on real
-    candidates come from running the calibration for the real generator and
-    are registered in `docs/validation/framework.md`.
-
-    q1: BH level across families at stage 1. alpha2: one-sided p cut-off at
-    stage 2; 1.0 means no gate. final: the stage-4 gate, "bh" (BH at q4
-    across the survivors' one-sided holdout p-values; the chosen gate) or "dsr"
-    (deflated Sharpe >= d4). final_trials: for "dsr", the trial count it
-    charges, "survivors" (only the candidates taken to the holdout, which is
-    independent data) or "searched" (every variant tried; calibration found
-    it cuts power to about a sixth).
-    """
-
-    q1: float = 0.10
-    alpha2: float = 1.0
-    final: str = "bh"
-    d4: float = 0.95
-    q4: float = 0.30
-    final_trials: str = "survivors"
-
-
-def _final_gate(
-    stats: pd.DataFrame, alive: pd.Series, th: Thresholds, prefix: str = "ho_"
-) -> pd.Series:
-    """Stage 4 on the holdout, for the candidates still alive.
-
-    `prefix` picks whose holdout statistics to read: "ho_" for the variant the
-    funnel carried forward, "nv_" for the naive stack's.
-    """
-    if th.final not in ("dsr", "bh"):
-        raise ValueError("final must be 'dsr' or 'bh'")
-    if th.final_trials not in ("searched", "survivors"):
-        raise ValueError("final_trials must be 'searched' or 'survivors'")
-    n_alive = int(alive.sum())
-    if n_alive == 0:
-        return alive.copy()
-    if th.final == "bh":
-        passed = benjamini_hochberg(stats.loc[alive, f"{prefix}p"], th.q4)
-        return passed.reindex(stats.index, fill_value=False)
-    n_trials = stats.attrs["n_variants"] if th.final_trials == "searched" else n_alive
-    d4 = th.d4
-    passed = pd.Series(False, index=stats.index)
-    for h in alive[alive].index:
-        r = stats.loc[h]
-        dsr = deflated_sharpe_ratio(
-            r[f"{prefix}sharpe"],
-            n_trials,
-            int(r[f"{prefix}n_obs"]),
-            r[f"{prefix}skew"],
-            r[f"{prefix}kurtosis"],
-            variance=r[f"{prefix}variance"],
-        )
-        passed[h] = dsr >= d4
-    return passed
-
-
-def run_funnel(stats: pd.DataFrame, th: Thresholds, *, stage1: str = "rho") -> pd.DataFrame:
-    """The staged funnel. Returns per-hypothesis pass flags for each stage.
-
-    `stage3` is a placeholder: it passes everything and is reported as not
-    measured until the spanning test exists, so it can never look good by
-    default.
-    """
-    if stage1 not in STAGE1_METHODS:
-        raise ValueError(f"stage1 must be one of {STAGE1_METHODS}")
-    s1 = benjamini_hochberg(stats[f"p1_{stage1}"], th.q1)
-    s2 = s1 & (stats["p2"] <= th.alpha2)
-    s3 = s2.copy()
-    s4 = s3 & _final_gate(stats, s3, th)
-    return pd.DataFrame({"stage1": s1, "stage2": s2, "stage3": s3, "stage4": s4})
 
 
 def run_baseline(stats: pd.DataFrame, *, q: float = 0.10, stage1: str = "rho") -> pd.Series:
     """BH at `q` on each family's search-adjusted p-value (#50, Q5).
 
     Pass "reuse" statistics, so the p-values cover the whole search period.
+    Reads the p-values through `funnel.stage1_pvalues`, so a missing one
+    raises here as it does in the funnel, and the two never run over
+    different family sets.
     """
-    return benjamini_hochberg(stats[f"p1_{stage1}"], q).rename("accepted")
+    return benjamini_hochberg(stage1_pvalues(stats, stage1), q).rename("accepted")
 
 
 def run_naive_stack(stats: pd.DataFrame, th: Thresholds) -> pd.Series:
@@ -350,7 +295,7 @@ def gates_alone(stats: pd.DataFrame, th: Thresholds, *, stage1: str = "rho") -> 
     everyone = pd.Series(True, index=stats.index)
     alone = pd.DataFrame(
         {
-            "stage1": benjamini_hochberg(stats[f"p1_{stage1}"], th.q1),
+            "stage1": benjamini_hochberg(stage1_pvalues(stats, stage1), th.q1),
             "stage2": stats["p2"] <= th.alpha2,
             "stage4": _final_gate(stats, everyone, th),
         }
