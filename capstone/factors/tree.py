@@ -288,14 +288,16 @@ def parse(expression: str) -> Node:
     parser = _Parser(tokens)
     try:
         node = parser.expr()
+        if parser.peek() is not None:
+            raise ParseError(f"trailing input from token {parser.peek()[1]!r}")
+        # The checks below walk the tree recursively, so a long flat expression
+        # (a left-leaning chain thousands of nodes deep) must be caught here too.
+        if node_count(node) > MAX_EXPRESSION_NODES:
+            raise ParseError(f"expression exceeds {MAX_EXPRESSION_NODES} nodes")
+        if not features_used(node):
+            raise ParseError("expression references no market field")
     except RecursionError:
         raise ParseError("expression is nested too deeply") from None
-    if parser.peek() is not None:
-        raise ParseError(f"trailing input from token {parser.peek()[1]!r}")
-    if node_count(node) > MAX_EXPRESSION_NODES:
-        raise ParseError(f"expression exceeds {MAX_EXPRESSION_NODES} nodes")
-    if not features_used(node):
-        raise ParseError("expression references no market field")
     return node
 
 
@@ -338,19 +340,60 @@ def _chain(node: Node, op: str) -> list[Node]:
     return [node]
 
 
+def _strip_negation(node: Node) -> tuple[bool, Node]:
+    """(negated, rest): `-x`, `0 - x` and a negative constant are one negation of `x`."""
+    negated = False
+    while True:
+        if isinstance(node, Unary):
+            negated, node = not negated, node.operand
+        elif isinstance(node, BinOp) and node.op == "-" and node.left == Const(0.0):
+            negated, node = not negated, node.right
+        elif isinstance(node, Const) and node.value < 0:
+            return not negated, Const(-node.value)
+        else:
+            return negated, node
+
+
+def _signed_key(node: Node, keep_parameters: bool) -> str:
+    """Key with every negation hoisted to the front: `-1 * x`, `x * -1`, `-(x)` and
+    `0 - x` are the same factor, and a product's sign is the parity of its negations."""
+    negated, node = _strip_negation(node)
+    if isinstance(node, BinOp) and node.op == "*":
+        factors: list[Node] = []
+        pending = [node]
+        while pending:  # flatten the product through any negations inside it
+            flipped, part = _strip_negation(pending.pop())
+            negated ^= flipped
+            if isinstance(part, BinOp) and part.op == "*":
+                pending += [part.right, part.left]
+            else:
+                factors.append(part)
+        kept = [f for f in factors if f != Const(1.0)] or factors[:1]  # 1 * x is x
+        if len(kept) > 1:
+            terms = sorted(_key(f, keep_parameters) for f in kept)
+            body = f"(* {' '.join(terms)})"
+        else:
+            body = _key(kept[0], keep_parameters)
+    else:
+        body = _key(node, keep_parameters)
+    return f"(neg {body})" if negated else body
+
+
 def _key(node: Node, keep_parameters: bool) -> str:
+    negated, stripped = _strip_negation(node)
+    if negated or (isinstance(node, BinOp) and node.op == "*"):
+        return _signed_key(node, keep_parameters)
+    node = stripped
     if isinstance(node, Call) and node.func == "shift":
         node = _fold_shifts(node)
     if isinstance(node, Field_):
         return f"F:{node.name}"
     if isinstance(node, Const):
         return f"C:{node.value!r}" if keep_parameters else "C"
-    if isinstance(node, Unary):
-        return f"(neg {_key(node.operand, keep_parameters)})"
     if isinstance(node, BinOp):
-        if node.op in "+*":  # a + b + c in any order and grouping is one factor
-            terms = sorted(_key(t, keep_parameters) for t in _chain(node, node.op))
-            return f"({node.op} {' '.join(terms)})"
+        if node.op == "+":  # a + b + c in any order and grouping is one factor
+            terms = sorted(_key(t, keep_parameters) for t in _chain(node, "+"))
+            return f"(+ {' '.join(terms)})"
         left, right = _key(node.left, keep_parameters), _key(node.right, keep_parameters)
         return f"({node.op} {left} {right})"
     if isinstance(node, Call):
@@ -366,8 +409,10 @@ def _key(node: Node, keep_parameters: bool) -> str:
 
 def identity_key(node: Node) -> str:
     """Same factor, same key: windows and constants kept; the order and grouping of
-    `+` and `*` operands, the argument order of ts_corr and ts_cov, and nested shifts
-    are ignored."""
+    `+` and `*` operands, the argument order of ts_corr and ts_cov, nested shifts and
+    the spelling of a negation (`-1 * x`, `x * -1`, `-(x)`, `0 - x`) are ignored.
+    Only the order is canonicalised: `close / 2` and `close * 0.5` are different
+    factors."""
     return _key(node, keep_parameters=True)
 
 
