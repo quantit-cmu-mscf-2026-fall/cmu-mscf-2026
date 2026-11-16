@@ -172,12 +172,9 @@ def _alternate(spec, panel, as_of):
 
 
 def fundamental_legs(spec, panel, formation):
-    # The public Panel carries no accounting or company-identity frames; a caller attaches them.
-    fundamentals = getattr(panel, "fundamentals", None)
-    company_ids = getattr(panel, "company", None)
-    if fundamentals is None or company_ids is None or panel.sic is None:
+    if panel.fundamentals is None or panel.company is None or panel.sic is None:
         raise ValueError("qualified accounting vintages, company identities and SIC are required")
-    fund = fundamentals.copy()
+    fund = panel.fundamentals.copy()
     needed = {
         "permco",
         "datadate",
@@ -207,7 +204,7 @@ def fundamental_legs(spec, panel, formation):
         .set_index("permco")
     )
     cap = features.field(panel, "cap", formation)
-    company = company_ids.loc[formation]
+    company = panel.company.loc[formation]
     eligible = panel.universe.loc[formation].fillna(False) & panel.sic.loc[formation].notna()
     eligible &= ~panel.sic.loc[formation].between(6000, 6999)
     valid = pd.DataFrame({"permco": company, "cap": cap.loc[formation]})
@@ -219,7 +216,7 @@ def fundamental_legs(spec, panel, formation):
         if len(december) != 1:
             raise ValueError("December market equity is required")
         at = december[0]
-        denominator = cap.loc[at].groupby(company_ids.loc[at]).sum(min_count=1)
+        denominator = cap.loc[at].groupby(panel.company.loc[at]).sum(min_count=1)
         score = fund.book.where(fund.book > 0) / denominator.where(denominator > 0)
     else:
         score = (fund.revenue - fund.cogs) / fund.assets.where(fund.assets > 0)

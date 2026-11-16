@@ -45,7 +45,7 @@ from __future__ import annotations
 import math
 import sqlite3
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, get_args
 
 import numpy as np
@@ -104,6 +104,13 @@ class Panel:
     data_version: str = ""
     calendar: pd.DatetimeIndex | None = None
     availability: dict[str, pd.Series] | None = None
+    # Optional inputs the research constructions read when a caller attaches them.
+    company: pd.DataFrame | None = None  # permco by date, for company-level signals
+    fundamentals: pd.DataFrame | None = None  # accounting vintages with their publication dates
+    # Raw closes a share planner sizes with; bound by a replay for formation eligibility.
+    sizing_prices: pd.DataFrame | None = field(default=None, repr=False, compare=False)
+    # How a panel past the discovery period was authorized; None for every discovery panel.
+    provenance: object | None = field(default=None, repr=False, compare=False)
 
 
 def _check_dates(dates: pd.Index) -> None:
