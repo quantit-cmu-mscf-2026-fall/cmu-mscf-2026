@@ -7,10 +7,12 @@ Inventory arguments are supplied by the trusted caller, separately from claim pa
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass, replace
 
 from capstone.factors.idea_contracts import CLAIM_KINDS, IdeaClaimV2, assess_claim
 from capstone.factors.research_contracts import AssignedBrief, canonical, digest
+from capstone.factors.research_records import load_artifact, put_artifact
 
 
 def _names(values):
@@ -97,6 +99,47 @@ def _scope(controller, entry):
     )
 
 
+def reserve_idea(controller, packet):
+    packet, _ = _entry(controller, packet)
+    return controller.reserve(packet)
+
+
+def idea_binding(controller, packet):
+    """Load exact saved identities and independent status axes without reassessment."""
+    packet, _ = _entry(controller, packet)
+    key = controller._latest(packet, "idea_binding_id")
+    binding = load_artifact(controller.db, key, kind="idea_binding_v1")
+    return {
+        **binding,
+        "binding_id": key,
+        "assessment": load_artifact(
+            controller.db, binding["assessment_record_id"], kind="idea_assessment_v1"
+        ),
+    }
+
+
+def assess_idea(
+    controller,
+    packet,
+    claim,
+    *,
+    archive,
+    reviewed_methods,
+    qualified_inputs=(),
+    input_inventory_id=None,
+):
+    """Record quote integrity/specification/data axes; never authorize execution."""
+    return _record_assessment(
+        controller,
+        packet,
+        claim,
+        archive=archive,
+        reviewed_methods=reviewed_methods,
+        qualified_inputs=qualified_inputs,
+        input_inventory_id=input_inventory_id,
+    )
+
+
 def assess_entry_claim(
     controller,
     entry,
@@ -131,3 +174,69 @@ def assess_entry_claim(
         input_inventory_id=input_inventory_id,
     )
     return effective, assessment
+
+
+def _record_assessment(
+    controller,
+    packet,
+    claim,
+    *,
+    archive,
+    reviewed_methods,
+    qualified_inputs=(),
+    input_inventory_id=None,
+    completing_attempt=False,
+    in_transaction=False,
+):
+    packet, entry = _entry(controller, packet)
+    effective, assessment = assess_entry_claim(
+        controller,
+        entry,
+        claim,
+        archive=archive,
+        reviewed_methods=reviewed_methods,
+        qualified_inputs=qualified_inputs,
+        input_inventory_id=input_inventory_id,
+    )
+    with nullcontext() if in_transaction else controller.transaction():
+        phase = controller.state(packet)
+        controller._require(
+            packet, "assigned", "idea_assessed", "idea_repair_requested", "idea_repair_exhausted"
+        )
+        try:
+            previous = idea_binding(controller, packet)
+        except ValueError as exc:
+            if phase not in ("assigned", "idea_repair_requested"):
+                raise ValueError("saved idea binding is missing or invalid") from exc
+            previous = None
+        changed = previous is not None and previous["declared_claim_id"] != claim.identity
+        if changed and (phase != "idea_repair_requested" or not completing_attempt):
+            raise ValueError("changed claim requires a counted controller repair")
+        if previous is None and phase != "assigned" and not completing_attempt:
+            raise ValueError("a response must complete the pending attempt before assessment")
+        declared_id = put_artifact(controller.db, "idea_claim_v2", asdict(claim))
+        claim_id = put_artifact(controller.db, "idea_claim_v2", asdict(effective))
+        methods_id = put_artifact(
+            controller.db, "reviewed_source_inventory_v1", asdict(reviewed_methods)
+        )
+        assessment_id = put_artifact(controller.db, "idea_assessment_v1", asdict(assessment))
+        binding = {
+            "packet_id": packet,
+            "budget_scope_id": assessment.budget_scope_id,
+            "declared_claim_id": claim.identity,
+            "claim_id": effective.identity,
+            "declared_claim_record_id": declared_id,
+            "claim_record_id": claim_id,
+            "methods_inventory_record_id": methods_id,
+            "assessment_record_id": assessment_id,
+        }
+        binding_id = put_artifact(controller.db, "idea_binding_v1", binding)
+        if previous is None or previous["binding_id"] != binding_id:
+            next_phase = "idea_assessed" if phase == "assigned" else phase
+            controller._event(
+                packet,
+                next_phase,
+                "separate trusted assessment axes retained",
+                {"idea_binding_id": binding_id},
+            )
+    return idea_binding(controller, packet)
