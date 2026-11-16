@@ -228,6 +228,11 @@ def load_spec(path: Path) -> StrategySpec:
         from capstone.strategy.diversified import DiversifiedStrategySpec
 
         return DiversifiedStrategySpec.from_toml(text)
+    if schema == 2:
+        from capstone.strategy.recorded import load_compatible_spec
+        from capstone.strategy.reference import ReferenceStrategySpec
+
+        return load_compatible_spec(ReferenceStrategySpec, text)
     return StrategySpec.from_toml(text)
 
 
@@ -313,6 +318,19 @@ def _target_weights(spec: StrategySpec, panel: Panel, as_of) -> pd.Series:
         return compiled_weights(spec, panel, as_of)
     if isinstance(spec, DiversifiedStrategySpec):
         return diversified_weights(spec, panel, as_of)
+    from capstone.strategy.reference import (
+        BenchmarkSpec,
+        ReferenceStrategySpec,
+        benchmark_target,
+        reference_weights,
+    )
+
+    if isinstance(spec, BenchmarkSpec):
+        return benchmark_target(spec, panel, as_of)
+    if isinstance(spec, ReferenceStrategySpec):
+        if panel.calendar is None:
+            raise ValueError("reference strategies require a frozen exchange-session calendar")
+        return reference_weights(spec, panel, as_of, panel.calendar)
     dates = pd.DatetimeIndex(panel.universe.index)
     as_of = pd.Timestamp(as_of)
     anchor = pd.Timestamp(spec.anchor)
