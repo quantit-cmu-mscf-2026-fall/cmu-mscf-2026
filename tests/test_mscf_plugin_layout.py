@@ -1,4 +1,4 @@
-"""The mscf-pipeline plugin (mscf-plugin/) is well formed and its skills describe code that exists."""
+"""The mscf-pipeline plugin (mscf-plugin/) is well formed; its skills describe real code."""
 
 from __future__ import annotations
 
