@@ -4,11 +4,14 @@
 
 1. alert (`alert`): `<run>/ALERT.json` / `.md` for every new STOP (and blocker, unless
    `[alert] on_blocked = false`), then the notifier;
-2. warnings (`early_warnings`): the run's typed early warnings, each sent once;
+2. warnings (`early_warnings`): the run's typed early warnings, deduplicated after
+   acknowledgement;
 3. status (`status`): `<run>/autopilot/ops/status.json` / `.md`.
 
-Each step is idempotent and resumable after a kill (its files are replaced atomically and
-its progress is recorded before it moves on); what goes wrong is a typed problem in
+File updates are atomic and resumable after a kill. A warning callback that completes
+before its acknowledgement is saved can be retried, so notifier callbacks must handle
+warning keys idempotently; notification delivery is not exactly once. What goes wrong
+is a typed problem in
 `report.problems` (`"stage": null`, codes in `common.REASONS`), never a traceback.
 
 The notifier is `module:function` named in the config (or injected as
@@ -32,7 +35,7 @@ SECTIONS = {
 
 def after_tick(ctx, report):
     alert.run(ctx, report)
-    early_warnings.deliver(ctx, report)  # typed early warnings, each sent once
+    early_warnings.deliver(ctx, report)  # retries until acknowledgement is persisted
     try:
         status.write(ctx.config, list(report.states), journal=ctx.journal)
     except Exception as error:

@@ -15,8 +15,11 @@ the pair to record in the `params` of every `capstone.runlog.log_run` call, so t
 shows the budget a run was allowed to spend.
 
 The other runs are discovered, not listed: every folder directly in `[spend] runs_dir`
-(except this run and a `<run>-verify` scratch copy of an autopilot run), plus every
-`[spend] accounting_roots` entry (runs kept elsewhere).
+(except this run), plus every `[spend] accounting_roots` entry (runs kept elsewhere).
+Folder names do not establish that a root is only a copy: a `<run>-verify` name counts
+like any other root. Keep verification scratch output outside the accounted roots;
+without authoritative copy provenance, counting it conservatively is safer than
+omitting an independent run's reservations.
 A run root commits the larger of the `outbound_reservations` in every
 `request-accounting.json` under it and the scopes of its own `spend-guard.json`. A root
 with neither is refused, never counted as zero, unless it is an autopilot run that has
@@ -54,7 +57,6 @@ ACCOUNTING = "request-accounting.json"
 GUARD = ("autopilot", "spend-guard.json")
 REGISTRATION = ("autopilot", "registration.json")
 AUTOPILOT_STATE = "AUTOPILOT.json"  # journal.STATE
-VERIFY = "-verify"  # default scratch folder of a verification copy
 FROZEN = ("run_ceiling", "global_ceiling")
 LOCK = ".spend-guard.lock"  # a file in `runs_dir`: never a run root (only folders are)
 LOCK_WAIT = 60.0  # seconds; the section is a folder scan and one small write
@@ -132,13 +134,7 @@ def other_runs(ctx):
         runs_dir = Path(policy["runs_dir"])
         if not runs_dir.is_dir():
             raise FileNotFoundError(f"[spend] runs_dir {runs_dir} is not a folder")
-        folders = sorted(p for p in runs_dir.iterdir() if p.is_dir())
-        runs = {p.name for p in folders if (p / AUTOPILOT_STATE).is_file()}
-        # `<run>-verify` beside an autopilot run is a verification scratch
-        # (copies of that run), not a run of its own
-        found += [
-            p for p in folders if not (p.name.endswith(VERIFY) and p.name[: -len(VERIFY)] in runs)
-        ]
+        found += sorted(p for p in runs_dir.iterdir() if p.is_dir())
     found += [base / entry for entry in policy["accounting_roots"]]
     this, out = ctx.run_root.resolve(), []
     for path in (p.resolve() for p in found):
