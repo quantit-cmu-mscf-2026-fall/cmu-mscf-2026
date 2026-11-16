@@ -25,6 +25,7 @@ same functions, so calibration and the gate share one code path.
 
 from __future__ import annotations
 
+import numbers
 from dataclasses import asdict, dataclass, fields
 from typing import Literal, get_args
 
@@ -69,6 +70,9 @@ class Thresholds:
     candidates come from running the calibration for the real generator and
     are registered in `docs/validation/framework.md`.
 
+    The numeric fields take real numbers only (not bool) and are stored as
+    floats, so equal settings have one `thresholds_dict`.
+
     q1: BH level across families at stage 1. stage1: which family p-value
     stage 1 reads ("rho", the formula with within-family correlation;
     "independent"; or "bootstrap", the family-max bootstrap). alpha2:
@@ -95,12 +99,22 @@ class Thresholds:
             raise ValueError(f"final must be one of {_FINAL_GATES}")
         if self.final_trials not in _FINAL_TRIALS:
             raise ValueError(f"final_trials must be one of {_FINAL_TRIALS}")
+        # One plain-data form per value: equal settings must serialize, and so
+        # hash, alike. A bool is not a threshold (True == 1.0), and a NumPy
+        # float is stored as a built-in float so json can write it.
+        for name in _NUMERIC_FIELDS:
+            value = getattr(self, name)
+            if isinstance(value, bool | np.bool_) or not isinstance(value, numbers.Real):
+                raise TypeError(f"{name} must be a real number, not {type(value).__name__}")
+            object.__setattr__(self, name, float(value))
         for name in ("q1", "q4", "d4"):
             if not 0.0 < getattr(self, name) < 1.0:
                 raise ValueError(f"{name} must be in (0, 1)")
         if not 0.0 < self.alpha2 <= 1.0:
             raise ValueError("alpha2 must be in (0, 1]; 1.0 means no stage-2 gate")
 
+
+_NUMERIC_FIELDS = ("q1", "alpha2", "d4", "q4")
 
 # The fields a registered setting always carries. A field added later is
 # written only when it differs from its default (`thresholds_dict`), so a
