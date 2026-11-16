@@ -1,0 +1,30 @@
+# Calibration of learned memory search's veto and pool cap
+# (research/memory_calibration.py). Synthetic, except the correlation table,
+# which reads the returns of an evaluation run already on the ledger (no new
+# trials); name its folder in [correlation] run, or leave it empty to skip.
+
+seed = 0
+reps = 3000
+
+[veto]
+# A deepen round makes 5 children of one (parent kind, edit) pair.
+attempts = [5, 10, 20, 40]
+# Edits no worse than the others: residual mean 0. Failure rates around the
+# 86% of stored factors that lose after costs at the scorer's spec; the share
+# of children scored covers screening rejections (no residual).
+null_failure = [0.86, 0.95]
+null_scored = [0.6, 1.0]
+# A clearly bad edit: residuals half a standard deviation below expectation.
+bad_residual = -0.5
+bad_failure = 0.95
+bad_scored = 0.6
+kappa = [5.0, 10.0, 20.0]
+confidence = [0.3, 0.4, 0.5, 0.6]
+target_false_veto = 0.05
+
+[correlation]
+# Folder (relative to the repository root) of an evaluation run holding
+# summary.csv and matrix.parquet; empty skips the table.
+run = ""
+spec = { hold = 21, neutral = "none" }
+caps = [0.7, 0.8, 0.9]
