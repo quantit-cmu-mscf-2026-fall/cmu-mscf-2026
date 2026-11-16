@@ -57,6 +57,9 @@ CORE = {
     "autopilot_locked": ReasonSpec("Operator", "another tick owns the run; wait for it"),
     "ops_hook_failed": ReasonSpec("Operator", "read `detail`; fix the operations hook"),
     # Spend guard and model-client guard (Context.model_client): STOPs
+    "spend_guard_missing": ReasonSpec(
+        "Spend", "the caller supplies a spend guard to `tick` before a spending stage runs"
+    ),
     "spend_run_ceiling_exceeded": ReasonSpec(
         "Spend", "lower the ceiling, or set `[spend] run_ceiling` in a new run root"
     ),
