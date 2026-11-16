@@ -625,3 +625,102 @@ def test_interrupted_completion_rolls_back_assessment_and_replays_saved_response
         assert c.events() == before and c.state("idea") == "idea_assessed"
         assert journal.count("liquidity_supply:discovery") == 1
     c.close()
+
+
+@pytest.mark.parametrize(
+    "kind,interval,tail,schema_failure",
+    [
+        ([], 1, 0.2, True),
+        ({}, 1, 0.2, True),
+        ("month_end", True, 0.2, True),
+        ("month_end", 1, 10**400, True),
+        ("month_end", 1, 0.2, False),
+    ],
+)
+def test_actual_generation_parser_completion_retains_claim_or_repairable_schema_failure(
+    tmp_path, archive, kind, interval, tail, schema_failure
+):
+    from capstone.factors.generation import (
+        ConstructorContext,
+        freeze_generation_input,
+        parse_generation_response,
+    )
+    from capstone.factors.generation_schema import PROGRAM_FIELDS, TOOL_NAME
+
+    c = controller(tmp_path / "controller.db", [entry(required_inputs=("flows",))])
+    reserve_idea(c, "idea")
+    frozen = freeze_generation_input(
+        archive,
+        c.catalogue["idea"][1],
+        constructor_context=ConstructorContext(data_version="data-v1", anchor="2020-01-02"),
+    )
+    value = {
+        "claim": {
+            **{
+                key: val
+                for key, val in asdict(claim()).items()
+                if key not in ("method_key", "semantics_version")
+            },
+            "assumptions": [{"text": "Demand pressure.", "rationale": "A testable conjecture."}],
+            "required_inputs": [{"unavailable": "prices", "description": "Not qualified here."}],
+        },
+        "program": {
+            "expression": "-shift(returns, 1)",
+            "side": "long_only",
+            "tail": tail,
+            "weighting": "equal",
+            "schedule": {"kind": kind, "interval": interval},
+            "direction": "high",
+        },
+        "method_provenance": [
+            {
+                "rule": rule,
+                "reasoning": "Explicit conjecture.",
+                "quote_indexes": [],
+                "assumption_indexes": [0],
+            }
+            for rule in PROGRAM_FIELDS
+        ],
+        "construction_blockers": [],
+    }
+    context = request_context(c, "idea")
+    manifest = {"call_limits": {context["bucket"]: 2}, "controller": c.identity}
+    request = {"model": "fixture", "messages": [{"role": "user", "content": frozen.prompt_json}]}
+    with RequestJournal(tmp_path / "requests.db", manifest) as journal:
+        attempt_id = begin_idea_attempt(
+            c, "idea", frozen_input_id=frozen.identity, request=request, journal=journal
+        )
+        response = BudgetedClient(Client(value, TOOL_NAME), 2, journal=journal, **context).create(
+            **request
+        )
+        outcome = complete_idea_attempt(
+            c,
+            "idea",
+            attempt_id=attempt_id,
+            frozen_input_id=frozen.identity,
+            journal=journal,
+            request_id=journal.report()["requests"][0]["id"],
+            response=response,
+            parse_response=lambda raw: parse_generation_response(raw, frozen),
+            archive=archive,
+            reviewed_methods=INVENTORY,
+        )
+        if schema_failure:
+            assert outcome["failure"]["kind"] == "schema_invalid"
+            assert outcome["failure"]["reason"]
+            assert outcome["claim_id"] is None and c.state("idea") == "idea_schema_failed"
+        else:
+            assert outcome["failure"] is None and c.state("idea") == "idea_assessed"
+            binding = idea_binding(c, "idea")
+            assert outcome["claim_id"] == binding["claim_id"] != binding["declared_claim_id"]
+            assert binding["assessment"]["data_status"] == "needs_data"
+            assert binding["assessment"]["financial_status"] == "pending"
+        fid = feedback(
+            c, outcome, reason="schema_invalid" if schema_failure else "construction_failed"
+        )
+        assert (
+            request_idea_repair(c, "idea", feedback_id=fid, reason="Repair nested malformed JSON.")
+            == "idea_repair_requested"
+        )
+        assert repairs(c) == 1 and journal.count(context["bucket"]) == 1
+    c.close()
