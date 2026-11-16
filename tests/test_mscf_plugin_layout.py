@@ -11,7 +11,14 @@ ROOT = Path(__file__).resolve().parent.parent
 PLUGIN = ROOT / "mscf-plugin"
 SKILLS = sorted(PLUGIN.glob("skills/*/SKILL.md"))
 AGENTS = sorted(PLUGIN.glob("agents/*.md"))
-MARKDOWN = [*SKILLS, *AGENTS, *PLUGIN.glob("skills/*/references/*.md"), PLUGIN / "README.md"]
+COMMANDS = sorted(PLUGIN.glob("commands/*.md"))
+MARKDOWN = [
+    *SKILLS,
+    *AGENTS,
+    *COMMANDS,
+    *PLUGIN.glob("skills/*/references/*.md"),
+    PLUGIN / "README.md",
+]
 
 
 def frontmatter(path: Path) -> dict[str, str]:
