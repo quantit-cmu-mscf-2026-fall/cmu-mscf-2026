@@ -218,7 +218,12 @@ def save_spec(spec: StrategySpec, path: Path) -> None:
 
 def load_spec(path: Path) -> StrategySpec:
     """The spec a file holds (refused if the file is not exactly what its spec writes)."""
-    return StrategySpec.from_toml(Path(path).read_bytes().decode("utf-8"))
+    text = Path(path).read_bytes().decode("utf-8")
+    if tomllib.loads(text).get("schema_version") == 5:
+        from capstone.strategy.compiled import CompiledStrategySpec
+
+        return CompiledStrategySpec.from_toml(text)
+    return StrategySpec.from_toml(text)
 
 
 # ---------------------------------------------------------------------------
@@ -293,6 +298,11 @@ def _target_weights(spec: StrategySpec, panel: Panel, as_of) -> pd.Series:
     on or before `as_of`. Only `target_weights` calls this, after refusing
     any panel holding a date past `DISCOVERY_END`.
     """
+    from capstone.strategy.compiled import CompiledStrategySpec, compiled_weights
+
+    if isinstance(spec, CompiledStrategySpec):
+        return compiled_weights(spec, panel, as_of)
+
     dates = pd.DatetimeIndex(panel.universe.index)
     as_of = pd.Timestamp(as_of)
     anchor = pd.Timestamp(spec.anchor)
