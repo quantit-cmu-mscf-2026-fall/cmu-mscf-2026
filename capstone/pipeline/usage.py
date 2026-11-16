@@ -45,6 +45,11 @@ class UsageRecorder:
         self.messages = self
 
     @property
+    def max_retries(self) -> int:
+        """The wrapped client's hidden SDK retries, visible to a call budget."""
+        return getattr(self.client, "max_retries", 0)
+
+    @property
     def records(self) -> list[dict]:
         with self._lock:
             self._flush()
@@ -81,6 +86,11 @@ class PromptCaching:
     def __init__(self, client):
         self.client = client
         self.messages = self
+
+    @property
+    def max_retries(self) -> int:
+        """The wrapped client's hidden SDK retries, visible to a call budget."""
+        return getattr(self.client, "max_retries", 0)
 
     def create(self, **kwargs):
         system = kwargs.get("system")
