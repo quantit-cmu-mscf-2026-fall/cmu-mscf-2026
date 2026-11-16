@@ -1,6 +1,7 @@
 import json
 
 import pandas as pd
+import pytest
 
 from capstone.factors.evaluation import Panel
 from capstone.pipeline import diagnostics
@@ -66,3 +67,12 @@ def test_missing_january_observations_remain_null_in_strict_json(tmp_path, monke
     assert result["january"]
     assert all(not r["measured"] and r["long_return"] is None for r in result["january"])
     assert json.loads(json.dumps(result, allow_nan=False)) == result
+
+
+def test_window_reaching_the_sealed_holdout_is_refused(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    with pytest.raises(ValueError, match="sealed holdout"):
+        diagnostics.cohort_diagnostics(
+            panel(), anchor="1999-12-31", start="2000-01-01", end="2021-01-01"
+        )
+    assert not list(tmp_path.iterdir())
