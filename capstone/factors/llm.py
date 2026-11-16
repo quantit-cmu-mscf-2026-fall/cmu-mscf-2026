@@ -104,8 +104,12 @@ def load_config(path: str | Path | None = None) -> FactorConfig:
     return FactorConfig(**values)
 
 
-def make_client():
+def make_client(prompt_caching: bool = False):
     """A real Anthropic client; the SDK finds the credentials.
+
+    `prompt_caching=True` marks each request's system text as a cacheable prefix
+    (`capstone.pipeline.usage.PromptCaching`); off by default, as it changes the
+    request shape.
 
     In order: ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, an `ant auth login`
     profile, or workload identity federation (short-lived tokens in CI or a
@@ -115,7 +119,12 @@ def make_client():
         import anthropic
     except ImportError as exc:  # pragma: no cover - depends on the environment
         raise ImportError('install the agents extra: pip install -e ".[agents]"') from exc
-    return anthropic.Anthropic()
+    client = anthropic.Anthropic()
+    if prompt_caching:
+        from capstone.pipeline.usage import PromptCaching
+
+        return PromptCaching(client)
+    return client
 
 
 def call_tool(

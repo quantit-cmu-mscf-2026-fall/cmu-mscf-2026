@@ -10,7 +10,7 @@ import pytest
 from capstone.factors import __main__ as cli
 from capstone.factors import store
 from capstone.factors.llm import FactorConfig
-from capstone.factors.pipeline import run
+from capstone.factors.pipeline import RunSummary, default_zoo, process_paper, run
 from capstone.factors.sources import FileSource, PaperlogSource
 
 HYPOTHESIS = {
@@ -97,6 +97,25 @@ def test_run_stores_the_chain_and_marks_only_finished_papers(tmp_path):
     assert citation == "A et al., 2025"
 
 
+def test_process_paper_over_a_source_equals_run(tmp_path):
+    papers = [{"key": "arxiv:ok", "title": "Works"}, {"key": "arxiv:bad", "title": "FAIL here"}]
+    con_run = store.connect(tmp_path / "run.db")
+    source = ListSource(papers)
+    expected = run(con_run, source, ScriptedClient(), CONFIG)
+
+    con_each = store.connect(tmp_path / "each.db")
+    other = ListSource(papers)
+    summary, zoo = RunSummary(), default_zoo()
+    for paper in other.papers():
+        process_paper(
+            con_each, paper, ScriptedClient(), CONFIG, zoo, "ListSource", summary, other.done
+        )
+
+    assert summary == expected
+    assert other.marked == source.marked
+    assert [f["id"] for f in store.factors(con_each)] == [f["id"] for f in store.factors(con_run)]
+
+
 def test_paperlog_source_claims_papers_through_its_api(monkeypatch):
     calls = {}
 
@@ -154,6 +173,29 @@ def test_cli_run_list_lineage_and_stats(tmp_path, monkeypatch, capsys):
     assert cli.main(["--db", db, "stats"]) == 0
     assert "factors 1" in capsys.readouterr().out
     assert cli.main(["--db", db, "lineage", "0000000000000000"]) == 1
+
+
+def test_cli_isolated_paper_mode_stores_what_sequential_does(tmp_path, monkeypatch, capsys):
+    papers = tmp_path / "papers.toml"
+    papers.write_text('[[papers]]\nkey = "arxiv:1"\ntitle = "Reversal"\nabstract = "A"\n')
+    config = tmp_path / "factors.toml"
+    config.write_text(
+        'model = "test-model"\nhypotheses_per_paper = 1\nfactors_per_hypothesis = 1\n'
+    )
+    monkeypatch.setattr(cli, "make_client", ScriptedClient)
+    base = ["run", "--source", "file", str(papers), "--config", str(config)]
+
+    out = {}
+    for name, extra in (("seq", []), ("iso", ["--paper-mode", "isolated", "--concurrency", "2"])):
+        db = str(tmp_path / f"{name}.db")
+        assert cli.main(["--db", db, *base, *extra]) == 0
+        out[name] = capsys.readouterr().out
+        assert cli.main(["--db", db, "list"]) == 0
+        out[name + "-list"] = capsys.readouterr().out
+    assert out["seq"] == out["iso"] and out["seq-list"] == out["iso-list"]
+
+    assert cli.main(["--db", str(tmp_path / "x.db"), *base, "--concurrency", "2"]) == 2
+    assert "--paper-mode isolated" in capsys.readouterr().err
 
 
 def _fake_paperlog(monkeypatch, rows):
