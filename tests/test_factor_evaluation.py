@@ -532,8 +532,11 @@ def test_the_logged_full_spread_sharpe_is_the_shared_sharpe(tmp_path, monkeypatc
     assert summary["sharpe_net_full_spread"].iloc[0] == expected
 
 
-def test_a_constant_return_series_has_no_sharpe():
+@pytest.mark.parametrize("level", [0.001, 0.0007])
+def test_a_constant_return_series_has_no_sharpe(level):
     # The shared Sharpe is NaN without spread; a mean over a rounding-error sd is not a Sharpe.
-    flat = pd.Series(0.001, index=pd.date_range("2020-01-01", periods=50))
+    # 0.001 has an sd of exactly 0; 0.0007 leaves one of about 1e-19, where a plain
+    # `sd > 0` test reports a Sharpe of about 1e17.
+    flat = pd.Series(level, index=pd.date_range("2020-01-01", periods=50))
     result = ev.FactorReturns(flat, flat, flat, flat)
     assert np.isnan(result.sharpe("net"))
