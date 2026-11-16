@@ -180,7 +180,8 @@ def references_of(title: str, doi: str | None, cap: int, log=print) -> list[Pape
             works = get(f"{API}/works", params=_params(params)).json().get("results", [])
         except Exception as e:
             log(
-                f"  openalex: reference page failed for '{title[:55]}', will retry next run: {redact(e)}"
+                f"  openalex: reference page failed for '{title[:55]}', "
+                f"will retry next run: {redact(e)}"
             )
             return []
         out += [to_paper(w, f"cited-by:{title[:60]}") for w in works if w.get("display_name")]
