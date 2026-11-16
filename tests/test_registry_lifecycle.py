@@ -49,7 +49,7 @@ def registered(root: Path, sid: str = "momo", *, role: str = "deploy", version: 
         "state": "active",
         "module": MODULE,
         "version": version,
-        "reviewer": "cal",
+        "reviewer": "reviewer-a",
         "at": AT,
     }
     return _commit(root, event, entry)
@@ -80,7 +80,9 @@ def test_state_changes_only_via_events(root):
         read_registry(root)
     assert not isinstance(refused.value, LifecycleRewritePending)
     path.write_bytes(clean)
-    entry = set_state(root, "momo", "suspended", reason="drawdown review", reviewer="cal", at=AT)
+    entry = set_state(
+        root, "momo", "suspended", reason="drawdown review", reviewer="reviewer-a", at=AT
+    )
     assert entry.state == "suspended" and read_registry(root) == (entry,)
     first, event = read_lifecycle(root)
     assert (first["field"], first["role"], first["prev_hash"]) == ("registered", "deploy", "")
@@ -89,21 +91,21 @@ def test_state_changes_only_via_events(root):
         "from": "active",
         "to": "suspended",
         "reason": "drawdown review",
-        "reviewer": "cal",
+        "reviewer": "reviewer-a",
         "at": AT,
     }
-    resumed = set_state(root, "momo", "active", reason="reviewed", reviewer="cal", at=AT)
+    resumed = set_state(root, "momo", "active", reason="reviewed", reviewer="reviewer-a", at=AT)
     assert resumed.state == "active" and len(read_lifecycle(root)) == 3
     with pytest.raises(ValueError, match="reason"):
-        set_state(root, "momo", "suspended", reason="", reviewer="cal", at=AT)
+        set_state(root, "momo", "suspended", reason="", reviewer="reviewer-a", at=AT)
     with pytest.raises(ValueError, match="already"):
-        set_state(root, "momo", "active", reason="x", reviewer="cal", at=AT)
+        set_state(root, "momo", "active", reason="x", reviewer="reviewer-a", at=AT)
     with pytest.raises(ValueError, match="state must be one of"):
-        set_state(root, "momo", "paused", reason="x", reviewer="cal", at=AT)
+        set_state(root, "momo", "paused", reason="x", reviewer="reviewer-a", at=AT)
     with pytest.raises(ValueError, match="reviewer and a timestamp"):
         set_state(root, "momo", "suspended", reason="x", reviewer="", at=AT)
     with pytest.raises(ValueError, match="not registered"):
-        set_state(root, "ghost", "suspended", reason="x", reviewer="cal", at=AT)
+        set_state(root, "ghost", "suspended", reason="x", reviewer="reviewer-a", at=AT)
 
 
 def test_set_state_never_touches_enabled_or_the_other_entries(root):
@@ -111,18 +113,18 @@ def test_set_state_never_touches_enabled_or_the_other_entries(root):
     registered(root, "b")
     path = root / REGISTRY_FILE
     path.write_bytes(path.read_bytes().replace(b"enabled: false", b"enabled: true", 1))
-    set_state(root, "a", "suspended", reason="r", reviewer="cal", at=AT)
+    set_state(root, "a", "suspended", reason="r", reviewer="reviewer-a", at=AT)
     a, b = read_registry(root)
     assert (a.enabled, a.state, b.enabled, b.state) == (True, "suspended", False, "active")
 
 
 def test_retired_is_terminal(root):
     registered(root)
-    set_state(root, "momo", "retired", reason="decayed", reviewer="cal", at=AT)
+    set_state(root, "momo", "retired", reason="decayed", reviewer="reviewer-a", at=AT)
     before = (root / REGISTRY_FILE).read_bytes()
     for state in ("active", "suspended"):
         with pytest.raises(ValueError, match="retired"):
-            set_state(root, "momo", state, reason="x", reviewer="cal", at=AT)
+            set_state(root, "momo", state, reason="x", reviewer="reviewer-a", at=AT)
     assert (root / REGISTRY_FILE).read_bytes() == before
     assert len(read_lifecycle(root)) == 2  # registered, retired
 
@@ -130,7 +132,7 @@ def test_retired_is_terminal(root):
 def test_a_legacy_entry_with_no_events_reads_and_changes_state_through_events(root):
     legacy(root)
     assert read_registry(root)[0].state == "active" and not (root / LIFECYCLE_FILE).exists()
-    entry = set_state(root, "old", "suspended", reason="r", reviewer="cal", at=AT)
+    entry = set_state(root, "old", "suspended", reason="r", reviewer="reviewer-a", at=AT)
     assert entry.state == "suspended" and [e["field"] for e in read_lifecycle(root)] == ["state"]
     (root / LIFECYCLE_FILE).unlink()  # a state with no event behind it
     with pytest.raises(ValueError, match="lifecycle"):
@@ -139,8 +141,8 @@ def test_a_legacy_entry_with_no_events_reads_and_changes_state_through_events(ro
 
 def test_the_chain_refuses_a_tampered_log(root):
     registered(root)
-    set_state(root, "momo", "suspended", reason="a", reviewer="cal", at=AT)
-    set_state(root, "momo", "active", reason="b", reviewer="cal", at=AT)
+    set_state(root, "momo", "suspended", reason="a", reviewer="reviewer-a", at=AT)
+    set_state(root, "momo", "active", reason="b", reviewer="reviewer-a", at=AT)
     genesis, *rest = lines(root)
     entries = read_registry(root)
     tampered = [
@@ -157,7 +159,7 @@ def test_the_chain_refuses_a_tampered_log(root):
         verify_lifecycle("".join(rest), entries)  # the registered event deleted
     with pytest.raises(ValueError, match="newline"):
         verify_lifecycle(genesis.rstrip("\n"), entries)
-    set_state(root, "momo", "suspended", reason="c", reviewer="cal", at=AT)
+    set_state(root, "momo", "suspended", reason="c", reviewer="reviewer-a", at=AT)
     text = (root / LIFECYCLE_FILE).read_text(encoding="utf-8")
     with pytest.raises(ValueError, match="lifecycle"):
         verify_lifecycle("".join(text.splitlines(keepends=True)[:3]), read_registry(root))
@@ -176,7 +178,7 @@ def test_events_are_checked_for_shape_and_for_an_impossible_sequence(root):
     chained = canonical({**first, "prev_hash": digest(first)}) + chr(10)
     with pytest.raises(ValueError, match="registered after events of its own"):
         verify_lifecycle(genesis + chained, entries)
-    set_state(root, "momo", "retired", reason="r", reviewer="cal", at=AT)
+    set_state(root, "momo", "retired", reason="r", reviewer="reviewer-a", at=AT)
     for state in ("suspended", "active"):
         forged = lines(root)[1].replace('"to":"retired"', f'"to":"{state}"')
         with pytest.raises(ValueError, match="lifecycle"):
@@ -223,14 +225,14 @@ def test_a_crash_between_event_and_entry_is_pending_then_completed(root, crash):
     call = {"root": root, "strategy_id": "momo", "state": "suspended"}
     crash(True)
     with pytest.raises(InjectedFault):
-        set_state(**call, reason="r", reviewer="cal", at=AT)
+        set_state(**call, reason="r", reviewer="reviewer-a", at=AT)
     with pytest.raises(LifecycleRewritePending, match="lifecycle_entry_rewrite_pending:momo"):
         read_registry(root)
     other = {**call, "state": "retired"}  # any other call is refused until the same one completes
     with pytest.raises(ValueError, match="lifecycle_entry_rewrite_pending"):
-        set_state(**other, reason="other", reviewer="cal", at=AT)
+        set_state(**other, reason="other", reviewer="reviewer-a", at=AT)
     crash(False)
-    entry = set_state(**call, reason="r", reviewer="cal", at=AT)
+    entry = set_state(**call, reason="r", reviewer="reviewer-a", at=AT)
     assert read_registry(root) == (entry,)
     assert len(lines(root)) == before + 1  # completed without a second event
 
