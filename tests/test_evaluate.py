@@ -12,6 +12,7 @@ import pytest
 from scipy import stats
 
 from capstone.evaluate import (
+    MIN_LOCAL_FDR_CANDIDATES,
     average_correlation,
     benjamini_hochberg,
     benjamini_yekutieli,
@@ -19,13 +20,16 @@ from capstone.evaluate import (
     bonferroni,
     by_adjusted,
     deflated_sharpe_ratio,
+    empirical_null,
     estimate_pi0,
     evidence_profile,
     expected_max_sharpe,
     false_discovery_rate,
+    haircut_sharpe,
     holm,
     holm_adjusted,
     implied_independent_trials,
+    local_fdr,
     min_track_record_length,
     newey_west_lags,
     power,
@@ -692,7 +696,7 @@ class TestEvidenceProfile:
     def test_columns_order_and_monotone_strength(self):
         pvalues, truth = _correlated_pvalues(200, 20, 0.2, seed=0)
         profile = evidence_profile(pvalues)
-        assert list(profile.columns) == ["p", "holm", "by", "bh", "q"]
+        assert list(profile.columns) == ["p", "holm", "by", "bh", "q", "lfdr"]
         assert profile["p"].is_monotonic_increasing
         # Planted candidates are the strongest on every graded score.
         assert profile.index[:10].isin(truth[truth].index).all()
@@ -708,7 +712,7 @@ class TestEvidenceProfile:
         )
         profile = evidence_profile(pvalues)
         real = planted.truth[planted.truth].index
-        for column in ["holm", "by", "bh", "q"]:
+        for column in ["holm", "by", "bh", "q", "lfdr"]:
             strongest = profile[column].sort_values(kind="stable").index[:5]
             assert strongest.isin(real).all(), column
 
@@ -749,3 +753,711 @@ class TestCorrelationBreaksStorey:
         )
         assert pi0.mean() < 0.85
         assert (pi0 < 0.8).mean() > 0.25
+
+
+# --------------------------------------------------------------------------- #
+# Haircut Sharpe: Harvey & Liu (2015) -- QUANTIT-51, QUANTIT-52
+# --------------------------------------------------------------------------- #
+# `haircut_sharpe` follows the authors' own MATLAB, not a reading of the paper.
+# `scripts/haircut_reference.py` is a literal transcription of `Haircut_SR.m`
+# and `sample_random_multests.m`; the values below were produced by running it
+# at seed 0 with WW = 2000 (`python scripts/haircut_reference.py`).
+#
+# What is exact and what is not:
+#
+#   * `n_monthly_obs`, `pvalue` and everything Bonferroni are CLOSED FORM. They
+#     must agree to floating-point precision; a tolerance there would hide a
+#     convention error.
+#   * Holm and BHY are medians over a simulated family, so they depend on the
+#     random stream. The reference draws a full m_tot x m_tot `mvnrnd` and
+#     slices; `haircut_sharpe` draws the same distribution through its
+#     one-factor representation. Across 30 seeds at WW in {500, 1000, 2000} the
+#     measured spread of the surviving Sharpe is sd <= 0.0003 (Holm) and
+#     <= 0.0045 (BHY), with a total range span under 0.018. HAIRCUT_ATOL = 0.02
+#     clears that on both sides; for scale, the NaN-padding approximation this
+#     replaced was out by 0.12 on the same case, so the tolerance is still an
+#     order of magnitude tighter than the error it has to detect.
+HAIRCUT_ATOL = 0.02
+
+# QUANTIT-52's ledger path needs `runlog.trial_count`, which arrives in its own
+# PR (#33) against `main` and is not in this stack. Skipping is deliberate:
+# vendoring a copy of the reader here would fork the thing the whole team
+# corrects against. These tests come back on their own once #33 lands.
+try:
+    from capstone.runlog import trial_count as _trial_count  # noqa: F401
+
+    HAS_LEDGER_READER = True
+except ImportError:  # pragma: no cover - depends on which PRs are merged
+    HAS_LEDGER_READER = False
+
+requires_ledger_reader = pytest.mark.skipif(
+    not HAS_LEDGER_READER,
+    reason="needs runlog.trial_count (#33), which is not in this stack yet",
+)
+
+# label, kwargs for haircut_sharpe, then the reference's N / p_raw / adjusted
+# Sharpes. `n_trials` is our ledger total; the reference's num_test = n_trials-1.
+HAIRCUT_REFERENCE = [
+    (
+        "monthly, 240 obs, SR 1.0, M=100",
+        {"sharpe": 1.0, "n_obs": 240, "n_trials": 101, "frequency": "monthly"},
+        {
+            "n_monthly_obs": 240,
+            "pvalue": 1.1975058908264558e-05,
+            "pvalue_bonferroni": 0.0011975058908264558,
+            "sharpe_bonferroni": 0.7331736399018519,
+            "sharpe_holm": 0.7372469386728714,
+            "sharpe_bhy": 0.7605725858413966,
+        },
+    ),
+    (
+        "monthly, 240 obs, SR 1.0, M=315",
+        {"sharpe": 1.0, "n_obs": 240, "n_trials": 316, "frequency": "monthly"},
+        {
+            "n_monthly_obs": 240,
+            "pvalue": 1.1975058908264558e-05,
+            "pvalue_bonferroni": 0.0037721435561033356,
+            "sharpe_bonferroni": 0.6541227192699938,
+            "sharpe_holm": 0.6588395495840108,
+            "sharpe_bhy": 0.739384506502619,
+        },
+    ),
+    (
+        "monthly, 120 obs, SR 0.75, M=315",
+        {"sharpe": 0.75, "n_obs": 120, "n_trials": 316, "frequency": "monthly"},
+        {
+            "n_monthly_obs": 120,
+            "pvalue": 0.019310820496796444,
+            "pvalue_bonferroni": 1.0,
+            "sharpe_bonferroni": 0.0,
+            "sharpe_holm": 0.0,
+            "sharpe_bhy": 0.15108679381138554,
+        },
+    ),
+    (
+        "daily, 2520 obs, SR 1.5, M=200",
+        {
+            "sharpe": 1.5,
+            "n_obs": 2520,
+            "n_trials": 201,
+            "frequency": "daily",
+            "avg_correlation": 0.4,
+        },
+        {
+            "n_monthly_obs": 84,
+            "pvalue": 0.00015291570299047486,
+            "pvalue_bonferroni": 0.03058314059809497,
+            "sharpe_bonferroni": 0.8315392511067888,
+            "sharpe_holm": 0.844569644584858,
+            "sharpe_bhy": 0.995820532226379,
+        },
+    ),
+    (
+        "monthly, 240 obs, SR 1.0, M=100, rho=0.1",
+        {
+            "sharpe": 1.0,
+            "n_obs": 240,
+            "n_trials": 101,
+            "frequency": "monthly",
+            "autocorrelation": 0.1,
+        },
+        {
+            "n_monthly_obs": 240,
+            "pvalue": 6.148219093260465e-05,
+            "pvalue_bonferroni": 0.006148219093260465,
+            "sharpe_bonferroni": 0.6181278107351466,
+            "sharpe_holm": 0.6235760885229816,
+            "sharpe_bhy": 0.657764912798989,
+        },
+    ),
+    (
+        "monthly, 240 obs, SR 0.3, M=315",
+        {"sharpe": 0.3, "n_obs": 240, "n_trials": 316, "frequency": "monthly"},
+        {
+            "n_monthly_obs": 240,
+            "pvalue": 0.18098583978783234,
+            "pvalue_bonferroni": 1.0,
+            "sharpe_bonferroni": 0.0,
+            "sharpe_holm": 0.0,
+            "sharpe_bhy": 0.0008803790037889812,
+        },
+    ),
+]
+
+
+def _haircut_ids():
+    return [label for label, _, _ in HAIRCUT_REFERENCE]
+
+
+class TestHaircutReferenceComparison:
+    """`haircut_sharpe` against a literal transcription of the authors' MATLAB."""
+
+    @pytest.mark.parametrize(
+        ("kwargs", "expected"),
+        [(k, e) for _, k, e in HAIRCUT_REFERENCE],
+        ids=_haircut_ids(),
+    )
+    def test_closed_form_quantities_match_exactly(self, kwargs, expected):
+        # Frequency conversion, the two-sided t p-value and Bonferroni involve
+        # no simulation. Any disagreement here is a convention error, not noise.
+        out = haircut_sharpe(seed=0, **kwargs)
+        row = out.iloc[0]
+
+        assert out.attrs["n_monthly_obs"] == expected["n_monthly_obs"]
+        assert row["pvalue"] == pytest.approx(expected["pvalue"], rel=1e-10)
+        assert row["pvalue_bonferroni"] == pytest.approx(expected["pvalue_bonferroni"], rel=1e-10)
+        assert row["sharpe_bonferroni"] == pytest.approx(
+            expected["sharpe_bonferroni"], rel=1e-10, abs=1e-12
+        )
+
+    @pytest.mark.parametrize(
+        ("kwargs", "expected"),
+        [(k, e) for _, k, e in HAIRCUT_REFERENCE],
+        ids=_haircut_ids(),
+    )
+    def test_simulated_adjustments_match_within_monte_carlo_error(self, kwargs, expected):
+        out = haircut_sharpe(seed=0, n_simulations=2000, **kwargs)
+        row = out.iloc[0]
+
+        assert row["sharpe_holm"] == pytest.approx(expected["sharpe_holm"], abs=HAIRCUT_ATOL)
+        assert row["sharpe_bhy"] == pytest.approx(expected["sharpe_bhy"], abs=HAIRCUT_ATOL)
+
+    @pytest.mark.parametrize("seed", [1, 7, 12345])
+    def test_the_match_does_not_depend_on_the_committed_seed(self, seed):
+        # The reference values were produced at seed 0. If they only reproduce
+        # at seed 0, the tolerance is wrong rather than the implementation right.
+        _, kwargs, expected = HAIRCUT_REFERENCE[0]
+        row = haircut_sharpe(seed=seed, n_simulations=2000, **kwargs).iloc[0]
+
+        assert row["sharpe_holm"] == pytest.approx(expected["sharpe_holm"], abs=HAIRCUT_ATOL)
+        assert row["sharpe_bhy"] == pytest.approx(expected["sharpe_bhy"], abs=HAIRCUT_ATOL)
+
+
+class TestHaircutFollowsTheAuthorsConventions:
+    """The conventions that differ from the rest of this module, pinned."""
+
+    def test_the_pvalue_is_two_sided_on_a_t_distribution(self):
+        out = haircut_sharpe(1.0, 240, n_trials=101, frequency="monthly", seed=0)
+        n_monthly = out.attrs["n_monthly_obs"]
+        statistic = 1.0 / np.sqrt(12) * np.sqrt(n_monthly)
+
+        expected = 2.0 * stats.t.sf(statistic, n_monthly - 1)
+        assert out.iloc[0]["pvalue"] == pytest.approx(expected, rel=1e-12)
+
+        # Not the normal, and not one-sided: both would be a different method.
+        assert out.iloc[0]["pvalue"] != pytest.approx(2.0 * stats.norm.sf(statistic), rel=1e-6)
+        assert out.iloc[0]["pvalue"] != pytest.approx(
+            stats.t.sf(statistic, n_monthly - 1), rel=1e-6
+        )
+
+    @pytest.mark.parametrize(
+        ("frequency", "n_obs", "n_monthly"),
+        [
+            ("daily", 2520, 84),  # a 360-day year, not 252 and not 365
+            ("daily", 360, 12),
+            ("weekly", 520, 120),
+            ("monthly", 240, 240),
+            ("quarterly", 80, 240),
+            ("annual", 20, 240),
+        ],
+    )
+    def test_observations_are_converted_to_months_on_a_360_day_year(
+        self, frequency, n_obs, n_monthly
+    ):
+        out = haircut_sharpe(
+            1.0, n_obs, n_trials=101, frequency=frequency, seed=0, n_simulations=200
+        )
+        assert out.attrs["n_monthly_obs"] == n_monthly
+
+    def test_the_360_day_year_stays_inside_this_function(self):
+        # The rest of the module annualises at 252. This is the regression test
+        # for someone "tidying up" the inconsistency in the wrong direction.
+        assert sharpe_pvalue(1.0, 2520) == pytest.approx(
+            2.0 * stats.norm.sf(1.0 / np.sqrt(252) * np.sqrt(2520))
+        )
+
+    def test_a_non_annualised_sharpe_is_annualised_first(self):
+        annual = haircut_sharpe(
+            1.0, 240, n_trials=101, frequency="monthly", seed=0, n_simulations=200
+        )
+        periodic = haircut_sharpe(
+            1.0 / np.sqrt(12),
+            240,
+            n_trials=101,
+            frequency="monthly",
+            annualized=False,
+            seed=0,
+            n_simulations=200,
+        )
+        assert periodic.iloc[0]["sharpe_annualized"] == pytest.approx(
+            annual.iloc[0]["sharpe_annualized"]
+        )
+
+    def test_autocorrelation_shrinks_the_sharpe_before_testing(self):
+        plain = haircut_sharpe(
+            1.0, 240, n_trials=101, frequency="monthly", seed=0, n_simulations=200
+        )
+        serial = haircut_sharpe(
+            1.0,
+            240,
+            n_trials=101,
+            frequency="monthly",
+            autocorrelation=0.1,
+            seed=0,
+            n_simulations=200,
+        )
+        assert serial.iloc[0]["sharpe_annualized"] < plain.iloc[0]["sharpe_annualized"]
+        assert serial.iloc[0]["pvalue"] > plain.iloc[0]["pvalue"]
+
+    def test_autocorrelation_does_nothing_at_annual_frequency(self):
+        # As in the authors' code: the annual branch returns SR untouched.
+        kwargs = {"n_obs": 20, "n_trials": 101, "frequency": "annual", "seed": 0}
+        plain = haircut_sharpe(1.0, n_simulations=200, **kwargs)
+        serial = haircut_sharpe(1.0, autocorrelation=0.4, n_simulations=200, **kwargs)
+        assert serial.iloc[0]["sharpe_annualized"] == pytest.approx(
+            plain.iloc[0]["sharpe_annualized"]
+        )
+
+    def test_all_four_of_the_authors_adjustments_are_reported(self):
+        out = haircut_sharpe(1.0, 240, n_trials=101, frequency="monthly", seed=0, n_simulations=200)
+        for name in ("bonferroni", "holm", "bhy", "average"):
+            for prefix in ("pvalue", "sharpe", "haircut"):
+                assert f"{prefix}_{name}" in out.columns
+
+        row = out.iloc[0]
+        assert row["pvalue_average"] == pytest.approx(
+            (row["pvalue_bonferroni"] + row["pvalue_holm"] + row["pvalue_bhy"]) / 3
+        )
+
+    def test_the_haircut_is_the_share_of_the_sharpe_given_up(self):
+        row = haircut_sharpe(
+            1.0, 240, n_trials=101, frequency="monthly", seed=0, n_simulations=200
+        ).iloc[0]
+        expected = (row["sharpe_annualized"] - row["sharpe_bonferroni"]) / row["sharpe_annualized"]
+        assert row["haircut_bonferroni"] == pytest.approx(expected)
+        assert 0.0 <= row["haircut_bonferroni"] <= 1.0
+
+
+class TestHaircutTrialCountConvention:
+    """QUANTIT-52 and the M / M+1 split, which is where an off-by-one hides."""
+
+    def test_num_test_is_one_less_than_the_ledger_total(self):
+        out = haircut_sharpe(1.0, 240, n_trials=101, frequency="monthly", seed=0, n_simulations=200)
+        assert out.attrs["n_trials"] == 101
+        assert out.attrs["num_test"] == 100
+
+    def test_bonferroni_uses_num_test_not_the_family_size(self):
+        # The authors' `p_BON = min(M*p_val,1)` uses M even though Holm and BHY
+        # use M+1. Reproducing that inconsistency is the point: with n_trials
+        # 101 the multiplier must be 100, not 101.
+        out = haircut_sharpe(1.0, 240, n_trials=101, frequency="monthly", seed=0, n_simulations=200)
+        row = out.iloc[0]
+
+        assert row["pvalue_bonferroni"] == pytest.approx(100 * row["pvalue"], rel=1e-12)
+        assert row["pvalue_bonferroni"] != pytest.approx(101 * row["pvalue"], rel=1e-9)
+
+    def test_one_more_trial_shifts_bonferroni_by_exactly_one_multiplier(self):
+        kwargs = {
+            "n_obs": 240,
+            "frequency": "monthly",
+            "seed": 0,
+            "n_simulations": 200,
+        }
+        small = haircut_sharpe(1.0, n_trials=101, **kwargs).iloc[0]
+        large = haircut_sharpe(1.0, n_trials=102, **kwargs).iloc[0]
+
+        assert large["pvalue_bonferroni"] / small["pvalue_bonferroni"] == pytest.approx(
+            101 / 100, rel=1e-10
+        )
+
+    def test_a_bigger_search_takes_more_off(self):
+        surviving = [
+            haircut_sharpe(
+                1.0,
+                240,
+                n_trials=m,
+                frequency="monthly",
+                seed=0,
+                n_simulations=500,
+            ).iloc[0]["sharpe_bonferroni"]
+            for m in (11, 51, 101, 316, 1001)
+        ]
+        assert surviving == sorted(surviving, reverse=True)
+        assert surviving[0] > surviving[-1]
+
+    @requires_ledger_reader
+    def test_trial_count_is_read_from_the_ledger(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+        from capstone.runlog import log_run
+
+        for seed in range(25):
+            log_run("mom-sweep", params={"lookback": seed}, seed=seed)
+
+        from_ledger = haircut_sharpe(1.0, 240, frequency="monthly", seed=0, n_simulations=200)
+        explicit = haircut_sharpe(
+            1.0, 240, n_trials=25, frequency="monthly", seed=0, n_simulations=200
+        )
+
+        # 25 logged trials: the strategy under test plus 24 others.
+        assert from_ledger.attrs["n_trials"] == 25
+        assert from_ledger.attrs["num_test"] == 24
+        pd.testing.assert_frame_equal(from_ledger, explicit)
+
+    @requires_ledger_reader
+    def test_an_experiment_name_scopes_the_count(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+        from capstone.runlog import log_run
+
+        for seed in range(10):
+            log_run("mom-sweep", seed=seed)
+        for seed in range(4):
+            log_run("carry-sweep", seed=seed)
+
+        kwargs = {"n_obs": 240, "frequency": "monthly", "seed": 0, "n_simulations": 200}
+        assert haircut_sharpe(1.0, **kwargs).attrs["n_trials"] == 14
+        scoped = haircut_sharpe(1.0, experiment="carry-sweep", **kwargs)
+        assert scoped.attrs["n_trials"] == 4
+        assert scoped.attrs["num_test"] == 3
+
+    @requires_ledger_reader
+    def test_an_empty_ledger_raises_instead_of_applying_no_haircut(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+
+        with pytest.raises(LookupError, match="no trials"):
+            haircut_sharpe(1.0, 240, frequency="monthly")
+
+
+class TestHaircutSimulationControls:
+    """The simulated family is reproducible and its size is the caller's choice."""
+
+    def test_the_same_seed_gives_the_same_answer(self):
+        kwargs = {
+            "n_obs": 240,
+            "n_trials": 101,
+            "frequency": "monthly",
+            "n_simulations": 500,
+        }
+        first = haircut_sharpe(1.0, seed=42, **kwargs)
+        second = haircut_sharpe(1.0, seed=42, **kwargs)
+        pd.testing.assert_frame_equal(first, second)
+
+    def test_different_seeds_agree_within_monte_carlo_error(self):
+        kwargs = {
+            "n_obs": 240,
+            "n_trials": 101,
+            "frequency": "monthly",
+            "n_simulations": 1000,
+        }
+        values = [haircut_sharpe(1.0, seed=s, **kwargs).iloc[0]["sharpe_bhy"] for s in range(6)]
+        assert max(values) - min(values) < HAIRCUT_ATOL
+
+    def test_the_repetition_count_is_configurable_and_barely_moves_the_answer(self):
+        kwargs = {"n_obs": 240, "n_trials": 101, "frequency": "monthly", "seed": 0}
+        few = haircut_sharpe(1.0, n_simulations=200, **kwargs)
+        many = haircut_sharpe(1.0, n_simulations=2000, **kwargs)
+
+        assert few.attrs["n_simulations"] == 200
+        assert many.attrs["n_simulations"] == 2000
+        assert few.iloc[0]["sharpe_bhy"] == pytest.approx(
+            many.iloc[0]["sharpe_bhy"], abs=HAIRCUT_ATOL
+        )
+
+    def test_an_unset_seed_still_runs(self):
+        out = haircut_sharpe(
+            1.0, 240, n_trials=101, frequency="monthly", seed=None, n_simulations=200
+        )
+        assert out.attrs["seed"] is None
+        assert np.isfinite(out.iloc[0]["sharpe_bhy"])
+
+    def test_the_average_correlation_selects_the_simulated_distribution(self):
+        kwargs = {
+            "n_obs": 240,
+            "n_trials": 316,
+            "frequency": "monthly",
+            "seed": 0,
+            "n_simulations": 1000,
+        }
+        low = haircut_sharpe(1.0, avg_correlation=0.0, **kwargs)
+        high = haircut_sharpe(1.0, avg_correlation=0.8, **kwargs)
+
+        assert low.attrs["avg_correlation"] == 0.0
+        assert high.attrs["avg_correlation"] == 0.8
+        # Different simulated families, so different BHY medians.
+        assert low.iloc[0]["sharpe_bhy"] != high.iloc[0]["sharpe_bhy"]
+
+
+class TestHaircutMultipleCandidates:
+    def test_several_candidates_share_one_simulated_family(self):
+        sharpes = pd.Series({"strong": 1.2, "fair": 0.8, "weak": 0.35})
+        out = haircut_sharpe(
+            sharpes, 240, n_trials=101, frequency="monthly", seed=0, n_simulations=500
+        )
+
+        assert list(out.index) == ["strong", "fair", "weak"]  # sorted by p-value
+        assert out["pvalue"].is_monotonic_increasing
+        assert (out["sharpe_bonferroni"] <= out["sharpe_annualized"]).all()
+
+    def test_a_non_positive_sharpe_is_not_testable(self):
+        # The authors' p_val = 2*(1 - tcdf(T, N-1)) uses T, not |T|, so it
+        # exceeds 1 for a negative Sharpe and their method has nothing to say.
+        sharpes = pd.Series({"good": 1.0, "flat": 0.0, "bad": -0.4, "missing": np.nan})
+        out = haircut_sharpe(
+            sharpes, 240, n_trials=101, frequency="monthly", seed=0, n_simulations=200
+        )
+
+        for name in ("flat", "bad", "missing"):
+            assert np.isnan(out.loc[name, "pvalue"])
+            assert np.isnan(out.loc[name, "sharpe_bhy"])
+            assert np.isnan(out.loc[name, "haircut_bhy"])
+        assert np.isfinite(out.loc["good", "sharpe_bhy"])
+        assert out.loc["good", "sharpe"] == 1.0  # the input is still reported
+
+
+class TestHaircutGuardrails:
+    def test_rejects_an_unknown_frequency(self):
+        with pytest.raises(ValueError, match="unknown frequency"):
+            haircut_sharpe(1.0, 240, n_trials=101, frequency="fortnightly")
+
+    def test_rejects_a_trial_count_below_two(self):
+        with pytest.raises(ValueError, match="must be at least 2"):
+            haircut_sharpe(1.0, 240, n_trials=1, frequency="monthly")
+
+    def test_rejects_too_few_observations(self):
+        with pytest.raises(ValueError, match="n_obs must be at least 1"):
+            haircut_sharpe(1.0, 0, n_trials=101, frequency="monthly")
+
+    def test_rejects_a_sample_too_short_to_convert_to_two_months(self):
+        with pytest.raises(ValueError, match="needs at least 2"):
+            haircut_sharpe(1.0, 30, n_trials=101, frequency="daily")
+
+    def test_rejects_a_non_positive_simulation_count(self):
+        with pytest.raises(ValueError, match="n_simulations must be at least 1"):
+            haircut_sharpe(1.0, 240, n_trials=101, frequency="monthly", n_simulations=0)
+
+    def test_rejects_an_impossible_autocorrelation(self):
+        with pytest.raises(ValueError, match="autocorrelation must be in"):
+            haircut_sharpe(1.0, 240, n_trials=101, frequency="monthly", autocorrelation=1.0)
+
+
+def _shared_shift(seed: int, rho: float) -> float:
+    # The common factor's contribution in `_correlated_pvalues`: its first draw.
+    return float(np.sqrt(rho) * np.random.default_rng(seed).standard_normal())
+
+
+def _selection_scores(pvalues: pd.Series, truth: pd.Series, selected: pd.Series) -> tuple:
+    found = float(selected[truth].mean())
+    fdp = 0.0 if not selected.any() else float((selected & ~truth).sum() / selected.sum())
+    return found, fdp
+
+
+class TestEmpiricalNull:
+    """Efron's central matching: the null estimated from the bulk of the candidates."""
+
+    def test_recovers_the_theoretical_null_when_independent(self):
+        # 1,000 all-null candidates: measured width 0.996 (sd 0.022) over 200 sets.
+        fits = [empirical_null(_correlated_pvalues(1000, 0, 0.0, seed)[0]) for seed in range(30)]
+        assert np.mean([f.sigma for f in fits]) == pytest.approx(1.0, abs=0.05)
+        assert np.mean([abs(f.delta) for f in fits]) < 0.1
+        assert np.mean([f.pi0 for f in fits]) > 0.95
+
+    def test_follows_a_shared_factor(self):
+        # Equicorrelated nulls sit at sqrt(rho) W with width sqrt(1 - rho) within a
+        # set. Measured: width 0.705 against 0.707, centre-shift correlation 0.999.
+        rho, seeds = 0.5, range(30)
+        fits = [empirical_null(_correlated_pvalues(1000, 0, rho, seed)[0]) for seed in seeds]
+        assert np.mean([f.sigma for f in fits]) == pytest.approx(np.sqrt(1 - rho), abs=0.03)
+        shifts = [_shared_shift(seed, rho) for seed in seeds]
+        assert np.corrcoef([f.delta for f in fits], shifts)[0, 1] > 0.95
+
+    def test_needs_enough_candidates(self):
+        pvalues, _ = _correlated_pvalues(MIN_LOCAL_FDR_CANDIDATES - 1, 0, 0.0, seed=0)
+        with pytest.raises(ValueError, match="at least"):
+            empirical_null(pvalues)
+        with pytest.raises(ValueError, match="at least"):
+            local_fdr(pvalues)
+
+
+class TestLocalFdr:
+    @staticmethod
+    def _any_flag_rate(rho: float, *, degree: int | None = None, reps: int = 300) -> float:
+        # degree=None exercises local_fdr's own default, which is what is under test.
+        options = {} if degree is None else {"degree": degree}
+        return float(
+            np.mean(
+                [
+                    (local_fdr(_correlated_pvalues(200, 0, rho, seed)[0], **options) <= 0.2).any()
+                    for seed in range(reps)
+                ]
+            )
+        )
+
+    def test_all_null_sets_rarely_flag_anything(self):
+        # 200 candidates, lfdr <= 0.2: measured 2.3-5.3% over four seed ranges.
+        assert self._any_flag_rate(0.0) <= 0.08
+
+    def test_a_shared_factor_changes_nothing(self):
+        # On all-null sets equicorrelation only shifts and rescales the z-scores,
+        # and the empirical null moves with them: the same draws give the same
+        # lfdr at rho 0 and 0.5. (Planted signals are shifted after the scaling in
+        # `_correlated_pvalues`, so this exact identity holds for nulls only.)
+        values = []
+        for seed in range(30):
+            independent = local_fdr(_correlated_pvalues(200, 0, 0.0, seed)[0])
+            correlated = local_fdr(_correlated_pvalues(200, 0, 0.5, seed)[0])
+            np.testing.assert_allclose(independent, correlated, atol=1e-6)
+            values.append(independent.min())
+        assert min(values) < 0.9  # not vacuous: some nulls get scored below 1
+
+    def test_efron_default_degree_is_too_loose_at_this_size(self):
+        # Why degree 3 is the default: degree 7 flagged 30-35% of all-null sets.
+        assert self._any_flag_rate(0.0, degree=7, reps=150) > 0.2
+
+    def test_finds_planted_candidates_under_correlation(self):
+        # 2% real at shift 3.5, rho 0.5: measured power 0.96 and FDR 0.036-0.059,
+        # against BH-at-10% power 0.62-0.76.
+        found, fdps, bh_found = [], [], []
+        for seed in range(150):
+            pvalues, truth = _correlated_pvalues(200, 4, 0.5, seed)
+            f, fdp = _selection_scores(pvalues, truth, local_fdr(pvalues) <= 0.2)
+            found.append(f)
+            fdps.append(fdp)
+            bh_found.append(_selection_scores(pvalues, truth, bh_adjusted(pvalues) <= 0.1)[0])
+        assert np.mean(found) >= 0.9
+        assert np.mean(fdps) <= 0.09
+        assert np.mean(found) > np.mean(bh_found)
+
+    def test_more_conservative_than_bh_when_independent(self):
+        # The cost of estimating the null: with 10% real at shift 2.5 and no
+        # correlation, measured power 0.19 against BH-at-10% 0.49.
+        found, bh_found = [], []
+        for seed in range(100):
+            pvalues, truth = _correlated_pvalues(200, 20, 0.0, seed, shift=2.5)
+            found.append(_selection_scores(pvalues, truth, local_fdr(pvalues) <= 0.2)[0])
+            bh_found.append(_selection_scores(pvalues, truth, bh_adjusted(pvalues) <= 0.1)[0])
+        assert np.mean(found) < np.mean(bh_found)
+
+    def test_only_candidates_above_the_null_centre_can_be_called(self):
+        pvalues, _ = _correlated_pvalues(300, 10, 0.3, seed=3)
+        lfdr = local_fdr(pvalues)
+        z = pd.Series(stats.norm.isf(pvalues), index=pvalues.index)
+        below = z <= empirical_null(pvalues).delta
+        assert below.any() and (lfdr[below] == 1.0).all()
+        assert ((lfdr >= 0) & (lfdr <= 1)).all()
+
+    def test_nan_stays_nan_and_small_sets_get_nan_in_the_profile(self):
+        pvalues, _ = _correlated_pvalues(250, 10, 0.0, seed=4)
+        pvalues.iloc[[3, 100]] = np.nan
+        lfdr = local_fdr(pvalues)
+        assert lfdr.isna().sum() == 2 and np.isnan(lfdr.iloc[3])
+        small, _ = _correlated_pvalues(50, 5, 0.0, seed=4)
+        assert evidence_profile(small)["lfdr"].isna().all()
+
+    @staticmethod
+    def _planted_five(seed: int, extreme_p: float | None = None) -> pd.Series:
+        # 300 null z-scores, five planted at about +4; optionally the last
+        # candidate is replaced by an extreme one with p-value `extreme_p`.
+        z = np.random.default_rng(seed).standard_normal(300)
+        z[:5] += 4.0
+        pvalues = pd.Series(stats.norm.sf(z), index=[f"c{i:04d}" for i in range(300)])
+        if extreme_p is not None:
+            pvalues.iloc[-1] = extreme_p
+        return pvalues
+
+    def test_a_p_value_of_zero_does_not_break_the_profile(self):
+        # A leaky backtest can return p = 0 (z = 37 after clipping). It used to
+        # stretch the histogram bins until the fit failed, crashing the profile.
+        pvalues, _ = _correlated_pvalues(300, 0, 0.0, seed=5000)
+        pvalues.iloc[0] = 0.0
+        lfdr = evidence_profile(pvalues)["lfdr"]
+        assert lfdr.notna().all()
+        assert lfdr.loc[pvalues.index[0]] < 0.01
+
+    @pytest.mark.parametrize("extreme_p", [stats.norm.sf(15.0), 0.0], ids=["z=15", "p=0"])
+    def test_one_extreme_candidate_leaves_the_others_alone(self, extreme_p):
+        # One candidate at z = 15 used to raise the planted five's median lfdr
+        # from 0.03 to 0.23; one at p = 0 failed 98 of 100 fits. Now moving that
+        # one null candidate out to the extreme shifts the five by at most 0.03.
+        shifts = []
+        for seed in range(5000, 5020):
+            clean = local_fdr(self._planted_five(seed)).iloc[:5].median()
+            extreme = local_fdr(self._planted_five(seed, extreme_p)).iloc[:5].median()
+            shifts.append(extreme - clean)
+        assert np.median(np.abs(shifts)) < 0.01
+        assert np.max(np.abs(shifts)) < 0.05
+
+    def test_profile_leaves_lfdr_nan_when_there_is_no_null_to_fit(self):
+        # Two clusters and nothing in between: no concave centre, so no null.
+        rng = np.random.default_rng(0)
+        z = np.concatenate([rng.normal(-3, 0.3, 150), rng.normal(3, 0.3, 150)])
+        pvalues = pd.Series(stats.norm.sf(z))
+        with pytest.raises(ValueError, match="concave"):
+            local_fdr(pvalues)
+        with pytest.warns(RuntimeWarning, match="concave"):
+            profile = evidence_profile(pvalues)
+        assert profile["lfdr"].isna().all() and profile["bh"].notna().all()
+
+    @pytest.mark.parametrize("share", [0.40, 0.43, 0.50, 0.55, 1.0])
+    def test_profile_leaves_lfdr_nan_when_most_p_values_are_tied(self, share):
+        # The IQR can remain nonzero with a large point mass. Across null seeds
+        # 0-19, 43%/50% tied at p=.5 previously made false calls in 14/20 and
+        # 20/20 sets. Refuse the fit rather than calling the spike a null model.
+        for seed in range(20):
+            pvalues = pd.Series(stats.norm.sf(np.random.default_rng(seed).standard_normal(300)))
+            pvalues.iloc[: int(share * len(pvalues))] = 0.5
+            for fit in (empirical_null, local_fdr):
+                with pytest.raises(ValueError, match="tied"):
+                    fit(pvalues)
+            with pytest.warns(RuntimeWarning, match="tied"):
+                profile = evidence_profile(pvalues)
+            assert profile["lfdr"].isna().all()
+            assert profile[["holm", "by", "bh", "q"]].notna().all().all()
+
+    def test_tie_share_counts_only_usable_pvalues(self):
+        pvalues = pd.Series(stats.norm.sf(np.random.default_rng(0).standard_normal(300)))
+        pvalues.iloc[:120] = 0.5
+        pvalues = pd.concat([pvalues, pd.Series(np.nan, index=range(300, 400))])
+        with pytest.raises(ValueError, match="tied"):
+            local_fdr(pvalues)
+        with pytest.warns(RuntimeWarning, match="tied"):
+            profile = evidence_profile(pvalues)
+        assert profile["lfdr"].isna().all()
+        assert profile.loc[profile["p"].notna(), ["holm", "by", "bh", "q"]].notna().all().all()
+
+    def test_all_null_return_matrices_rarely_flag_anything(self):
+        # The null calibration on `make_return_matrix` with both defects on:
+        # correlated (rho) and autocorrelated (ar1) all-null candidates -> HAC
+        # p-values -> lfdr <= 0.2. Measured any-flag rate over seeds 0-119:
+        # 3.3% (rho 0, ar1 0), 5.8% (0.5, 0), 3.3% (0, 0.3), 5.0% (0.5, 0.3).
+        flagged = []
+        for seed in range(120):
+            matrix = make_return_matrix(n_obs=750, n_candidates=200, rho=0.5, ar1=0.3, seed=seed)
+            pvalues = pd.Series(
+                {c: sharpe_test(matrix.returns[c]).pvalue_greater for c in matrix.returns.columns}
+            )
+            flagged.append(bool((local_fdr(pvalues) <= 0.2).any()))
+        assert np.mean(flagged) <= 0.10
+
+    @pytest.mark.parametrize(("ar1", "min_power"), [(0.0, 0.85), (0.3, 0.7)])
+    def test_on_real_sharpe_pvalues_end_to_end(self, ar1, min_power):
+        # Correlated strategy returns -> one-sided HAC p-values -> lfdr <= 0.2.
+        # Measured over seeds 0-9: FDR 0.0, power 0.97 at ar1 0; FDR 0.006,
+        # power 0.79 at ar1 0.3 (autocorrelation widens the HAC standard error).
+        found, fdps = [], []
+        for seed in range(10):
+            matrix = make_return_matrix(
+                n_obs=750,
+                n_candidates=200,
+                n_real=20,
+                sharpe_real=2.5,
+                rho=0.5,
+                ar1=ar1,
+                seed=seed,
+            )
+            pvalues = pd.Series(
+                {c: sharpe_test(matrix.returns[c]).pvalue_greater for c in matrix.returns.columns}
+            )
+            f, fdp = _selection_scores(pvalues, matrix.truth, local_fdr(pvalues) <= 0.2)
+            found.append(f)
+            fdps.append(fdp)
+        assert np.mean(fdps) <= 0.05
+        assert np.mean(found) >= min_power

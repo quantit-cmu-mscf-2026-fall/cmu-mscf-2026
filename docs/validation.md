@@ -82,6 +82,7 @@ candidate real, and `evaluate.evidence_profile` puts them side by side:
 | `by` | false-discovery rate | any dependence |
 | `bh` | false-discovery rate | positive dependence: one-sided p-values of positively correlated candidates |
 | `q` (Storey) | estimated false-discovery rate | independent candidates only |
+| `lfdr` (Efron) | probability this candidate is null; 0.2 is the usual line | correlated candidates, 200 or more; answers "stands out from the rest" |
 
 Lower is stronger in every column. Feed it one-sided p-values
 (`sharpe_test(...).pvalue_greater`): only positive Sharpe ratios are
@@ -89,6 +90,33 @@ discoveries, and one-sided tests are the case BH's guarantee covers. Never
 decide on `q` for correlated candidates; the share-of-nulls estimate behind it
 collapses when candidates move together, and it calls false discoveries more
 than twice as often as BH does (`tests/test_evaluate.py`).
+
+`lfdr` is the fix for that problem, with a change of question. It estimates the
+null from the bulk of the candidates (`evaluate.empirical_null`), so a shared
+factor moves the null along with them: all-null sets flag something as often at
+pairwise correlation 0.5 as at 0 (2-5% of sets at 200 candidates), and with
+planted signals under correlation it finds more of them than BH at 10% while
+keeping the false-discovery proportion under about 7%. But against an estimated
+null, "real" means **better than the other candidates**: an edge every candidate
+shares becomes part of the null. Use `bh` or `by` for "is the Sharpe above zero
+at all". On independent candidates `lfdr` is the more conservative of the two
+(for example, 0.19 against BH's 0.49 of signals found when 10% were real at
+shift 2.5). It is NaN below 200 candidates, where the null can't be estimated,
+which covers most single batches of 50-200.
+
+Strongly negative candidates suppress real positive ones: one density fit has
+to serve both tails, and five candidates at z = -4 cut the call rate of five
+planted at z = +4 from 0.80 to 0.19 (300 candidates). Keep one orientation per
+hypothesis rather than feeding a signal and its sign-flipped twin. A few extreme
+z-scores, such as a p-value of 0 from a leaky backtest, are kept out of the fit
+(though still scored), so they don't move anyone else's `lfdr`.
+
+Its role is a **graded score**, reported next to the gate, not a gate: the
+stage-1 gate stays BH-based unless calibration shows `lfdr` finds more real
+signals at our base rate. Feed it every candidate a search produced, or one
+search-adjusted p-value per hypothesis family, never only the winners: a null
+estimated from selected winners is shifted up, and real candidates then look
+ordinary.
 
 ## A staged funnel
 
@@ -176,16 +204,70 @@ backtest upward, and no method in this document can correct it.
 | `synth`, `backtest` | `make_return_matrix`, `candidate_returns` | done |
 | `evaluate` | `sharpe_variance` / `sharpe_test` (normal, non-normal, autocorrelation-robust), PSR, MinTRL, implied independent trials | done |
 | `evaluate` | `holm`, `benjamini_yekutieli`, `estimate_pi0`, `storey_qvalues`; adjusted p-values and `evidence_profile`; one-sided `pvalue_greater` | done |
-| `evaluate` | local false-discovery rate and empirical null (Efron): a per-candidate probability of being real that allows for correlation | planned |
+| `evaluate` | `empirical_null`, `local_fdr` and `evidence_profile`'s `lfdr` column (Efron): empirical-null estimates and per-candidate null probabilities that allow for correlation | done |
 | `bootstrap` | stationary bootstrap, block-length selection | planned |
 | `snooping` | White's Reality Check, Romano–Wolf step-down | planned |
 | `cv` | purged k-fold with embargo (from the Alpha-GPT work), walk-forward | planned |
-| `pbo` | CSCV / probability of backtest overfitting | planned |
+| `pbo` | CSCV / probability of backtest overfitting | done |
 | `spanning` | incremental value over known factors and accepted signals | planned |
-| `evaluate` | Harvey–Liu haircut Sharpe | planned |
+| `evaluate` | `haircut_sharpe`: Harvey–Liu haircut (their reference code), ledger trial count | done |
 | `search_fdr` | search-adjusted p-value for a hypothesis's best of K variants: block bootstrap of the family maximum (`bootstrap_family_pvalues`, from Carl's branch), or exact for independent or equicorrelated variants (`rho=`); search-adjusted FDR (López de Prado & Fabozzi 2026); max-of-mixture fit over assumed K, a sensitivity table, not a gate | done |
-| `gate` | staged, pre-registered scorecard; trial count from the ledger; holdout looked at once | planned |
+| `grading` | the gate's graded scores (BY, Holm, local FDR, PSR, MinTRL, haircut Sharpe with the ledger trial count), batch diagnostics and the expected mean: reported, never read back into a decision | done |
+| `gate` | staged, pre-registered scorecard; trial count from the ledger; holdout looked at once, with a named authorizer; stage 3 not yet measured | done |
 
 Already in `evaluate`: `benjamini_hochberg`, `bonferroni`,
 `deflated_sharpe_ratio`, `expected_max_sharpe`, and `false_discovery_rate` /
 `power` for scoring a selection rule against known truth.
+
+## Reading the haircut Sharpe
+
+Notes from QUANTIT-51 and QUANTIT-52 (Pin-Hua).
+
+**The haircut Sharpe is a graded score, not a gate** (stage 4 in
+`validation/framework.md`; the gate there is the deflated Sharpe). The trial
+count comes from `runlog.trial_count()`, and an empty ledger raises rather than
+quietly applying no haircut.
+
+`haircut_sharpe` follows **Harvey & Liu's own reference code**
+([`Haircut_SR.m`, `sample_random_multests.m`](https://people.duke.edu/~charvey/backtesting/)),
+not a reading of the paper, because the two differ in ways that change the
+number. `scripts/haircut_reference.py` is a literal transcription of those two
+files and is the oracle the tests compare against.
+
+What the authors do, and what it costs us:
+
+- **Two-sided p-values on a t distribution** with N−1 degrees of freedom for the
+  reported Sharpe, and on a *normal* for the simulated trials. There is no
+  one-sided option, so the haircut is the one place in this module that does not
+  screen on `pvalue_greater`.
+- **Everything is converted to months, and a daily year is 360 days.** This
+  contradicts the `periods_per_year=252` convention every other function here
+  uses. It is confined to `haircut_sharpe`, documented there, and a test pins
+  `sharpe_pvalue` at 252 so nobody "tidies up" the inconsistency in the wrong
+  direction. Pass `n_obs` in the units named by `frequency`.
+- **The unreported trials are simulated, not assumed away**, from the Harvey,
+  Liu & Zhu (2014) empirical p-value distribution selected by
+  `avg_correlation`. Holm and BHY are computed on each simulated family and the
+  **median** over `n_simulations` repetitions is taken, so the result is
+  stochastic — fix `seed` to reproduce it. Measured spread across 30 seeds: sd
+  ≤ 0.0003 (Holm), ≤ 0.0045 (BHY) in Sharpe units.
+- **The trial count is split, and the split is not cosmetic.** `n_trials` is the
+  ledger's total, *including* the strategy being haircut. The authors' `num_test`
+  (their `M`) is the number of **other** trials, so `num_test = n_trials - 1`.
+  Their own code is inconsistent about which to use: **Bonferroni multiplies by
+  `num_test`**, while **Holm and BHY use a family of `num_test + 1 = n_trials`**,
+  and BHY's harmonic constant runs over that same `n_trials`. Both are
+  reproduced as written; `.attrs` records `n_trials` and `num_test` separately so
+  the convention in force is never in doubt.
+
+Reference agreement (ours vs. the transcription, seed 0, 2,000 repetitions):
+closed-form quantities — the monthly conversion, the p-value and everything
+Bonferroni — agree to floating-point precision; Holm and BHY agree to within
+0.006 in Sharpe units, against a test tolerance of 0.02.
+
+One result worth keeping in mind: **BHY is *less* strict than Bonferroni here**,
+which is the opposite of what the same two procedures do when the unreported
+trials are assumed away instead of simulated. An earlier draft of this function
+padded the family with NaN p-values, which put the reported strategy at rank 1
+and made BHY the *strictest* of the three — out by 12 percentage points of
+haircut on the same inputs. Simulating the family is what fixes it.

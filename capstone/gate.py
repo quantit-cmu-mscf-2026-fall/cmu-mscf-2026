@@ -25,10 +25,35 @@ for methodology entries, so `runlog.trial_count(exclude_tags=["synthetic"])`
 leaves them out too; `python -m capstone.runlog stats` still lists them under
 their own name.
 
-This module only fixes and records the configuration. It does not yet refuse
-to score an unregistered or mismatched config, and it does not record a second
-registration of the same content: the gate run, a later change, is what
-enforces that a run matches a registration and looks at the holdout once.
+`run_gate` is the run itself:
+
+1. **Registered, once.** It refuses a config whose hash has no registration
+   entry (`GateNotRegistered`; a config changed after registration has a
+   different hash, so it is refused too) and a hash whose holdout was already
+   looked at (`HoldoutAlreadyOpened`). The look is a `gate-holdout-look`
+   ledger entry written before the holdout provider is called, and it is
+   written even when no family reaches stage 4: otherwise a screen that
+   passed nothing could be repeated on another candidate set under the same
+   registration until something did. Looks are read from the raw ledger, so a
+   ledger correction cannot undo one.
+2. **Authorised.** The caller names who authorises the look (`authorizer`, a
+   non-blank string). It is checked before anything is read and recorded in
+   the look entry. There is no default and no inferred authorizer: who may
+   authorise the real holdout is a team decision (DECISIONS D-5).
+3. **Blind.** Stages 1-3 get the search period only (a date after
+   `search_end` is refused). The holdout comes from the caller's `holdout`
+   provider, asked once, after the look is logged, for the stage-3 survivors'
+   chosen variants and the registered holdout dates. Checks that can fail
+   (inputs, bootstrap size, trial count, stages 1-3, graded scores) run
+   before the look, so a failure there does not spend it.
+4. **Graded scores never decide.** `grading` computes them from the search
+   period; nothing reads them back.
+5. **Stage 3 is not measured yet:** it passes stage 2's survivors through and
+   the scorecard says so (`s3_measured` False). A config that registers a
+   factor frame is refused until the spanning test is connected.
+
+The gate's own ledger entries carry the tags "gate" and "synthetic" and are
+never counted as trials (`_trial_count`).
 """
 
 from __future__ import annotations
@@ -37,29 +62,51 @@ import hashlib
 import json
 import numbers
 import re
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
 
-from capstone import runlog
+from capstone import funnel, grading, runlog
+from capstone.evaluate import average_correlation, bh_adjusted
 from capstone.funnel import Thresholds, thresholds_dict
-from capstone.scorecard import TrialScope
+from capstone.scorecard import SCORECARD_COLUMNS, GateHeader, GateResult, TrialScope
 
 __all__ = [
     "GATE_TAG",
+    "LOOK_NAME",
     "REGISTRATION_NAME",
     "SYNTHETIC_TAG",
     "GateConfig",
+    "GateNotRegistered",
+    "HoldoutAlreadyOpened",
+    "HoldoutProvider",
     "TrialScope",
     "register",
     "required_n_boot",
+    "run_gate",
 ]
 
 REGISTRATION_NAME = "gate-registration"
+LOOK_NAME = "gate-holdout-look"
 GATE_TAG = "gate"
 # runlog's convention for entries that are not trials of a strategy.
 SYNTHETIC_TAG = "synthetic"
+
+
+# Stage 4's source of holdout returns: (variant ids, holdout_start, holdout_end)
+# -> dates x those variants, on holdout dates only. The gate ships no provider:
+# the caller supplies one, and it is called only after the look is logged.
+HoldoutProvider = Callable[[Sequence[str], pd.Timestamp, pd.Timestamp], pd.DataFrame]
+
+
+class GateNotRegistered(RuntimeError):
+    """`run_gate` was given a config whose hash is not on the ledger."""
+
+
+class HoldoutAlreadyOpened(RuntimeError):
+    """The holdout has been looked at under this config hash already."""
 
 
 def _canonical_scope(scope: TrialScope) -> TrialScope:
@@ -99,7 +146,7 @@ class GateConfig:
     holdout_end: str
     data_version: str
     generator: str
-    thresholds: Thresholds = field(default_factory=Thresholds)
+    thresholds: Thresholds = field(default_factory=lambda: Thresholds(stage1="bootstrap"))
     n_boot: int = 1999
     seed: int = 0
     trial_scope: TrialScope = field(default_factory=TrialScope)
@@ -251,3 +298,178 @@ def _checked_search(returns: pd.DataFrame, family: pd.Series, config: GateConfig
             f"{required_n_boot(n_families, th.q1)}); register a config with more draws"
         )
     return labels
+
+
+def _checked_authorizer(authorizer: object) -> str:
+    """Who authorises this look at the holdout: a named person, never a default."""
+    if not isinstance(authorizer, str) or not authorizer.strip():
+        raise ValueError(
+            "authorizer is required: name the person who authorises this look at the "
+            "holdout (it is recorded with the look)"
+        )
+    return authorizer.strip()
+
+
+def _checked_stage3(config: GateConfig) -> None:
+    if config.factors_digest is not None:
+        raise ValueError(
+            "this config registered a factor frame (factors_digest) but the gate has no "
+            "stage-3 test yet: register it with factors_digest=None"
+        )
+
+
+def run_gate(
+    config: GateConfig,
+    returns: pd.DataFrame,
+    family: pd.Series,
+    *,
+    holdout: HoldoutProvider,
+    authorizer: str,
+) -> GateResult:
+    """Run the registered gate once.
+
+    Args:
+        config: a config registered with `register`.
+        returns: dates x variants (a `FunnelInput.returns`), the search period
+            only: a date after `search_end` raises.
+        family: hypothesis family per variant column.
+        holdout: stage 4's source of holdout returns (`HoldoutProvider`):
+            called at most once, after the look is logged, with the stage-3
+            survivors' chosen variants and (holdout_start, holdout_end). Not
+            called when nothing reaches stage 4.
+        authorizer: who authorises the look at the holdout; required, recorded
+            in the look entry.
+
+    Raises:
+        ValueError: no authorizer, bad inputs, returns past `search_end`, too
+            few bootstrap draws, a registered factor frame (no stage-3 test
+            yet), or fewer ledger trials in scope than variants in `returns`
+            (an unlogged search). All raised before the holdout is opened.
+        GateNotRegistered: no registration entry has this config's hash.
+        HoldoutAlreadyOpened: the holdout was looked at under this hash.
+        LookupError: from `runlog.trial_count`, when the scope matches nothing.
+    """
+    authorizer = _checked_authorizer(authorizer)
+    h = config.config_hash
+    registration = _entries_for(REGISTRATION_NAME, h)
+    if not registration:
+        raise GateNotRegistered(f"gate config {h[:12]} is not registered; call register first")
+    if _entries_for(LOOK_NAME, h):
+        raise HoldoutAlreadyOpened(f"the holdout was already opened under gate config {h[:12]}")
+    labels = _checked_search(returns, family, config)
+    _checked_stage3(config)
+    th = config.thresholds
+    n_trials = _trial_count(config.trial_scope)
+    if n_trials < returns.shape[1]:
+        raise ValueError(
+            f"the ledger has {n_trials} trials in scope but {returns.shape[1]} variants were "
+            "scored: log every trial before gating"
+        )
+
+    # Stages 1-3: the search period, which is all `returns` holds.
+    search = returns
+    stats = funnel.family_statistics(
+        search,
+        labels,
+        search_end=config.search_end,
+        n_boot=config.n_boot,
+        seed=config.seed,
+        q=th.q1,
+    )["reuse"]
+    stages = funnel.screen(stats, th)
+    p1 = funnel.stage1_pvalues(stats, th.stage1)
+    avg_corr = average_correlation(search) if search.shape[1] > 1 else float("nan")
+    # Graded scores and batch diagnostics read only the search period, so they
+    # are computed before the look (a failure here doesn't spend it).
+    graded = grading.graded_scores(search, stats["best"], p1, n_trials, avg_corr, config.seed)
+    batch_pbo = grading.pbo(search)
+
+    # The look: logged before the provider is asked for anything.
+    chosen = stats["best"].where(stages["stage3"])
+    ids = tuple(chosen.dropna())
+    runlog.log_run(
+        LOOK_NAME,
+        params={
+            "config_hash": h,
+            "generator": config.generator,
+            "data_version": config.data_version,
+            "authorizer": authorizer,
+            "candidates": [str(b) for b in ids],
+        },
+        seed=config.seed,
+        tags=[GATE_TAG, SYNTHETIC_TAG],
+        notes="stage 4 opens the holdout under this config; it may not be opened again",
+    )
+    if ids:
+        start, end = pd.Timestamp(config.holdout_start), pd.Timestamp(config.holdout_end)
+        ho_returns = holdout(ids, start, end)
+        if not isinstance(ho_returns, pd.DataFrame) or not isinstance(
+            ho_returns.index, pd.DatetimeIndex
+        ):
+            raise TypeError("the holdout provider must return a DataFrame indexed by date")
+    else:
+        ho_returns = pd.DataFrame(index=pd.DatetimeIndex([]))
+    alive = stages["stage3"]
+    tested = stats["best"].where(alive)
+    ho = funnel.holdout_statistics(ho_returns, tested)
+    for column in ho.columns:
+        stats[column] = ho[column]
+    s4 = alive & funnel._final_gate(stats, alive, th)
+    ho_mean = pd.Series({f: ho_returns[b].mean() for f, b in tested.dropna().items()}, dtype=float)
+
+    card = pd.DataFrame(index=stats.index)
+    card["best"] = stats["best"]
+    card["k"] = labels.value_counts().reindex(card.index)
+    card["generator"] = config.generator
+    card["s1_stat"] = bh_adjusted(p1)
+    card["s1_threshold"] = th.q1
+    card["s1_pass"] = stages["stage1"]
+    card["s2_stat"] = stats["p2"]
+    card["s2_threshold"] = th.alpha2
+    card["s2_pass"] = stages["stage2"]
+    card["s3_stat"] = np.nan  # not measured: stage 3 passes stage 2's survivors
+    card["s3_threshold"] = np.nan
+    card["s3_pass"] = stages["stage3"]
+    card["s3_measured"] = False
+    card["s3_alpha"] = np.nan
+    card["s3_t"] = np.nan
+    card["s4_stat"] = grading.stage4_stat(stats, alive, th)
+    card["s4_threshold"] = th.q4 if th.final == "bh" else th.d4
+    card["s4_pass"] = s4
+    card["accepted"] = stages["stage1"] & stages["stage2"] & stages["stage3"] & s4
+    for column in graded.columns:
+        card[column] = graded[column]
+    card["ho_sharpe"] = stats["ho_sharpe"]
+    card["ho_p"] = stats["ho_p"]
+    card["ho_psr"] = 1.0 - stats["ho_p"]  # sharpe_test: pvalue_greater = 1 - psr
+    card["is_mean"] = [search[b].mean() for b in card["best"]]
+    card["ho_mean"] = ho_mean.reindex(card.index)
+    card["scale"] = [search[b].std() for b in card["best"]]
+    card["expected_mean"] = grading.expected_mean(card).where(card["accepted"])
+    card.index.name = "family"
+    card = card[list(SCORECARD_COLUMNS)]
+
+    header = GateHeader(
+        config_hash=h,
+        registered_utc=registration[0]["ts_utc"],
+        generator=config.generator,
+        data_version=config.data_version,
+        factors_digest=config.factors_digest,
+        thresholds=th,
+        n_boot=config.n_boot,
+        seed=config.seed,
+        trial_scope=config.trial_scope,
+        search_end=config.search_end,
+        holdout_start=config.holdout_start,
+        holdout_end=config.holdout_end,
+        trial_count=n_trials,
+        n_families=len(card),
+        n_variants=returns.shape[1],
+        n_search_obs=len(search),
+        n_holdout_obs=len(ho_returns),
+        search_fdr_estimate=grading.search_fdr_estimate(p1, stages["stage1"]),
+        pbo=batch_pbo,
+        avg_correlation=float(avg_corr),
+    )
+    accepted = tuple(card.index[card["accepted"]])
+    return GateResult(card, header, accepted)

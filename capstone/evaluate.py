@@ -12,6 +12,7 @@ this module, those tests are what tell you whether the guarantee still holds.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 
 import numpy as np
@@ -716,15 +717,24 @@ def evidence_profile(pvalues: pd.Series, *, lambda_: float | str = 0.5) -> pd.Da
     One row per candidate, sorted by p-value, with the raw p-value and the level
     at which each procedure would first call it real: `holm` (family-wise
     error, any dependence), `by` (FDR, any dependence), `bh` (FDR, positive
-    dependence), and Storey's `q` (estimated pFDR, independence). Lower is
-    stronger in every column; a candidate that is strong only in the right-hand
-    columns is plausible, not established.
+    dependence), Storey's `q` (estimated pFDR, independence), and `lfdr`
+    (the probability the candidate is null, against an empirical null; see
+    `local_fdr`). Lower is stronger in every column; a candidate that is strong
+    only in the right-hand columns is plausible, not established. `lfdr` is NaN
+    below `MIN_LOCAL_FDR_CANDIDATES` usable p-values, and NaN with a warning
+    when the histogram has no null to fit (`local_fdr` raises in both cases).
 
     Describing a candidate set is what this is for. A decision still takes one
     column and one threshold, fixed before the data is scored; choosing the
     column afterwards is itself a multiple-testing problem. Never decide on
     `q` for correlated candidates; see `storey_qvalues`.
     """
+    lfdr = pd.Series(np.nan, index=pvalues.index)
+    if pvalues.notna().sum() >= MIN_LOCAL_FDR_CANDIDATES:
+        try:
+            lfdr = local_fdr(pvalues)
+        except ValueError as error:
+            warnings.warn(f"lfdr left NaN: {error}", RuntimeWarning, stacklevel=2)
     profile = pd.DataFrame(
         {
             "p": pvalues,
@@ -732,6 +742,7 @@ def evidence_profile(pvalues: pd.Series, *, lambda_: float | str = 0.5) -> pd.Da
             "by": by_adjusted(pvalues),
             "bh": bh_adjusted(pvalues),
             "q": storey_qvalues(pvalues, lambda_=lambda_),
+            "lfdr": lfdr,
         }
     )
     return profile.sort_values("p", na_position="last")
@@ -776,3 +787,553 @@ def power(rejected: pd.Series, truth: pd.Series) -> float:
     if n_true == 0:
         return float("nan")
     return int((rejected & aligned_truth).sum()) / n_true
+
+
+# --------------------------------------------------------------------------- #
+# Haircut Sharpe: Harvey & Liu (2015) -- QUANTIT-51, QUANTIT-52
+#
+# This section follows the authors' own MATLAB reference implementation,
+# `Haircut_SR.m` and `sample_random_multests.m`
+# (https://people.duke.edu/~charvey/backtesting/), not a reading of the paper.
+# `scripts/haircut_reference.py` is a literal transcription of those two files
+# and is the oracle the tests compare this code against.
+#
+# IMPORTANT: Harvey & Liu's time conventions are NOT this repository's. They
+# convert every frequency to MONTHS and treat a daily year as 360 days; every
+# other method in this module annualises with `periods_per_year`, default 252.
+# Those conventions are confined to this section, reached only through
+# `haircut_sharpe`, and must not be propagated outward.
+# --------------------------------------------------------------------------- #
+
+# Harvey, Liu & Zhu (2014) parameters, verbatim from `Haircut_SR.m`:
+# rows are average correlation levels, columns [rho, m_tot, p_0, lambda].
+_HLZ_PARAMETERS = np.array(
+    [
+        [0.0, 1295, 3.9660 * 0.1, 5.4995 * 0.001],
+        [0.2, 1377, 4.4589 * 0.1, 5.5508 * 0.001],
+        [0.4, 1476, 4.8604 * 0.1, 5.5413 * 0.001],
+        [0.6, 1773, 5.9902 * 0.1, 5.5512 * 0.001],
+        [0.8, 3109, 8.3901 * 0.1, 5.5956 * 0.001],
+    ]
+)
+
+# The authors' `sm_fre` frequencies and their periods per year. 360, not 365 or
+# 252, is what `Haircut_SR.m` divides by for daily data.
+_HL_PERIODS_PER_YEAR = {
+    "daily": 360,
+    "weekly": 52,
+    "monthly": 12,
+    "quarterly": 4,
+    "annual": 1,
+}
+
+# `sample_random_multests.m`: the simulated trials are monthly returns with this
+# assumed volatility over this many periods.
+_HLZ_MONTHLY_VOL = 0.15 / np.sqrt(12)
+_HLZ_N_OBS = 240
+
+_HAIRCUT_METHODS = ("bonferroni", "holm", "bhy")
+
+
+def _hlz_parameters(avg_correlation: float) -> np.ndarray:
+    """`para_inter`: the HLZ row interpolated on the assumed average correlation.
+
+    Reproduces the authors' branch structure exactly, including the fact that
+    their `RHO >= 0.8` case reuses the `[0.6, 0.8)` formula and therefore
+    extrapolates (at 0.9 it gives `-0.5*row4 + 1.5*row5`), and that a RHO
+    outside `[0, 1)` silently falls back to the 0.2 row.
+    """
+    rho = float(avg_correlation)
+    if not 0.0 <= rho < 1.0:
+        return _HLZ_PARAMETERS[1]
+    index = min(int(rho / 0.2), 3)
+    weight = (rho - _HLZ_PARAMETERS[index, 0]) / 0.2
+    return (1.0 - weight) * _HLZ_PARAMETERS[index] + weight * _HLZ_PARAMETERS[index + 1]
+
+
+def _simulate_hlz_tstats(
+    n_other: int,
+    *,
+    rho: float,
+    p_0: float,
+    lambda_: float,
+    n_simulations: int,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """`sample_random_multests.m`: a panel of |t| ratios for `n_other` trials.
+
+    One row per repetition. A share `1 - p_0` of trials are given a non-zero
+    mean drawn from `Exponential(lambda_)`; all of them get an equicorrelated
+    normal shock.
+
+    The authors build the shock with `mvnrnd` on a full `m_tot x m_tot`
+    equicorrelation matrix and then use only its first M columns. An
+    equicorrelation matrix has the one-factor representation
+    `sqrt(rho) * common + sqrt(1 - rho) * own`, so drawing M columns that way is
+    distributionally identical to drawing `m_tot` and slicing, at a fraction of
+    the cost. `scripts/haircut_reference.py` keeps the literal `mvnrnd`, and
+    `TestHaircutReferenceComparison` checks the two agree.
+    """
+    scale = _HLZ_MONTHLY_VOL / np.sqrt(_HLZ_N_OBS)
+    common = rng.standard_normal((n_simulations, 1))
+    own = rng.standard_normal((n_simulations, n_other))
+    shock = (np.sqrt(rho) * common + np.sqrt(1.0 - rho) * own) * scale
+
+    is_real = rng.uniform(size=(n_simulations, n_other)) > p_0
+    means = rng.exponential(lambda_, size=(n_simulations, n_other))
+    return np.abs(is_real * means + shock) / scale
+
+
+def _hl_adjusted_pvalues(
+    pvalue: float, simulated: np.ndarray, family_size: int, harmonic: float
+) -> tuple[float, float]:
+    """Holm and BHY adjusted p-values for one observed p among simulated trials.
+
+    `simulated` is the panel of |t| ratios, one row per repetition. For each row
+    the observed p-value joins the row's p-values, the family of `family_size`
+    is adjusted, and the observed strategy's own adjusted value is read back out.
+    The authors take the MEDIAN across repetitions, which is what makes the
+    result stable without being any one draw.
+
+    Vectorised over repetitions. Holm's running maximum and BHY's running
+    minimum are the same recursions the reference transcription writes as loops.
+    """
+    p_simulated = 2.0 * stats.norm.sf(simulated)
+    n_reps = p_simulated.shape[0]
+    ordered = np.sort(np.column_stack([p_simulated, np.full(n_reps, pvalue)]), axis=1)
+    # Leftmost position of the observed p-value in each sorted row, matching the
+    # authors' `p_val_order == p_val` followed by taking the first match.
+    position = (p_simulated < pvalue).sum(axis=1)
+    rows = np.arange(n_reps)
+
+    ranks = np.arange(family_size)
+    holm = np.minimum(np.maximum.accumulate((family_size - ranks) * ordered, axis=1), 1.0)
+
+    # BHY: scale rank k by family_size * c(family_size) / k, then take a running
+    # minimum from the largest p-value down. The largest is left unscaled, as in
+    # the authors' `if kk == (M+1)` branch.
+    scaled = (family_size * harmonic / (ranks + 1.0)) * ordered
+    scaled[:, -1] = ordered[:, -1]
+    bhy = np.minimum.accumulate(scaled[:, ::-1], axis=1)[:, ::-1]
+
+    return float(np.median(holm[rows, position])), float(np.median(bhy[rows, position]))
+
+
+def haircut_sharpe(
+    sharpe: pd.Series | float,
+    n_obs: int,
+    *,
+    n_trials: int | None = None,
+    experiment: str | None = None,
+    frequency: str = "monthly",
+    annualized: bool = True,
+    autocorrelation: float = 0.0,
+    avg_correlation: float = 0.2,
+    n_simulations: int = 2000,
+    seed: int | None = 0,
+) -> pd.DataFrame:
+    """The Sharpe that survives the size of the search (Harvey & Liu 2015).
+
+    Turn the reported Sharpe into a p-value, adjust that p-value for every trial
+    the search ran, and read the adjusted p-value back out as a Sharpe. The
+    difference is the haircut. All three of the authors' adjustments are
+    reported, plus their average, because their program reports all four and
+    choosing between them after seeing the numbers is itself multiple testing.
+
+    A **graded score, not a gate** (`docs/validation/framework.md`, stage 4):
+    the stage-4 gate is the deflated Sharpe, and charging both charges the same
+    search twice.
+
+    **This follows the authors' reference code**, `Haircut_SR.m` and
+    `sample_random_multests.m`, which differs from a naive reading of the paper
+    in ways that matter:
+
+    - p-values are **two-sided**, from a **t distribution with N-1 degrees of
+      freedom** for the reported Sharpe and from a **normal** for the simulated
+      trials. There is no one-sided option: the authors do not offer one, and a
+      one-sided variant would not be comparable to any published figure.
+    - everything is converted to **monthly** units, and a daily year is **360
+      days**. This contradicts the `periods_per_year=252` convention every other
+      function here uses; it is deliberate, confined to this function, and must
+      not be copied outward. Pass `n_obs` in the units named by `frequency`.
+    - the trials that were run but are not reported are **simulated**, not
+      assumed away, from the Harvey, Liu & Zhu (2014) empirical p-value
+      distribution. Holm and BHY are computed on each simulated family and the
+      **median** adjusted p-value over `n_simulations` repetitions is taken, so
+      the result is stochastic. Fix `seed` to make it reproducible.
+
+    **The trial count, and the M / M+1 distinction.** `n_trials` is the ledger's
+    total, which *includes* the strategy being haircut. The authors' `num_test`
+    (their `M`) is the number of OTHER trials, so `num_test = n_trials - 1`. Get
+    this wrong by one and every adjusted p-value is wrong. The split is not
+    cosmetic, because the authors' own code is inconsistent about it:
+
+    - **Bonferroni** uses `min(num_test * p, 1)` -- `M`, not `M + 1`.
+    - **Holm and BHY** use a family of `num_test + 1 = n_trials`, the simulated
+      trials plus the reported one, and BHY's harmonic constant is
+      `sum(1/i)` over that same `n_trials`.
+
+    Both are reproduced as the authors wrote them. `.attrs` records `n_trials`
+    and `num_test` separately so the convention in force is never in doubt.
+
+    Leave `n_trials` as None and it comes from `runlog.trial_count(experiment)`.
+    `LookupError` is left to propagate: a haircut against no trials is no
+    haircut.
+
+    Args:
+        sharpe: reported Sharpe per candidate, indexed by candidate name; a bare
+            float is accepted and reported under the name "strategy". Annualised
+            unless `annualized=False`.
+        n_obs: observations behind each Sharpe, in the units of `frequency`.
+        n_trials: ledger total, *including* this strategy. None reads the ledger.
+        experiment: ledger experiment name to count; ignored if `n_trials` given.
+        frequency: "daily", "weekly", "monthly", "quarterly" or "annual".
+        annualized: whether `sharpe` is already annualised (the authors'
+            `ind_an`). False multiplies by sqrt(periods per year).
+        autocorrelation: first-order autocorrelation of the returns at
+            `frequency` (their `rho`). Non-zero applies their autocorrelation
+            correction to the annualised Sharpe before testing; it does nothing
+            at `frequency="annual"`, as in their code.
+        avg_correlation: assumed average correlation across trials (their
+            `RHO`), which selects the simulated p-value distribution. Only
+            `[0, 1)` is meaningful; outside it the authors fall back to 0.2.
+        n_simulations: repetitions of the simulated family (their `WW`).
+        seed: RNG seed for the simulation. None draws fresh entropy.
+
+    Returns:
+        DataFrame indexed by candidate, with `sharpe` as given,
+        `sharpe_annualized` after annualisation and any autocorrelation
+        correction, `pvalue`, and then `pvalue_*`, `sharpe_*` and `haircut_*`
+        for each of `bonferroni`, `holm`, `bhy` and `average`. `haircut` is the
+        fraction given up, `(sr - sr_adjusted) / sr`.
+
+        A candidate whose Sharpe is not positive gets NaN across the board: the
+        authors' `p_val = 2*(1 - tcdf(T, N-1))` uses `T`, not `|T|`, and exceeds
+        1 for `T < 0`, so their procedure is defined only for a positive
+        reported Sharpe.
+
+        `.attrs` carries `n_trials`, `num_test`, `n_monthly_obs`, `frequency`,
+        `n_simulations`, `seed` and `avg_correlation`.
+
+    Raises:
+        ValueError: unknown `frequency`; `n_obs` below 1; `n_trials` below 2
+            (the search must contain at least this strategy and one other);
+            `n_simulations` below 1; `autocorrelation` outside (-1, 1); or fewer
+            than 2 monthly observations after conversion, which leaves the t
+            distribution without a degree of freedom.
+        LookupError: from `runlog.trial_count` when the ledger has no match.
+    """
+    if frequency not in _HL_PERIODS_PER_YEAR:
+        raise ValueError(
+            f"unknown frequency {frequency!r}; options: {', '.join(_HL_PERIODS_PER_YEAR)}"
+        )
+    if n_obs < 1:
+        raise ValueError("n_obs must be at least 1")
+    if n_simulations < 1:
+        raise ValueError("n_simulations must be at least 1")
+    if not -1.0 < autocorrelation < 1.0:
+        raise ValueError("autocorrelation must be in (-1, 1)")
+
+    reported = pd.Series(sharpe, dtype=float)
+    if reported.index.equals(pd.RangeIndex(len(reported))) and len(reported) == 1:
+        reported.index = pd.Index(["strategy"])
+
+    if n_trials is None:
+        # Imported here so `evaluate` stays importable where the ledger is not
+        # configured; the ledger is consulted only when the count is not given.
+        from capstone.runlog import trial_count
+
+        n_trials = trial_count(experiment)
+    if n_trials < 2:
+        raise ValueError(
+            f"n_trials ({n_trials}) must be at least 2: it is the ledger's total "
+            "including this strategy, and the authors' num_test = n_trials - 1 "
+            "must leave at least one other trial"
+        )
+
+    num_test = int(n_trials) - 1  # the authors' M
+    family_size = int(n_trials)  # the authors' M + 1, for Holm and BHY
+    harmonic = float(np.sum(1.0 / np.arange(1, family_size + 1)))
+
+    periods = _HL_PERIODS_PER_YEAR[frequency]
+    n_monthly = int(np.floor(n_obs * 12 / periods))
+    if n_monthly < 2:
+        raise ValueError(
+            f"{n_obs} {frequency} observations is {n_monthly} months; the "
+            "authors' t test needs at least 2"
+        )
+
+    annualised = reported if annualized else reported * np.sqrt(periods)
+    if autocorrelation and frequency != "annual":
+        rho = autocorrelation
+        annualised = (
+            annualised
+            * (
+                1.0
+                + (2.0 * rho / (1.0 - rho))
+                * (1.0 - ((1.0 - rho**periods) / (periods * (1.0 - rho))))
+            )
+            ** -0.5
+        )
+
+    statistic = annualised / np.sqrt(12) * np.sqrt(n_monthly)
+    pvalue = pd.Series(2.0 * (1.0 - stats.t.cdf(statistic, n_monthly - 1)), index=reported.index)
+    testable = annualised.notna() & (annualised > 0) & pvalue.le(1.0)
+
+    rng = np.random.default_rng(seed)
+    params = _hlz_parameters(avg_correlation)
+    simulated = _simulate_hlz_tstats(
+        num_test,
+        rho=float(params[0]),
+        p_0=float(params[2]),
+        lambda_=float(params[3]),
+        n_simulations=n_simulations,
+        rng=rng,
+    )
+
+    columns = {name: pd.Series(np.nan, index=reported.index) for name in _HAIRCUT_METHODS}
+    for name in reported.index[testable]:
+        p = float(pvalue[name])
+        holm_p, bhy_p = _hl_adjusted_pvalues(p, simulated, family_size, harmonic)
+        columns["bonferroni"][name] = min(num_test * p, 1.0)
+        columns["holm"][name] = holm_p
+        columns["bhy"][name] = bhy_p
+
+    adjusted = pd.DataFrame(columns)
+    adjusted["average"] = adjusted.mean(axis=1)
+
+    out = pd.DataFrame(
+        {
+            "sharpe": reported,
+            "sharpe_annualized": annualised.where(testable),
+            "pvalue": pvalue.where(testable),
+        }
+    )
+    for name in (*_HAIRCUT_METHODS, "average"):
+        # Every adjusted p-value is clipped at 1, so the inverse is never
+        # negative and the haircut never exceeds 100%.
+        survived = (
+            stats.t.ppf(1.0 - adjusted[name] / 2.0, n_monthly - 1)
+            / np.sqrt(n_monthly)
+            * np.sqrt(12)
+        )
+        out[f"pvalue_{name}"] = adjusted[name]
+        out[f"sharpe_{name}"] = survived
+        out[f"haircut_{name}"] = 1.0 - survived / out["sharpe_annualized"]
+
+    out.attrs.update(
+        {
+            "n_trials": int(n_trials),
+            "num_test": num_test,
+            "n_monthly_obs": n_monthly,
+            "frequency": frequency,
+            "n_simulations": int(n_simulations),
+            "seed": seed,
+            "avg_correlation": float(avg_correlation),
+        }
+    )
+    return out.sort_values("pvalue")
+
+
+# ---------------------------------------------------------------------------
+# Local false-discovery rate against an empirical null (Efron 2004, 2007)
+# ---------------------------------------------------------------------------
+
+MIN_LOCAL_FDR_CANDIDATES = 200
+# How far from the median, in robust widths (IQR / 1.349), a z-score can sit and
+# still enter the density fit; see `_fit_mixture`.
+_FIT_RANGE_SCALES = 8.0
+
+
+@dataclass(frozen=True)
+class EmpiricalNull:
+    """The null distribution estimated from the candidates themselves, on the z scale.
+
+    `z = Phi^{-1}(1 - p)` for one-sided p-values, so a null candidate is N(0, 1)
+    in theory. `delta` and `sigma` are where the bulk of the candidates actually
+    sits; `pi0` is the estimated share of nulls.
+    """
+
+    delta: float
+    sigma: float
+    pi0: float
+
+
+def _z_scores(pvalues: pd.Series) -> pd.Series:
+    clipped = pvalues.clip(lower=1e-300, upper=1.0 - 1e-16)
+    return pd.Series(stats.norm.isf(clipped), index=pvalues.index)
+
+
+def _fit_mixture(z: np.ndarray, degree: int) -> tuple[np.ndarray, np.ndarray, float]:
+    # Lindsey's method: a Poisson regression of histogram counts on a polynomial
+    # in z estimates the density of all candidates, null and real together.
+    import statsmodels.api as sm
+
+    #
+    # The bins span only the z-scores within `_FIT_RANGE_SCALES` robust widths of
+    # the median. One extreme z-score (a p-value of 0 is z = 37) would otherwise
+    # stretch the bins until the centre of the histogram is a few bins wide:
+    # every candidate's lfdr degrades, and the centre can stop being concave.
+    # Candidates outside the range are left out of the fit, not out of the
+    # scoring; `local_fdr` holds the density flat beyond the last bin.
+    n = len(z)
+    # A large point mass can dominate the fit before it collapses the IQR.
+    if np.unique(z, return_counts=True)[1].max() >= 0.4 * n:
+        raise ValueError("the empirical null is not identifiable: 40% or more p-values are tied")
+    q25, median, q75 = np.quantile(z, [0.25, 0.5, 0.75])
+    reach = _FIT_RANGE_SCALES * (q75 - q25) / 1.349
+    inside = z[np.abs(z - median) <= reach]
+    lo, hi = float(inside.min()), float(inside.max())
+    if not q75 > q25 or not hi > lo:
+        raise ValueError("the z-scores have no spread to fit")
+    pad = 0.1 * (hi - lo)
+    edges = np.linspace(lo - pad, hi + pad, max(20, min(120, n // 5)) + 1)
+    mids = (edges[:-1] + edges[1:]) / 2
+    counts, _ = np.histogram(inside, edges)
+    x = (mids - mids.mean()) / mids.std()
+    design = np.column_stack([x**k for k in range(degree + 1)])
+    fit = sm.GLM(counts, design, family=sm.families.Poisson()).fit()
+    return mids, design @ fit.params, float(edges[1] - edges[0])
+
+
+def empirical_null(pvalues: pd.Series, *, degree: int = 3, central: float = 0.5) -> EmpiricalNull:
+    """Estimate the null from the middle of the candidates' z-scores (central matching).
+
+    Efron (2004): if most candidates are null, the centre of their histogram is
+    the null's shape. Fit the log density of all z-scores (`_fit_mixture`),
+    then a parabola to it over the central `central` share of candidates; a
+    normal density is a parabola on the log scale, so its vertex and curvature
+    give the null's centre and width, and its height the share of nulls.
+
+    This is what correlation does to a candidate set: a shared factor moves
+    every candidate's z-score together, so within one set the nulls sit at
+    delta = sqrt(rho) W (W the factor's realisation) with width sqrt(1 - rho),
+    not at N(0, 1). On all-null sets of 1,000 candidates the fitted width
+    averaged 0.996 when independent and 0.705 at pairwise correlation 0.5
+    (theory: 1 and 0.707), and the fitted centre tracked the shared shift with
+    correlation 0.999.
+
+    `degree` is the polynomial degree of the density fit. Efron's default of 7
+    needs thousands of candidates: with 200, all-null sets flagged something
+    at `local_fdr` <= 0.2 in 30-35% of sets, against 10-12% at degree 5 and
+    2-5% at degree 3 (0.3-2% with 1,000 candidates), over four seed ranges.
+    Hence degree 3 as the default.
+
+    Below 200 candidates the centre of the histogram is too ragged to fit: at
+    100 with 10 planted signals, 4% of fits failed. Hence
+    `MIN_LOCAL_FDR_CANDIDATES`.
+
+    Raises:
+        ValueError: with fewer than `MIN_LOCAL_FDR_CANDIDATES` usable
+            p-values, if 40% or more coincide on the clipped z-score scale
+            (a point mass), if there is no spread to fit, or if the centre of
+            the histogram isn't concave (no null to find; not seen at 200 or
+            more candidates in 1,200 sets each).
+    """
+    z = _z_scores(pvalues.dropna()).to_numpy(dtype=float)
+    if len(z) < MIN_LOCAL_FDR_CANDIDATES:
+        raise ValueError(
+            f"need at least {MIN_LOCAL_FDR_CANDIDATES} usable p-values to estimate a null, "
+            f"got {len(z)}"
+        )
+    null, _, _, _ = _central_matching(z, degree, central)
+    return null
+
+
+def _central_matching(z: np.ndarray, degree: int, central: float):
+    mids, log_counts, width = _fit_mixture(z, degree)
+    lo, hi = np.quantile(z, [(1 - central) / 2, (1 + central) / 2])
+    middle = (mids >= lo) & (mids <= hi)
+    c2, c1, c0 = np.polyfit(mids[middle], log_counts[middle], 2)
+    if c2 >= 0:
+        raise ValueError("the centre of the z-score histogram isn't concave; no null to fit")
+    sigma = float(np.sqrt(-1.0 / (2.0 * c2)))
+    delta = float(-c1 / (2.0 * c2))
+    # The fitted parabola is pi0 * n * width * N(delta, sigma^2) on the count scale.
+    peak = c0 - c1**2 / (4.0 * c2)
+    pi0 = float(min(1.0, np.exp(peak) * np.sqrt(2.0 * np.pi) * sigma / (len(z) * width)))
+    return EmpiricalNull(delta, sigma, pi0), mids, log_counts, width
+
+
+def local_fdr(
+    pvalues: pd.Series,
+    *,
+    degree: int = 3,
+    central: float = 0.5,
+) -> pd.Series:
+    """Probability that each candidate is null, given where it sits among the rest.
+
+    lfdr(z) = pi0 f0(z) / f(z) (Efron 2007): the null density over the density
+    of all candidates at that candidate's z-score, capped at 1, with f0 and pi0
+    from `empirical_null`. Unlike a p-value it is a statement about this
+    candidate, not a tail area; 0.2 is the conventional threshold.
+
+    What it is for: correlated candidates. A shared factor shifts and rescales
+    every z-score together, and the estimated null moves with it, so all-null
+    sets flagged something as often at pairwise correlation 0.5 as at 0
+    (2-5% of sets at 200 candidates). With planted signals at correlation 0.5
+    it kept the false-discovery proportion at 0.4-6.8% while finding more of
+    them than BH at 10%: 0.96 against 0.62-0.76 of strong signals, 0.54
+    against 0.40-0.50 when 10% were real at shift 2.5.
+
+    What it changes about the question: against an empirical null a candidate
+    is real if it **stands out from the other candidates**, not if its Sharpe
+    ratio is above zero. An edge every candidate shares becomes part of the
+    null. For "is the Sharpe above zero at all", use `bh_adjusted` or
+    `by_adjusted`.
+
+    What it costs: on independent candidates it is more conservative than BH
+    at 10%, finding 0.60 against 0.72 of strong signals and 0.19 against 0.49
+    when 10% were real at shift 2.5, because it estimates the null instead of
+    knowing it.
+
+    Only candidates above the null's centre can be called real: below it,
+    lfdr is 1. Low z-scores are the wrong direction for one-sided p-values.
+
+    But strongly negative candidates still hurt the positive ones. The density
+    fit is one cubic across both tails, and a heavy lower tail bends it so that
+    the upper tail is underfitted: with 300 candidates and five planted at
+    z = +4, adding five at z = -4 (what a sign-symmetric search produces) cut
+    the planted five's call rate at lfdr <= 0.2 from 0.80 to 0.19 over 100
+    sets, and when the negatives sit tightly together (all five at exactly
+    -4, planted five at exactly +4) from 1.00 to 0.00: the loss can be total.
+    Don't feed it both a signal and its sign-flipped twin; keep one
+    orientation per hypothesis.
+
+    A few extreme z-scores, such as a p-value of exactly 0 from a leaky
+    backtest, are left out of the density fit (`_fit_mixture`) and still
+    scored, so they don't change anyone else's lfdr: one candidate at z = 15 or
+    p = 0 left the planted five's median lfdr at 0.028, against 0.029 without it.
+
+    Its role is a graded score, reported next to the gate, not a gate: the
+    stage-1 gate stays BH-based unless calibration shows lfdr finds more real
+    signals at our base rate. Feed it every candidate a search produced (or
+    one search-adjusted p-value per hypothesis family), never only the
+    winners: a null estimated from selected winners is shifted up, and real
+    candidates then look ordinary.
+
+    Pass one-sided p-values (`sharpe_test(...).pvalue_greater`). NaN stays NaN.
+    Needs at least `MIN_LOCAL_FDR_CANDIDATES` usable p-values, which most single
+    batches of 50-200 candidates won't reach; `evidence_profile` reports NaN for
+    those, but this function raises.
+
+    Raises:
+        ValueError: with fewer than `MIN_LOCAL_FDR_CANDIDATES` usable
+            p-values, if 40% or more coincide on the clipped z-score scale,
+            if there is no spread to fit, or if the centre of the histogram
+            isn't concave (no null to fit; see `empirical_null`).
+    """
+    usable = pvalues.dropna()
+    if len(usable) < MIN_LOCAL_FDR_CANDIDATES:
+        raise ValueError(
+            f"need at least {MIN_LOCAL_FDR_CANDIDATES} usable p-values, got {len(usable)}"
+        )
+    z = _z_scores(usable).to_numpy(dtype=float)
+    fitted, mids, log_counts, width = _central_matching(z, degree, central)
+    density = np.interp(z, mids, np.exp(log_counts)) / (len(z) * width)
+    null_density = fitted.pi0 * stats.norm.pdf(z, fitted.delta, fitted.sigma)
+    values = np.minimum(1.0, null_density / density)
+    values[z <= fitted.delta] = 1.0
+    out = pd.Series(np.nan, index=pvalues.index)
+    out.loc[usable.index] = values
+    return out
