@@ -13,7 +13,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0", "ruff==0.15.5"]  # pinned: an unpinned linter reds CI on its own schedule
+dev = [
+    "pytest>=7.0",
+    "ruff==0.15.5",  # pinned: an unpinned linter reds CI on its own schedule
+    "matplotlib>=3.7",  # capstone.pipeline.reference_report draws its figures
+]
 agents = ["anthropic>=1.0"]  # capstone.factors model calls; tests use a fake client
 
 [build-system]

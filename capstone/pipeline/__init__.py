@@ -1,1 +1,1 @@
-"""Pipeline stages and the guards on the data they read."""
+"""Pipeline stages, the guards on the data they read, and the plain data that describes them."""
