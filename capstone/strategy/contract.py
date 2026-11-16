@@ -218,7 +218,17 @@ def save_spec(spec: StrategySpec, path: Path) -> None:
 
 def load_spec(path: Path) -> StrategySpec:
     """The spec a file holds (refused if the file is not exactly what its spec writes)."""
-    return StrategySpec.from_toml(Path(path).read_bytes().decode("utf-8"))
+    text = Path(path).read_bytes().decode("utf-8")
+    schema = tomllib.loads(text).get("schema_version")
+    if schema == 5:
+        from capstone.strategy.compiled import CompiledStrategySpec
+
+        return CompiledStrategySpec.from_toml(text)
+    if schema == 4:
+        from capstone.strategy.diversified import DiversifiedStrategySpec
+
+        return DiversifiedStrategySpec.from_toml(text)
+    return StrategySpec.from_toml(text)
 
 
 # ---------------------------------------------------------------------------
@@ -277,6 +287,9 @@ def target_weights(spec: StrategySpec, panel: Panel, as_of) -> pd.Series:
     A panel holding any date after `DISCOVERY_END` is refused
     (`CURRENT_ROUTE_MISSING`): the holdout is not read through the contract.
     """
+    from capstone.strategy.recorded import require_current_implementation
+
+    require_current_implementation(spec)
     dates = pd.DatetimeIndex(panel.universe.index)
     if len(dates) and dates.max() > pd.Timestamp(DISCOVERY_END):
         raise HoldoutError(CURRENT_ROUTE_MISSING)
@@ -293,6 +306,13 @@ def _target_weights(spec: StrategySpec, panel: Panel, as_of) -> pd.Series:
     on or before `as_of`. Only `target_weights` calls this, after refusing
     any panel holding a date past `DISCOVERY_END`.
     """
+    from capstone.strategy.compiled import CompiledStrategySpec, compiled_weights
+    from capstone.strategy.diversified import DiversifiedStrategySpec, diversified_weights
+
+    if isinstance(spec, CompiledStrategySpec):
+        return compiled_weights(spec, panel, as_of)
+    if isinstance(spec, DiversifiedStrategySpec):
+        return diversified_weights(spec, panel, as_of)
     dates = pd.DatetimeIndex(panel.universe.index)
     as_of = pd.Timestamp(as_of)
     anchor = pd.Timestamp(spec.anchor)
