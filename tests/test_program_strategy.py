@@ -251,10 +251,8 @@ def test_undefined_intermediate_cannot_become_a_valid_score(panel, expression):
 
 
 def test_undefined_domains_are_nan_in_the_default_and_the_strict_interpreter():
-    # The team interpreter already turns an undefined result into NaN in its default
-    # mode, so unlike the testbed's historical default, an outer sign cannot hide an
-    # inner infinity in either mode. The testbed's legacy-default assertions
-    # (a signed infinity, ZeroDivisionError) do not apply here.
+    # The interpreter turns an undefined result into NaN in its default mode as well, so
+    # an outer sign cannot hide an inner infinity in either mode.
     fields = {"close": pd.DataFrame([[11.0, 21.0, 31.0, 41.0]])}
     node = parse("sign((close - 25) / (close - 11))")
     for strict in (False, True):

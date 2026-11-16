@@ -464,7 +464,7 @@ def program_weights(spec, panel, as_of):
             return pd.Series(
                 dtype=float, name="weight", index=pd.Index([], dtype="int64", name="permno")
             )
-    # B3: the formation book reads only inputs as of `formation`, never `at` or costs.
+    # The formation book reads only inputs as of `formation`, never `at` or costs.
     book, eligibility = input_memo.panel_cached(
         "formation",
         spec,
