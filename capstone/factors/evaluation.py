@@ -15,11 +15,13 @@ validation stack), one column per `factor_id`.
 - **Holdout guard**: the discovery period ends `DISCOVERY_END`; nothing after
   it is loaded, and a panel holding a later date is refused.
 - **Factor to returns** (`factor_returns`): the factor's value on universe
-  stocks, as dollar-neutral weights with gross exposure 1 (`backtest.to_weights`);
-  a weight set at day t's close earns day t+1's return, as in
-  `backtest.run_backtest`. The book is rebalanced every `hold` trading days,
+  stocks, traded by the project's one backtest (`backtest.backtest_frame`)
+  as dollar-neutral weights with gross exposure 1; a weight set at day t's
+  close earns day t+1's return, and a lookback's warm-up is no position
+  (NaN), not flat days. The book is rebalanced every `hold` trading days,
   an option, not a fixed choice. Each trade pays half the stock's quoted
-  spread that day (`sd.quoted_spread`): costs per stock and per day.
+  spread that day (`sd.quoted_spread`): costs per stock and per day. This
+  module keeps no positions, trades or cost loop of its own.
 - **Trials**: every (factor, holding period) evaluated is a trial with its
   own matrix column, so trying several holding periods is counted, not hidden.
 - **Ledger** (`evaluate_factors`): every evaluated (factor, holding period) is logged with
@@ -36,7 +38,7 @@ import numpy as np
 import pandas as pd
 
 from capstone import shared_data as sd
-from capstone.backtest import to_weights
+from capstone.backtest import backtest_frame, to_weights
 from capstone.factors.interpret import evaluate
 from capstone.factors.tree import Node, unparse
 from capstone.runlog import log_run
@@ -156,66 +158,53 @@ class FactorReturns:
         return float(r.mean() / sd_ * np.sqrt(PERIODS_PER_YEAR)) if sd_ > 0 else float("nan")
 
 
+def factor_signal(tree: Node, panel: Panel) -> pd.DataFrame:
+    """The factor's value on the stocks that may be held that day, NaN elsewhere."""
+    return evaluate(tree, panel.fields).where(panel.universe)
+
+
 def factor_weights(tree: Node, panel: Panel) -> pd.DataFrame:
-    """The factor as dollar-neutral weights (gross 1) on universe stocks, each day.
+    """The factor as dollar-neutral weights (gross 1) on universe stocks, each day:
+    the book `signal_returns` trades on a rebalance day.
 
     A day with no signal on any universe stock (a lookback still warming up,
-    say) is a row of NaN, not of zeros, so `returns_from_weights` can tell
-    "no signal" from "a signal that nets to zero weight".
+    say) is a row of NaN, not of zeros: "no signal" is not "a signal that
+    nets to zero weight".
     """
-    signal = evaluate(tree, panel.fields).where(panel.universe)
+    signal = factor_signal(tree, panel)
     weights = to_weights(signal, demean=True, gross=1.0).fillna(0.0)
     return weights.where(signal.notna().any(axis=1), axis=0)
 
 
-def returns_from_weights(weights: pd.DataFrame, panel: Panel, hold: int = 1) -> FactorReturns:
-    """Returns of trading `weights`, rebalancing every `hold` trading days.
+def signal_returns(signal: pd.DataFrame, panel: Panel, hold: int = 1) -> FactorReturns:
+    """Returns of trading `signal`, rebalancing every `hold` trading days, from
+    `backtest.backtest_frame`.
 
-    On a rebalance day (every `hold`-th day from the first) the book is set to
-    that day's weights and held until the next one; `hold=1` rebalances
-    daily. A weight set at day t's close earns day t+1's return (positions
-    are the weights shifted one day, as in `backtest.run_backtest`). Trading
-    the change in weight pays half that day's quoted spread. Between
-    rebalances the weights are held fixed, so the small trades that would
-    keep them fixed as prices drift are not charged.
-
-    A row of NaN weights means no signal that day. A day whose book came from
-    such a row, with nothing traded, holds no position: its returns, cost and
-    turnover are NaN, not 0.0, so a lookback's warm-up doesn't count as flat
-    days (the rule `backtest` adopts in #55). A real signal that nets to zero
+    On a rebalance day (every `hold`-th day counted from the panel's first) the
+    book is set to that day's weights and held until the next one; `hold=1`
+    rebalances daily. A weight set at day t's close earns day t+1's return.
+    Trading one unit of a stock's weight pays half its quoted spread that day;
+    a stock with no spread pays that day's median, and a trade on a day where
+    no stock has a spread raises `ValueError` rather than trading for free.
+    A day whose book came from no signal, with nothing traded, holds no
+    position: its returns, cost and turnover are NaN, not 0.0, so a lookback's
+    warm-up doesn't count as flat days (#55). A real signal that nets to zero
     weight still earns 0.0.
     """
-    if hold < 1:
-        raise ValueError("hold must be at least 1 day")
-    has_signal = weights.notna().any(axis=1).astype(float)
-    weights = weights.fillna(0.0)
-    if hold > 1:
-        rebalance = pd.Series(np.arange(len(weights)) % hold == 0, index=weights.index)
-        weights = weights.where(rebalance, axis=0).ffill()
-        has_signal = has_signal.where(rebalance).ffill()
-    returns = panel.fields["returns"]
-    positions = weights.shift(1)
-    gross = (positions * returns).sum(axis=1, min_count=1)
-    trades = weights.diff().abs()
-    trades.iloc[0] = weights.iloc[0].abs()  # building the first book is a trade too
-    spread = panel.half_spread.reindex_like(trades)
-    # A stock with no spread that day (out of the data): that day's median spread.
-    spread = spread.where(spread.notna(), spread.median(axis=1), axis=0)
-    cost = (trades * spread).sum(axis=1).shift(1)  # charged on the day the position is first held
-    turnover = trades.sum(axis=1).shift(1)
-    gross.iloc[:1] = np.nan
-    # The book held on day t was set at t-1: idle if that came from no signal.
-    idle = (has_signal.shift(1) == 0) & (turnover == 0)
-    gross[idle] = np.nan
-    cost[idle] = np.nan
-    turnover[idle] = np.nan
-    net = gross - cost
-    return FactorReturns(net.rename("net"), gross.rename("gross"), cost.rename("cost"), turnover)
+    frame = backtest_frame(
+        signal,
+        panel.fields["returns"],
+        cost_bps=panel.half_spread * 1e4,  # the backtest takes basis points
+        demean=True,
+        gross=1.0,
+        hold=hold,
+    )
+    return FactorReturns(frame["net"], frame["gross"], frame["cost"], frame["turnover"])
 
 
 def factor_returns(tree: Node, panel: Panel, hold: int = 1) -> FactorReturns:
     """The factor's portfolio returns, rebalanced every `hold` trading days."""
-    return returns_from_weights(factor_weights(tree, panel), panel, hold)
+    return signal_returns(factor_signal(tree, panel), panel, hold)
 
 
 def column_name(fid: str, hold: int) -> str:
@@ -241,9 +230,9 @@ def evaluate_factors(
     columns, summary = {}, []
     for fid, tree in trees.items():
         try:
-            weights = factor_weights(tree, panel)
+            signal, error = factor_signal(tree, panel), ""
         except (ValueError, ArithmeticError) as exc:
-            weights, error = None, str(exc)
+            signal, error = None, str(exc)
         for hold in holds:
             params = {
                 "factor_id": fid,
@@ -255,10 +244,18 @@ def evaluate_factors(
                 "costs": "half quoted spread per unit traded",
                 **(extra_params or {}),
             }
-            if weights is None:
+            if signal is None:
                 log_run(LEDGER_NAME, params=params, metrics={"error": error}, tags=["evaluation"])
                 continue
-            result = returns_from_weights(weights, panel, hold)
+            try:
+                result = signal_returns(signal, panel, hold)
+            except ValueError as exc:
+                # The backtest refused (no cost rate on a trading day): the trial
+                # was run, so it is counted, and the refusal is not swallowed.
+                log_run(
+                    LEDGER_NAME, params=params, metrics={"error": str(exc)}, tags=["evaluation"]
+                )
+                raise
             metrics = {
                 "sharpe_net": result.sharpe("net"),
                 "sharpe_gross": result.sharpe("gross"),
