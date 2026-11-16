@@ -1,0 +1,23 @@
+{
+  "n_families": 10,
+  "k": 5,
+  "n_boot": 199,
+  "share_real": 0.3,
+  "sharpe": 0.5,
+  "planted_worlds": 100,
+  "null_worlds": 200,
+  "first_seed": 1000,
+  "q4_incubate": null,
+  "alpha": 0.05,
+  "horizons": [252, 756, 1260, 2520],
+  "block": 20,
+  "confirm_horizons": [252, 1260, 2520, 5040],
+  "live_draws": 50,
+  "power": {
+    "sharpes": [0.25, 0.5, 1.0, 1.5, 2.0],
+    "years": [1, 3, 5, 10, 20, 30],
+    "paths": 2000,
+    "chunk": 250,
+    "seed": 7
+  }
+}
