@@ -13,7 +13,7 @@ from capstone.pipeline.budget import BudgetedClient
 
 
 class _Capture:
-    def __init__(self, max_retries=0):
+    def __init__(self, max_retries=2):  # the SDK's default: make_client must override it
         self.max_retries = max_retries
         self.kwargs = []
         self.messages = self
@@ -53,7 +53,7 @@ def test_make_client_wraps_for_prompt_caching_only_when_asked(monkeypatch):
 def test_wrappers_do_not_hide_sdk_retries_from_the_budget(wrapper):
     with pytest.raises(ValueError, match="hidden SDK retries"):
         BudgetedClient(wrapper(_Capture(max_retries=2)), 1)
-    BudgetedClient(wrapper(_Capture()), 1)
+    BudgetedClient(wrapper(_Capture(max_retries=0)), 1)
 
 
 def test_the_models_are_priced():
