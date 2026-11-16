@@ -1,0 +1,9 @@
+# Parameters for research/evaluate_factors.py (QUANTIT-81).
+#
+# Holding periods to evaluate every stored factor under, in trading days: the
+# book is rebalanced every `hold` days and held in between (1 = daily,
+# 5 = weekly, 21 = monthly). Rebalancing is an option, not a fixed choice.
+# Each (factor, holding period) is its own ledger trial and its own matrix
+# column, so adding options multiplies the trial count the funnel corrects
+# for: choose them before seeing results, and keep the list short.
+holds = [1, 5, 21]
