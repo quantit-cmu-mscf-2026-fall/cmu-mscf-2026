@@ -2,12 +2,13 @@
 
 Two passes per query: by publication date (new work) and by *record creation*
 date (work OpenAlex indexed late, which the publication-date window would miss).
-Paginates with a cursor so a query is never truncated by relevance ranking.
+Paginates with a cursor, up to `max_pages_per_query` pages (times the escalation
+depth); a query that hits that cap logs a `truncated` warning rather than stopping silently.
 """
 
 import os
 
-from ..http import get
+from ..http import get, redact
 from ..models import Paper, normalize_title
 
 API = "https://api.openalex.org"
@@ -79,13 +80,18 @@ def _paged(search: str | None, flt: str, max_pages: int, log) -> list[dict]:
         try:
             data = get(f"{API}/works", params=_params(params)).json()
         except Exception as e:
-            log(f"  openalex page failed: {e}")
+            log(f"  openalex page failed: {redact(e)}")
             break
         results += data.get("results", [])
         cursor = (data.get("meta") or {}).get("next_cursor")
         pages += 1
         if len(data.get("results", [])) < PAGE:
             break
+    if cursor and pages >= max_pages:
+        log(
+            f"  openalex: truncated at {pages} pages ({len(results)} results) for "
+            f"{(search or flt)[:50]!r}; raise max_pages_per_query to fetch the rest"
+        )
     return results
 
 
@@ -99,7 +105,7 @@ def resolve_institutions(names: list[str], log=print) -> list[str]:
                 .get("results", [])
             )
         except Exception as e:
-            log(f"  openalex: could not resolve institution {name}: {e}")
+            log(f"  openalex: could not resolve institution {name}: {redact(e)}")
             continue
         if res:
             ids.append(res[0]["id"].rsplit("/", 1)[-1])
@@ -155,7 +161,7 @@ def references_of(title: str, doi: str | None, cap: int, log=print) -> list[Pape
         try:
             candidates += _with_references(filter=f"doi:{doi.split('doi.org/')[-1]}")
         except Exception as e:
-            log(f"  openalex: DOI lookup failed for '{title[:55]}': {e}")
+            log(f"  openalex: DOI lookup failed for '{title[:55]}': {redact(e)}")
     want = normalize_title(title)
     try:
         candidates += [
@@ -164,7 +170,7 @@ def references_of(title: str, doi: str | None, cap: int, log=print) -> list[Pape
             if normalize_title(w.get("display_name") or "") == want
         ]
     except Exception as e:
-        log(f"  openalex: title search failed for '{title[:55]}': {e}")
+        log(f"  openalex: title search failed for '{title[:55]}': {redact(e)}")
     best = max(candidates, key=lambda w: len(w.get("referenced_works") or []), default={})
     ids = [u.rsplit("/", 1)[-1] for u in best.get("referenced_works") or []][:cap]
     out = []
@@ -173,7 +179,9 @@ def references_of(title: str, doi: str | None, cap: int, log=print) -> list[Pape
         try:
             works = get(f"{API}/works", params=_params(params)).json().get("results", [])
         except Exception as e:
-            log(f"  openalex: reference page failed for '{title[:55]}', will retry next run: {e}")
+            log(
+                f"  openalex: reference page failed for '{title[:55]}', will retry next run: {redact(e)}"
+            )
             return []
         out += [to_paper(w, f"cited-by:{title[:60]}") for w in works if w.get("display_name")]
     log(f"  openalex: {len(out):>4} references of '{title[:55]}'")

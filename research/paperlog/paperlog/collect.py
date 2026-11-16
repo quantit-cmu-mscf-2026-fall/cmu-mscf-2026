@@ -42,7 +42,9 @@ def base_since(con, cfg, since_arg=None, days_arg=None) -> str:
     if days_arg:
         return (date.today() - timedelta(days=days_arg)).isoformat()
     last = con.execute(
-        "SELECT started FROM runs WHERE finished IS NOT NULL ORDER BY id DESC LIMIT 1"
+        # a run that fetched nothing (every source failed) must not move the window
+        "SELECT started FROM runs WHERE finished IS NOT NULL AND fetched > 0 "
+        "ORDER BY id DESC LIMIT 1"
     ).fetchone()
     if last:
         d = date.fromisoformat(last["started"][:10]) - timedelta(days=cfg.get("overlap_days", 7))

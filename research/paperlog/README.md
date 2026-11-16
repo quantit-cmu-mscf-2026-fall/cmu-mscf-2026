@@ -20,7 +20,8 @@ translates Chinese-language papers into English.
    re-fetches value you already have, and a quiet week automatically searches wider
    instead of returning five papers. Escalation stops early when a level stops yielding.
 2. **Sources.** arXiv (submissions and revisions), OpenAlex (English and Chinese queries,
-   by publication date and by index date, cursor-paginated so nothing is truncated),
+   by publication date and by index date, cursor-paginated up to `max_pages_per_query`
+   pages; a query that hits the cap says so in the log and the next escalation level goes deeper),
    and Semantic Scholar (papers citing your anchors, plus the references of newly
    adopted papers).
 3. **Deduplicate.** By arXiv ID, DOI, and fuzzy title, within the batch and against the
@@ -42,7 +43,7 @@ The search widens on its own as the loop runs:
 - **References of newly adopted papers** are pulled once, which surfaces foundational
   work that keyword queries miss because the terminology has changed.
 - **`paperlog suggest-queries --write`** reads your adopted papers and proposes new
-  queries (English and Chinese) into `learned_queries.yaml`, kept separate from
+  queries (English and Chinese) into `learned_queries.yaml` (gitignored: it is built from the team's adopted papers), kept separate from
   `config.yaml` so you can see what was added and prune it.
 - **`paperlog add`** puts anything you find yourself straight into the log.
 

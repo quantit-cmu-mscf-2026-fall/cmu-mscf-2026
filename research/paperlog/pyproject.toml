@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "paperlog"
 version = "0.2.0"
 description = "Automated academic paper log for agentic alpha discovery and its validation"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
   "requests>=2.31",
   "feedparser>=6.0",

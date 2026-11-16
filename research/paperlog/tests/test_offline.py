@@ -754,3 +754,214 @@ def test_filtered_papers_revisited_when_prefilter_terms_or_mode_change(tmp_path)
     # terms widened, version not bumped
     wider = {**strict, "finance_terms": ["stock"]}
     assert cli.revisit_filtered(con, wider, loosen=False) == [k]
+
+
+# ---------------------------------------------------------------- review fixes (#38)
+def _screened(con, title, rel=5, rubric=1, **paper):
+    k = dbm.insert(con, Paper(title=title, **paper), 1)
+    save(
+        con,
+        k,
+        {"relevance": rel, "tags": [], "title_en": title, "summary_en": "s"},
+        "m",
+        rubric,
+    )
+    return k
+
+
+def test_a_failed_http_call_never_prints_the_openalex_api_key(monkeypatch):
+    import requests
+    from paperlog import http
+
+    secret = "DUMMYKEY123"
+    monkeypatch.setenv("OPENALEX_API_KEY", secret)
+
+    def forbidden(url, params=None, **kw):
+        r = requests.Response()
+        r.status_code, r.reason = 403, "Forbidden"
+        r.url = f"{url}?per_page=200&api_key={secret}&sort=x"
+        return r
+
+    monkeypatch.setattr(http.requests, "get", forbidden)
+    lines: list[str] = []
+    assert openalex._paged("q", "f", 2, lines.append) == []
+    assert lines and secret not in " ".join(lines) and "api_key=***" in " ".join(lines)
+    lines.clear()
+    assert openalex.resolve_institutions(["MIT"], lines.append) == []
+    assert secret not in " ".join(lines)
+    try:
+        http.get("https://api.openalex.org/works", params={"api_key": secret})
+    except requests.HTTPError as e:
+        assert secret not in str(e)
+    else:
+        raise AssertionError("expected an HTTPError")
+
+
+def test_rescreening_or_re_adding_keeps_a_human_decision(tmp_path):
+    con = dbm.connect(str(tmp_path / "s.db"))
+    keys = {}
+    for status in ("adopted", "read", "rejected", "screened"):
+        keys[status] = _screened(con, f"Paper {status}", doi=f"10.2/{status}")
+        cli.set_review(con, keys[status], status, None, None)
+    for status, k in keys.items():  # what rescreen --all, or `add` of a known paper, does
+        save(con, k, {"relevance": 4, "tags": [], "summary_en": "again"}, "m", 2)
+        row = con.execute("SELECT status, relevance, rubric_version FROM papers WHERE key=?", (k,))
+        assert tuple(row.fetchone()) == (status, 4, 2)
+    new = dbm.insert(con, Paper(title="Fresh", doi="10.2/fresh"), 1)
+    save(con, new, {"relevance": 3, "tags": []}, "m", 1)
+    assert con.execute("SELECT status FROM papers WHERE key=?", (new,)).fetchone()[0] == "screened"
+
+
+def test_pending_hands_out_only_screened_papers(tmp_path, monkeypatch):
+    dbp = str(tmp_path / "pend.db")
+    con = dbm.connect(dbp)
+    unscreened = dbm.insert(con, Paper(title="Unscreened", doi="10.3/u"), 1)
+    rejected = _screened(con, "Rejected", rel=5, doi="10.3/r")
+    cli.set_review(con, rejected, "rejected", None, None)
+    adopted = _screened(con, "Adopted", rel=4, doi="10.3/a")
+    cli.set_review(con, adopted, "adopted", None, None)
+    kept = _screened(con, "Screened", rel=3, doi="10.3/s")
+    con.commit()
+    monkeypatch.setenv("PAPERLOG_DB", dbp)
+    got = [p["key"] for p in api.pending()]
+    assert unscreened not in got and rejected not in got
+    assert sorted(got) == sorted([adopted, kept])
+    api.mark_ingested(got)
+    save(con, unscreened, {"relevance": 5, "tags": []}, "m", 1)  # screened later: still claimable
+    con.commit()
+    assert [p["key"] for p in api.pending(min_relevance=3)] == [unscreened]
+
+
+def test_a_run_where_every_fetch_failed_does_not_move_the_next_window(tmp_path):
+    con = dbm.connect(str(tmp_path / "w.db"))
+    cfg = {"overlap_days": 7, "lookback_days_first_run": 60}
+    con.execute(
+        "INSERT INTO runs (started, finished, since, fetched) VALUES (?,?,?,0)",
+        (dbm.now(), dbm.now(), "2026-09-16"),
+    )
+    expected_first = (date.today() - timedelta(days=60)).isoformat()
+    assert collect.base_since(con, cfg) == expected_first  # the empty run is not a checkpoint
+    con.execute(
+        "INSERT INTO runs (started, finished, since, fetched) VALUES (?,?,?,5)",
+        ("2026-10-20T00:00:00+00:00", dbm.now(), "2026-10-13"),
+    )
+    assert collect.base_since(con, cfg) == "2026-10-13"
+
+
+def test_a_repeat_sighting_fills_a_missing_date_url_venue_and_authors(tmp_path):
+    dbp = str(tmp_path / "g.db")
+    con = dbm.connect(dbp)
+    k = dbm.insert(con, Paper(title="Gappy", doi="10.4/g"), 1)
+    full = Paper(
+        title="Gappy",
+        doi="10.4/g",
+        published="2026-07-01",
+        url="https://x.org/g",
+        venue="JF",
+        authors=["A B"],
+    )
+    dbm.add_sighting(con, k, full)
+    con.commit()
+    row = dbm.row_to_dict(con.execute("SELECT * FROM papers WHERE key=?", (k,)).fetchone())
+    assert (row["published"], row["url"], row["venue"], row["authors"]) == (
+        "2026-07-01",
+        "https://x.org/g",
+        "JF",
+        ["A B"],
+    )
+    dbm.add_sighting(con, k, Paper(title="Gappy", doi="10.4/g", published="2030-01-01", venue="X"))
+    row = con.execute("SELECT published, venue FROM papers WHERE key=?", (k,)).fetchone()
+    assert tuple(row) == ("2026-07-01", "JF")  # a filled value is never overwritten
+    assert [p["key"] for p in api.papers(since="2026-06-01", db_path=dbp)] == [k]
+
+
+def test_same_title_with_different_ids_are_different_papers(tmp_path):
+    a = Paper(title="Deep Hedging", arxiv_id="1802.03042", sources=["arxiv"])
+    b = Paper(title="Deep Hedging", arxiv_id="2103.11948", sources=["openalex"])
+    assert len(dedupe.dedupe_batch([a, b])) == 2
+    con = dbm.connect(str(tmp_path / "d.db"))
+    dbm.insert(con, a, 1)
+    assert dbm.find_existing(con, b) is None
+    assert dedupe.match_db(b, dbm.all_titles(con)) is None
+    assert dbm.find_existing(con, Paper(title="Deep Hedging", arxiv_id="1802.03042v2")) == a.key
+    # a third record of the first paper still finds the first
+    assert (
+        len(dedupe.dedupe_batch([a, b, Paper(title="Deep hedging.", arxiv_id="1802.03042")])) == 2
+    )
+
+
+def test_parts_of_a_series_are_not_merged_by_fuzzy_title_match():
+    one = Paper(title="Option Pricing with Neural Networks, Part I", arxiv_id="2001.00001")
+    two = Paper(title="Option Pricing with Neural Networks, Part II", doi="10.5/part2")
+    assert len(dedupe.dedupe_batch([one, two])) == 2
+    v1 = Paper(title="Deep Learning for Asset Pricing 2")
+    v2 = Paper(title="Deep Learning for Asset Pricing 3")
+    assert len(dedupe.dedupe_batch([v1, v2])) == 2
+    assert dedupe.match_db(two, [(one.key, one.title_norm, None, None)]) is None
+    # punctuation and casing variants of one title still merge
+    same = Paper(title="Option pricing with neural networks - part i")
+    assert len(dedupe.dedupe_batch([one, same])) == 1
+
+
+def test_a_preprint_and_its_journal_version_still_merge():
+    preprint = Paper(title="Deep Hedging", doi="10.48550/arXiv.1802.03042", sources=["openalex"])
+    arxiv = Paper(title="Deep Hedging", arxiv_id="1802.03042", sources=["arxiv"])
+    journal = Paper(title="Deep Hedging", doi="10.1080/14697688.2019.1571683", sources=["s2"])
+    assert len(dedupe.dedupe_batch([arxiv, preprint])) == 1
+    assert len(dedupe.dedupe_batch([arxiv, journal])) == 1
+    assert len(dedupe.dedupe_batch([preprint, journal])) == 1
+
+
+def test_openalex_says_when_it_stops_at_the_page_cap(monkeypatch):
+    page = {"results": [{"id": str(i)} for i in range(openalex.PAGE)], "meta": {"next_cursor": "c"}}
+    monkeypatch.setattr(openalex, "get", lambda *a, **k: types.SimpleNamespace(json=lambda: page))
+    lines: list[str] = []
+    got = openalex._paged("q", "f", 2, lines.append)
+    assert len(got) == 2 * openalex.PAGE
+    assert any("truncated" in line and "max_pages" in line for line in lines)
+    lines.clear()
+    last = {"results": [{"id": "x"}], "meta": {"next_cursor": None}}
+    monkeypatch.setattr(openalex, "get", lambda *a, **k: types.SimpleNamespace(json=lambda: last))
+    assert len(openalex._paged("q", "f", 2, lines.append)) == 1 and not lines
+
+
+def test_the_screening_queue_respects_budget_and_orders_new_then_backlog_then_stale(tmp_path):
+    con = dbm.connect(str(tmp_path / "q.db"))
+    stale = _screened(con, "Old rubric", rubric=1, doi="10.7/old")
+    current = _screened(con, "Current rubric", rubric=2, doi="10.7/cur")
+    backlog = dbm.insert(con, Paper(title="Backlog", doi="10.7/b"), 1)
+    fresh = dbm.insert(con, Paper(title="Fresh", doi="10.7/f"), 2)
+    sc = {"budget_per_run": 3, "rubric_version": 2}
+
+    def queue(**over):
+        return cli.candidates(con, {"screening": {**sc, **over}}, [fresh], lambda *a: None)
+
+    assert queue() == [fresh, backlog, stale]
+    assert current not in queue(budget_per_run=10)
+    assert queue(budget_per_run=1) == [fresh]
+    assert queue(rescreen_when_rubric_changes=False) == [fresh, backlog]
+
+
+def test_rescreen_defaults_to_papers_scored_under_an_older_rubric(tmp_path, monkeypatch):
+    dbp = str(tmp_path / "r.db")
+    con = dbm.connect(dbp)
+    stale = _screened(con, "Stale", rubric=1, doi="10.8/s")
+    adopted = _screened(con, "Adopted old", rubric=1, doi="10.8/a")
+    cli.set_review(con, adopted, "adopted", None, None)
+    current = _screened(con, "Current", rubric=2, doi="10.8/c")
+    filtered = dbm.insert(con, Paper(title="Filtered", doi="10.8/f"), 1)
+    con.execute("UPDATE papers SET status='filtered' WHERE key=?", (filtered,))
+    con.commit()
+    seen: list[list[str]] = []
+    monkeypatch.setattr(cli, "screen_keys", lambda c, keys, sc, log=print: seen.append(keys) or 0)
+    cfg = {"screening": {"rubric_version": 2}}
+
+    def rescreen(**flags):
+        cli.cmd_rescreen(
+            Namespace(db=dbp, **{"all": False, "filtered": False, "limit": 100, **flags}), cfg
+        )
+        return seen[-1]
+
+    assert rescreen() == [stale]
+    assert sorted(rescreen(all=True)) == sorted([stale, adopted, current])
+    assert rescreen(filtered=True) == [filtered]

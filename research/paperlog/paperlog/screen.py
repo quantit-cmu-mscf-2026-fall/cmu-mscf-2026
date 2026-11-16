@@ -128,7 +128,8 @@ def save(con, key: str, r: dict, model: str, rubric_version: int = 1) -> None:
         ),
     )
     con.execute(
-        """UPDATE papers SET status='screened', screened_at=?, screen_model=?, relevance=?, tags=?,
+        """UPDATE papers SET status=CASE WHEN status IN ('read','adopted','rejected')
+           THEN status ELSE 'screened' END, screened_at=?, screen_model=?, relevance=?, tags=?,
            title_en=?, summary_en=?, methods=?, datasets=?, markets=?, eval_method=?, code_url=?,
            lookahead_bias=?, screen_notes=?, rubric_version=?,
            screen_count=COALESCE(screen_count,0)+1 WHERE key=?""",

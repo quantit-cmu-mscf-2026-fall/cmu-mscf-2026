@@ -2,6 +2,7 @@ import json
 import sqlite3
 from datetime import UTC, datetime
 
+from .dedupe import _ids_conflict
 from .models import Paper, normalize_title
 
 SCHEMA = """
@@ -106,8 +107,12 @@ def find_existing(con, p: Paper) -> str | None:
         r = con.execute("SELECT key FROM papers WHERE doi=?", (p.doi,)).fetchone()
         if r:
             return r["key"]
-    r = con.execute("SELECT key FROM papers WHERE title_norm=?", (p.title_norm,)).fetchone()
-    return r["key"] if r else None
+    for r in con.execute(
+        "SELECT key, arxiv_id, doi FROM papers WHERE title_norm=?", (p.title_norm,)
+    ):  # an exact title is not enough when the identifiers disagree
+        if not _ids_conflict(p, Paper(title=p.title, arxiv_id=r["arxiv_id"], doi=r["doi"])):
+            return r["key"]
+    return None
 
 
 def insert(con, p: Paper, run_id: int, key: str | None = None) -> str:
@@ -165,6 +170,9 @@ def add_sighting(con, key: str, p: Paper) -> None:
     merged.merge(p)
     con.execute(
         """UPDATE papers SET abstract=?, sources=?, doi=COALESCE(doi,?),
+           published=COALESCE(NULLIF(published,''), ?), url=COALESCE(NULLIF(url,''), ?),
+           venue=COALESCE(NULLIF(venue,''), ?),
+           authors=CASE WHEN authors IS NULL OR authors IN ('', '[]') THEN ? ELSE authors END,
            arxiv_id=COALESCE(arxiv_id,?),
            openalex_id=COALESCE(openalex_id,?), s2_id=COALESCE(s2_id,?), institutions=?,
            countries=?, found_via=?, language=COALESCE(NULLIF(language,''),?) WHERE key=?""",
@@ -172,6 +180,10 @@ def add_sighting(con, key: str, p: Paper) -> None:
             merged.abstract,
             json.dumps(merged.sources),
             merged.doi,
+            merged.published,
+            merged.url,
+            merged.venue,
+            json.dumps(merged.authors, ensure_ascii=False),
             merged.arxiv_id,
             merged.openalex_id,
             merged.s2_id,

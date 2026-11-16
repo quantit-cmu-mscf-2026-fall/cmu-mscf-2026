@@ -63,17 +63,19 @@ def get(key: str, db_path: str | None = None) -> dict | None:
 
 
 def pending(min_relevance: int = 0, limit: int = 100, db_path: str | None = None) -> list[dict]:
-    """Screened papers your pipeline hasn't taken yet, best first. Call
-    mark_ingested() once you've consumed them so reruns are idempotent."""
+    """Screened papers your pipeline hasn't taken yet, best first. Unscreened, filtered,
+    duplicate and rejected papers are never handed out. Call mark_ingested() once
+    you've consumed them so reruns are idempotent."""
     with _connect(db_path) as con:
         rows = [
             dbm.row_to_dict(r)
             for r in con.execute(
-                "SELECT * FROM papers WHERE ingested_at IS NULL AND status NOT IN (?, ?) "
-                "AND COALESCE(relevance,0) >= ? "
+                "SELECT * FROM papers WHERE ingested_at IS NULL "
+                "AND status IN ('screened', 'read', 'adopted') AND relevance IS NOT NULL "
+                "AND relevance >= ? "
                 "ORDER BY COALESCE(relevance,-1) DESC, published DESC "
                 "LIMIT ?",
-                (*_SKIP, min_relevance, limit),
+                (min_relevance, limit),
             )
         ]
     return rows
