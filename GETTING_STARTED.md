@@ -80,8 +80,12 @@ CMU subscribes, so CRSP and Compustat are already yours.
 1. Register at <https://wrds-www.wharton.upenn.edu/register/> **with your
    `@andrew.cmu.edu` address** — the institutional match is what grants access.
 2. Confirm via the email WRDS sends.
-3. Off campus, connect to CMU full VPN first.
-4. `pip install wrds`, then connect once and let it create `~/.pgpass`.
+3. No VPN needed — WRDS authenticates by credentials, not by network path. A
+   connection from a home ISP with no CMU VPN worked on 2026-09-21.
+4. `pip install wrds`, then connect once and answer `y` to create the password
+   file. On macOS and Linux that is `~/.pgpass`; on Windows it is
+   `%APPDATA%\postgresql\pgpass.conf`, so don't go looking in your home
+   directory for it.
 
 Full walkthrough, including the three CRSP conventions that trip everyone once:
 **`docs/wrds_howto.md`**.

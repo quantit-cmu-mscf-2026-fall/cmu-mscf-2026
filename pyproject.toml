@@ -9,6 +9,7 @@ dependencies = [
     "scipy>=1.10",
     "statsmodels>=0.14",
     "requests>=2.28",
+    "pyarrow>=15",  # parquet reads and compact strings in capstone.shared_data
 ]
 
 [project.optional-dependencies]
@@ -24,7 +25,10 @@ packages = ["capstone", "capstone.factors"]  # list every subpackage (tests chec
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["network: requires internet access (skips cleanly if unavailable)"]
+markers = [
+    "network: requires internet access (skips cleanly if unavailable)",
+    "data: requires the team's shared data locally (skips cleanly if absent)",
+]
 
 [tool.ruff]
 line-length = 100
