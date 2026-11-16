@@ -23,7 +23,8 @@ It compares three ways of deciding (#50, Q5):
   and is reported as not measured, stage 4 tests the survivors on the
   holdout.
 
-Each simulated data set is summarised once per hypothesis (`family_statistics`);
+Each simulated data set is summarised once per hypothesis (`family_statistics`,
+which runs `capstone.funnel`'s dated statistics, the gate's code path);
 every pipeline and threshold setting is then a cheap filter over that summary,
 so threshold sweeps cost almost nothing. `scripts/calibrate_validation.py`
 runs the grid.
@@ -36,19 +37,24 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from capstone.evaluate import (
-    average_correlation,
-    benjamini_hochberg,
-    bh_adjusted,
-    by_adjusted,
-    deflated_sharpe_ratio,
-    holm_adjusted,
-    sharpe_test,
-)
-from capstone.search_fdr import bootstrap_family_pvalues, search_adjusted_pvalue
+from capstone import funnel
+from capstone.evaluate import benjamini_hochberg
+from capstone.funnel import STAGE1_METHODS, Thresholds, _final_gate, run_funnel, stage1_pvalues
 from capstone.synth import make_return_matrix
 
-STAGE1_METHODS = ("independent", "rho", "bootstrap")
+__all__ = [
+    "STAGE1_METHODS",
+    "FamilySet",
+    "Thresholds",
+    "family_statistics",
+    "gate_report",
+    "gates_alone",
+    "make_family_set",
+    "run_baseline",
+    "run_funnel",
+    "run_naive_stack",
+    "score",
+]
 
 # ---------------------------------------------------------------------------
 # Test signals with known truth
@@ -133,48 +139,6 @@ def make_family_set(
 # ---------------------------------------------------------------------------
 
 
-def _one_sided_p(returns: pd.DataFrame) -> pd.Series:
-    return pd.Series({c: sharpe_test(returns[c]).pvalue_greater for c in returns.columns})
-
-
-def _stage1(
-    window: pd.DataFrame,
-    p: pd.Series,
-    family: pd.Series,
-    n_boot: int,
-    seed: int | None,
-    q: float = 0.05,
-) -> pd.DataFrame:
-    """Each family's best variant on `window` and its family p-value, three ways.
-
-    `p` is each variant's one-sided HAC p-value on `window`. `n_boot=0` skips
-    the bootstrap (its column is then NaN), which is most of the cost.
-    """
-    sharpe = (window.mean() / window.std()).dropna()
-    # Group only variants with a Sharpe: pandas 3 raises on an all-NaN group.
-    best = sharpe.groupby(family[sharpe.index]).idxmax().reindex(family.unique())
-    if best.isna().any():
-        empty = best[best.isna()].index[0]
-        raise ValueError(f"hypothesis {empty!r} has no variant with data in this window")
-    k = family.value_counts()
-    rho = pd.Series(
-        {h: max(average_correlation(window[cols.index]), 0.0) for h, cols in family.groupby(family)}
-    )
-    best_p = p.groupby(family).min()
-    return pd.DataFrame(
-        {
-            "best": best,
-            "p1_independent": search_adjusted_pvalue(best_p, k),
-            "p1_rho": search_adjusted_pvalue(best_p, k, rho=rho),
-            "p1_bootstrap": (
-                bootstrap_family_pvalues(window, family, n_boot=n_boot, seed=seed, q=q)["pvalue"]
-                if n_boot
-                else np.nan
-            ),
-        }
-    )
-
-
 def family_statistics(
     fs: FamilySet,
     *,
@@ -193,10 +157,11 @@ def family_statistics(
     costs power. The baseline and the naive stack always use the whole search
     period, so they read "reuse".
 
-    Columns: `best` (the variant carried forward), `p1_<method>` for each
-    stage-1 method, `p2` (one-sided HAC p of `best` at stage 2), the holdout
-    `ho_*` fields stage 4 needs, `naive_pass` (some variant passed every
-    stacked screening gate) and `truth`.
+    The work is `capstone.funnel.family_statistics`, the code the gate runs
+    on real candidates: the set's positional periods become dates (the
+    search period ends on its last search row, the holdout starts on its
+    first holdout row, "split" confirms on the last `stage2_years` x 252
+    search rows). Columns are that function's, plus `truth`.
     """
     n_b = int(round(stage2_years * 252))
     if not 0 < n_b < fs.n_search:
@@ -212,161 +177,41 @@ def family_statistics(
                 f"hypothesis {fs.family[thin[0]]!r} has no variant with data in the "
                 f"{name} period ({thin[0]!r} has fewer than 3 values)"
             )
-
-    # Holdout statistics for every variant a pipeline might carry forward.
-    holdout_tests = {c: sharpe_test(fs.holdout[c]) for c in fs.returns.columns}
-
-    # Naive stack: every screening method as a gate, at once, on every variant
-    # over the whole search period.
-    full_tests = {c: sharpe_test(search[c]) for c in search.columns}
-    p_all = pd.Series({c: t.pvalue_greater for c, t in full_tests.items()})
-    n_variants = len(p_all)
-    dsr_all = pd.Series(
-        {
-            c: deflated_sharpe_ratio(
-                t.sharpe, n_variants, t.n_obs, t.skew, t.kurtosis, variance=t.variance
-            )
-            for c, t in full_tests.items()
-        }
-    )
-    psr_all = pd.Series({c: t.psr for c, t in full_tests.items()})
-    stacked = (
-        (holm_adjusted(p_all) <= 0.05)
-        & (by_adjusted(p_all) <= 0.05)
-        & (bh_adjusted(p_all) <= 0.05)
-        & (psr_all >= 0.95)
-        & (dsr_all >= 0.95)
-    )
-    # The variant the naive stack carries forward: its best that passed.
-    full_sharpe = search.mean() / search.std()
-    # Group only the variants that passed (pandas 3 raises on an all-NaN
-    # group); families with no pass come back NaN from the reindex.
-    passed = full_sharpe[stacked].dropna()
-    naive_best = passed.groupby(fs.family[passed.index]).idxmax().reindex(fs.truth.index)
-
-    out = {}
     # `q` is the smallest stage-1 BH level the caller will use (it sets how
     # many bootstrap draws are enough). Computing only the designs asked for
     # halves the bootstrap's cost when one design is being calibrated.
     if "reuse" not in designs or not set(designs) <= {"split", "reuse"}:
         raise ValueError("designs must include 'reuse' and contain only 'split' or 'reuse'")
-    windows = {"reuse": (search, search, p_all)}
-    if "split" in designs:
-        windows["split"] = (first, last, _one_sided_p(first))
-    for design, (window1, window2, p1) in windows.items():
-        s = _stage1(window1, p1, fs.family, n_boot, seed, q)
-        s["p2"] = (
-            p_all.reindex(s["best"]).to_numpy()
-            if design == "reuse"
-            else [sharpe_test(window2[b]).pvalue_greater for b in s["best"]]
-        )
-        nb = naive_best.reindex(s.index)
-        for field in ("sharpe", "n_obs", "skew", "kurtosis", "variance"):
-            s[f"ho_{field}"] = [getattr(holdout_tests[b], field) for b in s["best"]]
-            if field == "sharpe":
-                s["ho_p"] = [holdout_tests[b].pvalue_greater for b in s["best"]]
-                s["nv_p"] = [
-                    holdout_tests[b].pvalue_greater if isinstance(b, str) else np.nan for b in nb
-                ]
-            s[f"nv_{field}"] = [
-                getattr(holdout_tests[b], field) if isinstance(b, str) else np.nan for b in nb
-            ]
-        s["naive_pass"] = nb.notna()
+    out = funnel.family_statistics(
+        fs.returns.iloc[: fs.n_search + fs.n_holdout],
+        fs.family,
+        search_end=search.index[-1],
+        holdout_start=fs.holdout.index[0],
+        stage2_start=last.index[0] if "split" in designs else None,
+        n_boot=n_boot,
+        seed=seed,
+        q=q,
+    )
+    for s in out.values():
         s["truth"] = fs.truth.reindex(s.index)
-        s.attrs["n_variants"] = n_variants
-        out[design] = s
-    return out
+    return {d: out[d] for d in ("split", "reuse") if d in out}
 
 
 # ---------------------------------------------------------------------------
-# The three pipelines, as filters over the summary
+# The three pipelines, as filters over the summary (the funnel's Thresholds,
+# stages and final gate are capstone.funnel's)
 # ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class Thresholds:
-    """One threshold setting for the funnel.
-
-    The defaults are the best set from the method's synthetic test runs
-    (q1 = 0.10, no stage-2 gate, BH at q4 = 0.30; formula p-values at stage
-    1): a starting point, not registered thresholds. The values used on real
-    candidates come from running the calibration for the real generator and
-    are registered in `docs/validation/framework.md`.
-
-    q1: BH level across families at stage 1. alpha2: one-sided p cut-off at
-    stage 2; 1.0 means no gate. final: the stage-4 gate, "bh" (BH at q4
-    across the survivors' one-sided holdout p-values; the chosen gate) or "dsr"
-    (deflated Sharpe >= d4). final_trials: for "dsr", the trial count it
-    charges, "survivors" (only the candidates taken to the holdout, which is
-    independent data) or "searched" (every variant tried; calibration found
-    it cuts power to about a sixth).
-    """
-
-    q1: float = 0.10
-    alpha2: float = 1.0
-    final: str = "bh"
-    d4: float = 0.95
-    q4: float = 0.30
-    final_trials: str = "survivors"
-
-
-def _final_gate(
-    stats: pd.DataFrame, alive: pd.Series, th: Thresholds, prefix: str = "ho_"
-) -> pd.Series:
-    """Stage 4 on the holdout, for the candidates still alive.
-
-    `prefix` picks whose holdout statistics to read: "ho_" for the variant the
-    funnel carried forward, "nv_" for the naive stack's.
-    """
-    if th.final not in ("dsr", "bh"):
-        raise ValueError("final must be 'dsr' or 'bh'")
-    if th.final_trials not in ("searched", "survivors"):
-        raise ValueError("final_trials must be 'searched' or 'survivors'")
-    n_alive = int(alive.sum())
-    if n_alive == 0:
-        return alive.copy()
-    if th.final == "bh":
-        passed = benjamini_hochberg(stats.loc[alive, f"{prefix}p"], th.q4)
-        return passed.reindex(stats.index, fill_value=False)
-    n_trials = stats.attrs["n_variants"] if th.final_trials == "searched" else n_alive
-    d4 = th.d4
-    passed = pd.Series(False, index=stats.index)
-    for h in alive[alive].index:
-        r = stats.loc[h]
-        dsr = deflated_sharpe_ratio(
-            r[f"{prefix}sharpe"],
-            n_trials,
-            int(r[f"{prefix}n_obs"]),
-            r[f"{prefix}skew"],
-            r[f"{prefix}kurtosis"],
-            variance=r[f"{prefix}variance"],
-        )
-        passed[h] = dsr >= d4
-    return passed
-
-
-def run_funnel(stats: pd.DataFrame, th: Thresholds, *, stage1: str = "rho") -> pd.DataFrame:
-    """The staged funnel. Returns per-hypothesis pass flags for each stage.
-
-    `stage3` is a placeholder: it passes everything and is reported as not
-    measured until the spanning test exists, so it can never look good by
-    default.
-    """
-    if stage1 not in STAGE1_METHODS:
-        raise ValueError(f"stage1 must be one of {STAGE1_METHODS}")
-    s1 = benjamini_hochberg(stats[f"p1_{stage1}"], th.q1)
-    s2 = s1 & (stats["p2"] <= th.alpha2)
-    s3 = s2.copy()
-    s4 = s3 & _final_gate(stats, s3, th)
-    return pd.DataFrame({"stage1": s1, "stage2": s2, "stage3": s3, "stage4": s4})
 
 
 def run_baseline(stats: pd.DataFrame, *, q: float = 0.10, stage1: str = "rho") -> pd.Series:
     """BH at `q` on each family's search-adjusted p-value (#50, Q5).
 
     Pass "reuse" statistics, so the p-values cover the whole search period.
+    Reads the p-values through `funnel.stage1_pvalues`, so a missing one
+    raises here as it does in the funnel, and the two never run over
+    different family sets.
     """
-    return benjamini_hochberg(stats[f"p1_{stage1}"], q).rename("accepted")
+    return benjamini_hochberg(stage1_pvalues(stats, stage1), q).rename("accepted")
 
 
 def run_naive_stack(stats: pd.DataFrame, th: Thresholds) -> pd.Series:
@@ -444,7 +289,7 @@ def gates_alone(stats: pd.DataFrame, th: Thresholds, *, stage1: str = "rho") -> 
     everyone = pd.Series(True, index=stats.index)
     alone = pd.DataFrame(
         {
-            "stage1": benjamini_hochberg(stats[f"p1_{stage1}"], th.q1),
+            "stage1": benjamini_hochberg(stage1_pvalues(stats, stage1), th.q1),
             "stage2": stats["p2"] <= th.alpha2,
             "stage4": _final_gate(stats, everyone, th),
         }
