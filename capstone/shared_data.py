@@ -267,11 +267,13 @@ def load(
     start: str | None = None,
     end: str | None = None,
     auto_sync: bool = True,
+    date_column: str = "date",
+    holdout_access=None,
 ) -> pd.DataFrame:
     """Read one shared file (name without `.parquet`), synced and verified first.
 
-    `start`/`end` filter on `date` (CRSP daily file) inside the parquet read, so
-    unneeded rows never reach memory. Text columns load as pyarrow strings,
+    `start`/`end` filter on `date_column` (default `date`, the CRSP daily file) inside
+    the parquet read, so unneeded rows never reach memory. Text columns load as pyarrow strings,
     about 4x smaller than Python objects; numeric columns stay numpy.
 
     Rows are deliberately NOT filtered on `in_universe`: use that column to pick
@@ -282,7 +284,17 @@ def load(
     `dlyret` already includes the delisting return: CRSP adds a final row per
     delisted stock (`dlydelflg == 'Y'`) whose `dlyret` equals `delret`. Use
     `dlyret` as-is; compounding `delret` on top would count the loss twice.
+
+    The holdout guard (`capstone.holdout_authority`, off unless `CAPSTONE_HOLDOUT_GUARD`
+    is on) runs before anything is synced or opened: a read past 2020-12-31 then needs a
+    `holdout_access` from `holdout_authority.open_once`, which reads each authorized
+    source once, bounded by the look's dates and by the checksum frozen in its protocol.
     """
+    from capstone import holdout_authority
+
+    calendar_only = holdout_authority.guard_shared_read(
+        name, columns, end, date_column, auto_sync, holdout_access
+    )
     import pyarrow as pa
     import pyarrow.parquet as pq
 
@@ -293,14 +305,30 @@ def load(
         raise SharedDataError(f"{name}.parquet is not in the shared data")
 
     filters = []
+    if date_column not in {"date", "datadate", "event_date", "linkdt"}:
+        raise ValueError("unsupported shared-data date column")
     if start:
-        filters.append(("date", ">=", pd.Timestamp(start)))
+        filters.append((date_column, ">=", pd.Timestamp(start)))
     if end:
-        filters.append(("date", "<=", pd.Timestamp(end)))
+        filters.append((date_column, "<=", pd.Timestamp(end)))
 
-    table = pq.read_table(path, columns=columns, filters=filters or None)
+    if holdout_access is None:
+        table = pq.read_table(path, columns=columns, filters=filters or None)
+    else:
+        expected = holdout_authority.read_source(holdout_access, name, data_version())
+        # Hash and materialize the same open file, even if another cache sync replaces its path.
+        with path.open("rb") as source:
+            if hashlib.file_digest(source, "sha256").hexdigest() != expected:
+                raise holdout_authority.HoldoutSealed("authorized source bytes changed")
+            source.seek(0)
+            table = pq.read_table(source, columns=columns, filters=filters or None)
     strings = {pa.string(): pd.StringDtype("pyarrow"), pa.large_string(): pd.StringDtype("pyarrow")}
     frame = table.to_pandas(types_mapper=strings.get)
+    if calendar_only:
+        frame = frame.drop_duplicates().sort_values("date").reset_index(drop=True)
+        future = frame.loc[frame.date > pd.Timestamp(holdout_authority.DISCOVERY_END), "date"]
+        if not future.empty:
+            frame = frame.loc[frame.date <= future.min()].reset_index(drop=True)
     # Parquet restores pandas' nullable Float64/Int64/boolean, which numpy
     # cannot use directly (to_numpy() gives object arrays). Convert to plain
     # numpy dtypes; a nullable int or bool column with gaps becomes float64.
