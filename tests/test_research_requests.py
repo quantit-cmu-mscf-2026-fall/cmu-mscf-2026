@@ -316,3 +316,137 @@ def test_a_killed_process_leaves_a_journal_a_fresh_process_resumes_stably(tmp_pa
     assert first.returncode == 0 == second.returncode, first.stderr
     assert first.stdout == second.stdout
     assert '"state": "uncertain"' in first.stdout and '"blocked": true' in first.stdout
+
+
+def http_error(status, message=""):
+    error = RuntimeError("private exception text must not enter journal")
+    error.status_code = status
+    error.body = {"error": {"message": message}}
+    return error
+
+
+def test_credit_exhaustion_saves_accounting_without_spending_other_arm(tmp_path):
+    client = Client([http_error(400, "credit balance too low")])
+    with RequestJournal(tmp_path / "r.db", manifest()) as j:
+        with pytest.raises(ResearchPaused, match="credits_exhausted"):
+            call(j, client)
+        with pytest.raises(ResearchPaused):
+            call(j, client, bucket="B")
+        report = j.report()
+        assert report["blocked"] and j.count("A") == 1 and j.count("B") == 0
+        assert report["requests"][0]["state"] == "paused"
+        assert report["requests"][0]["error"].startswith("credits_exhausted:RuntimeError:http=400")
+        assert "private exception" not in str(report)
+        assert client.calls == 1
+
+
+def test_credit_stop_survives_restart_and_resumes_only_on_an_explicit_retry(tmp_path):
+    path = tmp_path / "r.db"
+    client = Client([http_error(402, "credit balance exhausted"), answer()])
+    with RequestJournal(path, manifest()) as j:
+        with pytest.raises(ResearchPaused):
+            call(j, client)
+        rid = j.report()["requests"][0]["id"]
+    with RequestJournal(path, manifest()) as j:
+        with pytest.raises(ResearchPaused, match="explicit resolution"):
+            call(j, client)
+        assert client.calls == 1 and j.report()["blocked"]
+        j.resolve(rid, "retry", "fixture: credits were added")
+        assert not j.report()["blocked"]
+        assert call(j, client).content[0].name == "record"
+        assert client.calls == j.count("A") == 2
+
+
+@pytest.mark.parametrize(
+    ("status", "category"),
+    [
+        (401, "authentication_failed"),
+        (403, "authentication_failed"),
+        (404, "model_or_request_unavailable"),
+    ],
+)
+def test_definite_refusals_pause_without_an_automatic_retry(tmp_path, status, category):
+    client = Client([http_error(status, "denied"), answer()])
+    with RequestJournal(tmp_path / "r.db", manifest()) as j:
+        with pytest.raises(ResearchPaused, match=category):
+            call(j, client)
+        assert client.calls == j.count("A") == 1
+        assert j.report()["requests"][0]["state"] == "paused"
+
+
+def test_a_timeout_or_server_error_is_uncertain_not_paused(tmp_path):
+    with RequestJournal(tmp_path / "r.db", manifest()) as j:
+        with pytest.raises(ResearchPaused, match="uncertain_send"):
+            call(j, Client([http_error(500, "overloaded")]))
+        assert j.report()["requests"][0]["state"] == "uncertain"
+
+
+def test_one_definite_rate_limit_retry_counts_twice(tmp_path):
+    client = Client([http_error(429, "rate limited"), answer()])
+    with RequestJournal(tmp_path / "r.db", manifest()) as j:
+        assert call(j, client).usage.input_tokens == 8
+        assert j.count("A") == client.calls == 2
+        assert [r["state"] for r in j.report()["requests"]] == ["retryable", "completed"]
+
+
+def test_a_second_rate_limit_pauses_the_study(tmp_path):
+    client = Client([http_error(429), http_error(429), answer()])
+    with RequestJournal(tmp_path / "r.db", manifest()) as j:
+        with pytest.raises(ResearchPaused, match="rate_limit"):
+            call(j, client)
+        assert [r["state"] for r in j.report()["requests"]] == ["retryable", "paused"]
+        assert client.calls == j.count("A") == 2
+        with pytest.raises(ResearchPaused):
+            call(j, client)
+        assert client.calls == 2
+
+
+def interrupt_after_saved_rate_limit(journal):
+    count = journal.count
+
+    def interrupted_count(bucket):
+        latest = journal.db.execute(
+            "SELECT state FROM model_requests ORDER BY rowid DESC LIMIT 1"
+        ).fetchone()
+        if latest and latest[0] == "retryable":
+            raise KeyboardInterrupt("interrupted after definite 429 checkpoint")
+        return count(bucket)
+
+    journal.count = interrupted_count
+    return journal
+
+
+@pytest.mark.parametrize("next_action", ["success", "rate_limit", "capacity"])
+def test_saved_retryable_has_exactly_one_remaining_counted_send(tmp_path, next_action):
+    frozen = {"call_limits": {"fixture": 1 if next_action == "capacity" else 4}}
+    request = {"model": "configured-fixture", "tools": [{"name": "fixture"}]}
+    with RequestJournal(tmp_path / "requests.db", frozen) as journal:
+        interrupt_after_saved_rate_limit(journal)
+        with pytest.raises(KeyboardInterrupt, match="definite 429"):
+            journal.call(Client([http_error(429)]), "fixture", "same-task", 0, request)
+        assert journal.report()["requests"][0]["state"] == "retryable"
+    with RequestJournal(tmp_path / "requests.db", frozen) as journal:
+        if next_action == "capacity":
+            client = Client([])
+            with pytest.raises(CallBudgetExceeded):
+                journal.call(client, "fixture", "same-task", 0, request)
+            assert client.calls == 0 and journal.count("fixture") == 1
+            return
+        client = Client([http_error(429)] if next_action == "rate_limit" else [answer()])
+        if next_action == "success":
+            assert journal.call(client, "fixture", "same-task", 0, request).content[0].input == {
+                "value": 3
+            }
+            replay = journal.call(Client([]), "fixture", "same-task", 0, request)
+            assert replay.content[0].input == {"value": 3}
+            assert journal.report()["requests"][-1]["state"] == "completed"
+        else:
+            with pytest.raises(ResearchPaused):
+                journal.call(client, "fixture", "same-task", 0, request)
+            assert journal.report()["requests"][-1]["state"] == "paused"
+            with pytest.raises(ResearchPaused):
+                journal.call(Client([]), "fixture", "same-task", 0, request)
+        assert client.calls == 1 and journal.count("fixture") == 2
+        changed = request | {"model": "unapproved-model"}
+        with pytest.raises(ValueError, match="inputs changed"):
+            journal.call(Client([]), "fixture", "same-task", 0, changed)
