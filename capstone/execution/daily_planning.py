@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import math
+from copy import deepcopy
+
 import pandas as pd
 
-from capstone.execution.benchmark_runtime import benchmark_due, benchmark_plan
+from capstone.execution.benchmark_runtime import benchmark_due, benchmark_plan, execution_target
 from capstone.execution.contracts import (
     BENCHMARK_VERSIONS,
+    HELD_ACTION_VERSIONS,
     WINDOW_START_VERSIONS,
     ExecutionContractBlocked,
     execution_leaves,
@@ -15,7 +19,8 @@ from capstone.execution.contracts import (
     validate_program_instruments,
 )
 from capstone.execution.exit_planning import program_exit_plan
-from capstone.execution.planning import share_plan
+from capstone.execution.planning import positive_price, share_plan
+from capstone.execution.replay_state import EVENT_VERSIONS, freeze_intent
 from capstone.strategy.contract import target_weights
 from capstone.strategy.historical_benchmark import HistoricalBenchmarkSpec
 from capstone.strategy.portfolio import PortfolioSpec
@@ -283,6 +288,187 @@ def initial_replay_plan(inputs, prior, rates):
     )
     plan["decision"] = str(prior.date())
     return plan
+
+
+def program_replay_plan(
+    spec,
+    panel,
+    as_of,
+    positions,
+    prices,
+    capital,
+    *,
+    min_notional,
+    fee_bps,
+    terminated,
+    recovery_requested=False,
+    execution_version=None,
+    source_intent=None,
+    cash=None,
+    receivables=(),
+    carry=None,
+):
+    event_protocol = execution_version in EVENT_VERSIONS
+    if recovery_requested and not event_protocol:
+        raise ExecutionContractBlocked("program_pending_intent_recovery_unqualified")
+    if execution_version in HELD_ACTION_VERSIONS and calendar_unconfirmed(spec, panel, as_of):
+        # v5: the known calendar (one session past 2020) cannot confirm the next month
+        # end, so no window decision is due; hold for a session the replay never reaches.
+        plan = {
+            "targets": dict(positions),
+            "projected": dict(positions),
+            "orders": [],
+            "omitted": [],
+            "sizing_capital": capital,
+            "estimated_fees": 0.0,
+            "intent": "calendar_unconfirmed_hold",
+            "decision": str(pd.Timestamp(as_of).date()),
+        }
+        source = {"kind": "exit_only", "strategy_id": spec.id, "decision": plan["decision"]}
+        return freeze_intent(plan, positions, cash, receivables, decision=as_of, source=source)
+    due = (
+        benchmark_due(spec, panel, as_of)
+        if execution_version in BENCHMARK_VERSIONS
+        else decision_due(spec, panel, as_of)
+    )
+    book = None
+    if due:
+        book = (
+            execution_target(spec, panel, as_of, execution_version)
+            if execution_version in BENCHMARK_VERSIONS
+            else target_weights(spec, panel, as_of)
+        )
+    deferred = (
+        not due
+        and event_protocol
+        and source_intent is not None
+        and source_intent["kind"] == "formation"
+    )
+    excluded = []
+    if deferred:
+        book = sticky_source_book(source_intent, spec, panel, as_of)
+        if execution_version in HELD_ACTION_VERSIONS:
+            book, excluded = requalified_entries(book, positions, panel, as_of, prices, terminated)
+    if book is not None and any(book.get(name, 0) != 0 for name in terminated):
+        raise ExecutionContractBlocked("retired_instrument_in_program_targets")
+    if deferred:
+        plan = share_plan(
+            book,
+            positions,
+            prices,
+            capital,
+            min_notional=min_notional,
+            side=spec.side,
+            fee_bps=fee_bps,
+            carry=carry,
+        )
+        plan["intent"] = "deferred_formation_rebalance"
+        plan["omitted"] += excluded
+    else:
+        plan = plan_completed_session(
+            spec,
+            panel,
+            as_of,
+            positions,
+            prices,
+            capital,
+            weights=book,
+            min_notional=min_notional,
+            fee_bps=fee_bps,
+            execution_version=execution_version,
+            carry=carry,
+        )
+    plan["decision"] = str(pd.Timestamp(as_of).date())
+    if event_protocol:
+        if due:
+            if (
+                source_intent is not None
+                and source_intent["kind"] == "formation"
+                and source_intent["formation_session"] != plan["decision"]
+            ):
+                plan["superseded_source_intent_id"] = source_intent["source_intent_id"]
+            source_intent = {
+                "kind": "formation",
+                "strategy_id": spec.id,
+                "formation_session": plan["decision"],
+                "book": {str(n): float(w) for n, w in book.items()},
+                "construction_evidence": deepcopy(book.attrs),
+            }
+        elif source_intent is None:
+            source_intent = {
+                "kind": "exit_only",
+                "strategy_id": spec.id,
+                "decision": plan["decision"],
+            }
+        if source_intent["kind"] == "formation":
+            plan["construction_evidence"] = deepcopy(source_intent.get("construction_evidence", {}))
+        return freeze_intent(
+            plan, positions, cash, receivables, decision=as_of, source=source_intent
+        )
+    return plan
+
+
+def sticky_source_book(source, spec, panel, as_of):
+    """A deferred formation retains its frozen selected book; only actual exits apply."""
+    if source["kind"] != "formation" or source["strategy_id"] != spec.id:
+        raise ExecutionContractBlocked("deferred_formation_source_incompatible")
+    formed, at = pd.Timestamp(source["formation_session"]), pd.Timestamp(as_of)
+    due = (
+        benchmark_due(spec, panel, formed)
+        if type(spec) is HistoricalBenchmarkSpec
+        else decision_due(spec, panel, formed)
+    )
+    if formed > at or not due:
+        raise ExecutionContractBlocked("deferred_formation_source_incompatible")
+    book = pd.Series({int(n): float(w) for n, w in source["book"].items()})
+    if not book.index.is_unique or not all(pd.notna(book)) or book.abs().sum() > 1 + 1e-10:
+        raise ExecutionContractBlocked("deferred_formation_book_invalid")
+    dates = pd.DatetimeIndex(panel.calendar)
+    held = dates[(dates >= formed) & (dates <= at)]
+    if not held.isin(panel.universe.index).all():
+        raise ExecutionContractBlocked("deferred_formation_membership_missing")
+    membership = panel.universe.reindex(index=held, columns=book.index)
+    if membership.isna().any().any() or not membership.isin([True, False]).all().all():
+        raise ExecutionContractBlocked("deferred_formation_membership_missing")
+    return book.where(membership.astype(bool).all(axis=0), 0).rename("weight")
+
+
+def calendar_unconfirmed(spec, panel, as_of):
+    """True when a calendar window's schedule cannot be evaluated at `as_of` because the
+    known calendar ends before the month end an entry would precede (mirrors
+    CalendarWindowSchedule._windows, which raises there)."""
+    schedule = getattr(spec, "schedule", None)
+    if not isinstance(schedule, CalendarWindowSchedule):
+        return False
+    after = int((pd.DatetimeIndex(panel.calendar) > pd.Timestamp(as_of)).sum())
+    return after <= max(0, -schedule.enter_offset)
+
+
+def requalified_entries(book, positions, panel, as_of, prices, terminated=()):
+    """v5/v7: a deferred formation re-planned on a later session keeps its frozen book,
+    but an unheld name that has since been retired by a corporate action, or lost its
+    qualified quote or sizing price, is not entered (data properties, so every cost
+    scenario agrees); held names keep v4/v6 carry and fallback exits."""
+    at = pd.Timestamp(as_of)
+    spreads = panel.half_spread.loc[at] if at in panel.half_spread.index else pd.Series(dtype=float)
+    book, excluded = book.copy(), []
+    for name, weight in book.items():
+        if not weight or positions.get(int(name)):
+            continue
+        spread = float(spreads.get(name, math.nan))
+        if int(name) in terminated:
+            reason = "retired_instrument"
+        elif not math.isfinite(spread) or spread < 0:
+            reason = "missing_qualified_quote"
+        elif not positive_price(prices.get(name)):
+            reason = "nonpositive_sizing_price"
+        else:
+            continue
+        book[name] = 0.0
+        excluded.append(
+            {"permno": int(name), "shares": 0, "reason": "deferred_entry_unqualified:" + reason}
+        )
+    return book, excluded
 
 
 def replay_actions(actions, day, positions, cash, program_route, opens=None):
