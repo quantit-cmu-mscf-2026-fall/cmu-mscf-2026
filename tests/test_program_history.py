@@ -139,7 +139,7 @@ def test_calendar_window_v2_enters_and_exits_through_targets(holiday_panel, monk
             book, calendar_weights(legacy, panel, previous), check_index_type=False
         )
 
-    # v1 identities are unchanged (computed on main b8ec403 with a fixed digest).
+    # v1 identities are unchanged (pinned values, computed with a fixed digest).
     monkeypatch.setattr(program_module, "implementation_digest", lambda: "0" * 64)
     assert ProgramSchedule().id == "10c97c226aba273a"
     assert ProgramSchedule("month_end", 1).id == "4295075a75be65bf"
@@ -212,7 +212,7 @@ def test_v3_excludes_unquoted_names_before_ranking(spec, panel):
     assert ProgramStrategySpec.from_toml(v3.to_toml()) == v3
 
 
-def test_v2_program_identity_is_pinned_against_main(monkeypatch):
+def test_v2_program_identity_is_pinned(monkeypatch):
     from capstone.strategy import program
 
     monkeypatch.setattr(program, "implementation_digest", lambda: "0" * 64)
@@ -229,7 +229,7 @@ def test_v2_program_identity_is_pinned_against_main(monkeypatch):
         schedule=ProgramSchedule(interval=3),
         construction="fixed_tails_complete_history_v2",
     )
-    # Values computed on main 873eb6e; a new field or identity rule would change them.
+    # Pinned values: a new field or identity rule would change them.
     assert (pinned.id, pinned.construction_id) == ("07eda6d9aa7263af", "52fffb691c02332f")
 
 
