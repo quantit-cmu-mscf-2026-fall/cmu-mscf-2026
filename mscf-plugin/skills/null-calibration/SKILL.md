@@ -70,6 +70,7 @@ def test_my_method_finds_planted_candidates():
   test). Show it failing once, by breaking the method locally.
 - Keep runtime under a few seconds per case; lower `reps` and widen the band rather than
   mark it slow.
-- Run with `CAPSTONE_LEDGER_DIR=.ledger-scratch`: simulation runs are not team trials.
+- Log simulation runs to the real ledger tagged `synthetic` (exclude them from a
+  strategy's count with `exclude_tags`); in pytest, point `CAPSTONE_LEDGER_DIR` at `tmp_path`.
 - In the PR, report each case's realised rate and band, and add the method to the "What
   exists" table in `docs/validation.md`.
