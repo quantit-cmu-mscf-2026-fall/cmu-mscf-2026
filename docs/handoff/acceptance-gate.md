@@ -19,7 +19,16 @@ description.
 - **Registration** (QUANTIT-33): `capstone/gate.py`, `GateConfig` (hashed
   from its content), `register` (logs it to the ledger once, tag "gate"),
   `required_n_boot` and the input checks a run makes first.
-- Not yet: the single-look run that fills the scorecard.
+- **Graded scores** (QUANTIT-35): `capstone/grading.py`, reported and never
+  read back into a decision.
+- **The run** (QUANTIT-34): `gate.run_gate`. Refuses an unregistered or
+  changed config (`GateNotRegistered`) and a config whose holdout was already
+  looked at (`HoldoutAlreadyOpened`); needs a named `authorizer`, recorded in
+  the `gate-holdout-look` ledger entry written before the holdout provider is
+  called. Stages 1-3 get the search period only; stage 3 is not measured yet
+  (`s3_measured` False). Tests: `tests/test_gate_run.py`.
+- Not yet: strict checks on the provider's answer, the stage-3 spanning test,
+  the power header.
 
 ## 2. Contract
 - Input: a performance matrix (dates x variants, `docs/validation.md`) and a
@@ -33,6 +42,13 @@ description.
 - `screen` never reads `ho_*`. Stage 1 refuses a missing family p-value
   (BH would drop it); stage 4 refuses a live candidate with no holdout
   statistics. Stage 3 passes through (spanning test not built yet).
+- `run_gate` takes no default authorizer and ships no holdout provider: the
+  caller supplies both. A blank authorizer, a failed input check, too few
+  ledger trials or a failed stage 1-3 raise before the look, so none of them
+  spends it; once the look is logged the config cannot be run again.
+- A config registered with `factors_digest` is refused until stage 3 exists.
+- `GateConfig`'s default thresholds use stage 1 on the bootstrap family
+  maximum (`Thresholds()` itself still defaults to "rho", as on `main`).
 - A config's hash is SHA-256 of its canonical JSON, equal in every process.
   The gate's ledger entries are tagged "gate" and never counted as trials.
 - The report is standard JSON (NaN as null) and reads back to the same

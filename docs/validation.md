@@ -213,7 +213,7 @@ backtest upward, and no method in this document can correct it.
 | `evaluate` | `haircut_sharpe`: Harvey–Liu haircut (their reference code), ledger trial count | done |
 | `search_fdr` | search-adjusted p-value for a hypothesis's best of K variants: block bootstrap of the family maximum (`bootstrap_family_pvalues`, from Carl's branch), or exact for independent or equicorrelated variants (`rho=`); search-adjusted FDR (López de Prado & Fabozzi 2026); max-of-mixture fit over assumed K, a sensitivity table, not a gate | done |
 | `grading` | the gate's graded scores (BY, Holm, local FDR, PSR, MinTRL, haircut Sharpe with the ledger trial count), batch diagnostics and the expected mean: reported, never read back into a decision | done |
-| `gate` | staged, pre-registered scorecard; trial count from the ledger; holdout looked at once | planned |
+| `gate` | staged, pre-registered scorecard; trial count from the ledger; holdout looked at once, with a named authorizer; stage 3 not yet measured | done |
 
 Already in `evaluate`: `benjamini_hochberg`, `bonferroni`,
 `deflated_sharpe_ratio`, `expected_max_sharpe`, and `false_discovery_rate` /
