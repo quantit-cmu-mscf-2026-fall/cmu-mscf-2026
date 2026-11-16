@@ -14,3 +14,7 @@ papers.db
 papers.csv
 digests/
 research/paperlog/learned_queries.yaml
+experiments/factors.db*
+experiments/alignment_labels.csv
+experiments/reports/
+experiments/learned_memory_search_check/
