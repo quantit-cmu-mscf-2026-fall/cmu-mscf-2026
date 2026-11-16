@@ -186,6 +186,56 @@ def test_every_variant_is_a_logged_trial_and_a_column(tmp_path, monkeypatch):
     assert isinstance(panel, Panel)
 
 
+def test_a_caller_can_tag_its_variants_on_the_ledger(tmp_path, monkeypatch):
+    # The end-to-end driver scopes a run's trial count by a run tag.
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    panel = build_panel(fake_rows(n_stocks=6, n_days=40))
+    evaluate_factors({"f1": parse("volume")}, panel, tags=["e2e-run:x"])
+    evaluate_factors({"f1": parse("volume")}, panel)
+    entries = [json.loads(line) for line in (tmp_path / "runs.jsonl").read_text().splitlines()]
+    assert [e["tags"] for e in entries] == [["evaluation", "e2e-run:x"], ["evaluation"]]
+
+
+def test_a_tag_is_on_a_factor_that_cannot_be_computed_too(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    panel = build_panel(fake_rows(n_stocks=6, n_days=40))
+
+    def failing(tree, fields):
+        raise ValueError("cannot compute")
+
+    monkeypatch.setattr(ev, "evaluate", failing)
+    evaluate_factors({"f1": parse("volume")}, panel, tags=["e2e-run:x"])
+    entries = [json.loads(line) for line in (tmp_path / "runs.jsonl").read_text().splitlines()]
+    assert [e["tags"] for e in entries] == [["evaluation", "e2e-run:x"]]
+    assert entries[0]["metrics"] == {"error": "cannot compute"}
+
+
+def test_evaluation_logs_the_panels_own_period(tmp_path, monkeypatch):
+    from capstone.runlog import read_entries
+
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    rows = fake_rows(n_stocks=9, n_days=60, start="2016-03-01")
+    evaluate_factors({"f": parse("volume")}, build_panel(rows))
+    (entry,) = read_entries()
+    assert entry["params"]["period"] == ["2016-03-01", "2016-05-23"]
+
+
+def test_evaluate_factors_refuses_a_panel_that_holds_the_holdout(tmp_path, monkeypatch):
+    # build_panel refuses holdout dates; a panel assembled by hand must be
+    # refused at the evaluator too, before any trial is logged.
+    import dataclasses
+
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    panel = build_panel(fake_rows(n_stocks=6, n_days=40))
+    late = panel.universe.copy()
+    late.index = pd.bdate_range("2020-12-01", periods=len(late))
+    late.index = late.index[:-1].append(pd.DatetimeIndex(["2021-02-01"]))
+    held = dataclasses.replace(panel, universe=late)
+    with pytest.raises(HoldoutError):
+        evaluate_factors({"f1": parse("volume")}, held)
+    assert not (tmp_path / "runs.jsonl").exists()
+
+
 def test_variants_are_recorded_in_the_store(tmp_path, monkeypatch):
     from capstone.factors import store
 
