@@ -25,14 +25,17 @@ from capstone import shared_data as sd
 
 daily = sd.load(
     "sp500_daily_1990_2025",
-    columns=["date", "permno", "permco", "dlyret", "in_universe"],
+    columns=["date", "permno", "permco", "dlyret", "dlyretmissflg", "dlydelflg",
+             "delactiontype", "dlybid", "dlyask", "in_universe"],
     start="2000-01-01",
     end="2020-12-31",          # search period only; see pipeline-boundaries
 )
 version = sd.data_version()    # put this in every log_run params
 ```
 
-- Always pass `columns`: the full daily file is ~2.6 GB in memory.
+- Always pass `columns`: the full daily file is ~2.6 GB in memory. `sd.daily_returns` needs
+  `permno, date, dlyret, dlyretmissflg, dlydelflg, delactiontype`; `sd.quoted_spread` needs
+  `permno, date, dlybid, dlyask, in_universe` (a missing column raises `KeyError`).
 - Always pass `end` no later than `2020-12-31` for discovery and stages 1-3.
 - `load` syncs from the Drive first; a missing Drive falls back to the local copy with a
   warning. Only "no Drive and no local copy" raises `SharedDataError`.
