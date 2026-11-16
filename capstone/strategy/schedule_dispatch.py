@@ -14,7 +14,7 @@ from capstone.strategy import input_memo
 
 
 def decision_due(spec, panel, as_of):
-    """Memoized per (spec, panel inputs, session) inside an evaluation scope (B3)."""
+    """Memoized per (spec, panel inputs, session) inside an evaluation scope."""
     return input_memo.panel_cached(
         "decision_due", spec, panel, (as_of,), lambda: _due(spec, panel, as_of)
     )
