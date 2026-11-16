@@ -51,3 +51,59 @@ def test_idea_claims_round_trip_through_typed_records(tmp_path):
         assert key == put_artifact(connection, "idea_claim_v2", asdict(claim))
         loaded = load_artifact(connection, key, kind="idea_claim_v2")
         assert IdeaClaimV2.from_dict(loaded) == claim
+
+
+def test_assessment_evidence_persists_without_erasing_a_missing_data_idea(tmp_path):
+    from capstone.factors.idea_contracts import ReviewedSourceInventory, assess_claim
+    from capstone.factors.source_archive import SourceArchive
+
+    archive = SourceArchive(tmp_path / "sources")
+    inventory = ReviewedSourceInventory("fixture-curator")
+    claim = IdeaClaimV2(
+        "exploratory_original",
+        mechanism="Temporary liquidity pressure.",
+        prediction="Prior losers recover.",
+        horizon="One month.",
+        universe="S&P 500.",
+        falsifier="No incremental net return.",
+        mathematics="s(i,t)=-sum(r(i,t-4:t)).",
+        required_inputs=("returns", "membership"),
+    )
+    blocked = assess_claim(
+        claim, archive, budget_scope_id="reserved-family-slot", reviewed_methods=inventory
+    )
+    covered = assess_claim(
+        claim,
+        archive,
+        budget_scope_id="reserved-family-slot",
+        reviewed_methods=inventory,
+        qualified_inputs={"returns", "membership"},
+        input_inventory_id="fixture-qualified-input-receipt",
+    )
+    path = tmp_path / "research.db"
+    with store.connect(path) as connection:
+        claim_record = put_artifact(connection, "idea_claim_v2", asdict(claim))
+        review_record = put_artifact(connection, "reviewed_source_inventory_v1", asdict(inventory))
+        old = put_artifact(connection, "claim_assessment_v1", asdict(blocked))
+        new = put_artifact(connection, "claim_assessment_v1", asdict(covered))
+        assert new == put_artifact(connection, "claim_assessment_v1", asdict(covered))
+    with store.connect(path) as connection:
+        assert (
+            IdeaClaimV2.from_dict(
+                load_artifact(connection, claim_record, kind="idea_claim_v2")
+            ).identity
+            == claim.identity
+        )
+        assert (
+            load_artifact(connection, review_record, kind="reviewed_source_inventory_v1")[
+                "authority_id"
+            ]
+            == inventory.authority_id
+        )
+        prior = load_artifact(connection, old, kind="claim_assessment_v1")
+        current = load_artifact(connection, new, kind="claim_assessment_v1")
+        assert prior["data_status"] == "needs_data" and current["data_status"] == "ready"
+        assert prior["claim_id"] == current["claim_id"] == claim.identity
+        assert prior["budget_scope_id"] == current["budget_scope_id"]
+        assert current["financial_status"] == "pending" and old != new
+        assert connection.execute("SELECT count(*) FROM research_artifacts").fetchone()[0] == 4

@@ -25,6 +25,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 
 from capstone.factors.research_contracts import digest
+from capstone.factors.source_archive import ArchiveIntegrityError, SourceArchive
 
 CLAIM_VERSION = 4
 ASSESSMENT_VERSION = 3
@@ -294,3 +295,134 @@ class ClaimAssessment:
             _text(self.input_inventory_id, "qualified input inventory identity")
         if (self.qualified_inputs or self.data_status == "ready") and not self.input_inventory_id:
             raise ValueError("qualified inputs require a trusted input inventory identity")
+
+
+def assess_claim(
+    claim: IdeaClaimV2,
+    archive: SourceArchive,
+    *,
+    budget_scope_id: str,
+    reviewed_methods: ReviewedSourceInventory,
+    qualified_inputs: frozenset[str] = frozenset(),
+    input_inventory_id: str | None = None,
+) -> ClaimAssessment:
+    """Check integrity/completeness separately; never establish entailment or admission.
+
+    budget_scope_id is a controller-owned assignment, not derived from claim aliases
+    or identity. No budget counter, new trial scope or authorization is created here.
+    """
+    if not isinstance(claim, IdeaClaimV2):
+        raise ValueError("a versioned claim is required")
+    if not isinstance(reviewed_methods, ReviewedSourceInventory):
+        raise ValueError("trusted reviewed source inventory must be supplied separately")
+    _text(budget_scope_id, "controller budget scope")
+    if not isinstance(qualified_inputs, (frozenset, set, tuple, list)):
+        raise ValueError("qualified inputs must be an explicit input collection")
+    inputs = set(_strings(tuple(qualified_inputs), "qualified inputs"))
+    if input_inventory_id is not None:
+        _text(input_inventory_id, "qualified input inventory identity")
+    if inputs and input_inventory_id is None:
+        raise ValueError("qualified inputs require a trusted input inventory identity")
+    if any(name.startswith("unavailable:") for name in inputs):
+        raise ValueError("an unavailable: declaration cannot be a qualified input")
+    version = ASSESSMENT_FOR_CLAIM[claim.semantics_version]
+    artifacts = {}
+    unavailable = set()
+
+    def load(revision):
+        if revision not in artifacts and revision not in unavailable:
+            try:
+                artifact = archive.load(revision)
+                if artifact.revision_id != revision or artifact.extraction_state != "ready":
+                    raise ArchiveIntegrityError("source revision not extractable")
+                artifacts[revision] = artifact
+            except ArchiveIntegrityError:
+                unavailable.add(revision)
+        return artifacts.get(revision)
+
+    evidence_issues = []
+    verified_statements = []
+    for statement in claim.source_statements:
+        artifact = load(statement.revision_id)
+        if artifact is None:
+            evidence_issues.append(f"source_revision_invalid:{statement.revision_id}")
+            continue
+        spans = {span.span_id: span for span in artifact.spans}
+        span = spans.get(statement.span_id)
+        if span is None:
+            evidence_issues.append(f"source_span_missing:{statement.span_id}")
+        elif span.text[statement.start : statement.end] != statement.quote:
+            evidence_issues.append(f"source_quote_mismatch:{statement.span_id}")
+        else:
+            verified_statements.append(statement)
+    evidence_status = "invalid" if evidence_issues else "quote_integrity_verified"
+    if not claim.source_statements:
+        evidence_status = "uncited_original" if claim.kind == "exploratory_original" else "missing"
+        if evidence_status == "missing":
+            evidence_issues.append("source_evidence_required")
+
+    completeness = []
+    for name in ("mechanism", "prediction", "horizon", "universe", "falsifier", "mathematics"):
+        if not getattr(claim, name).strip():
+            completeness.append(f"missing_field:{name}")
+    if not claim.required_inputs:
+        completeness.append("missing_field:required_inputs")
+    completeness.extend(f"unresolved_rule:{rule}" for rule in claim.unresolved_rules)
+    if claim.kind == "adaptation" and not claim.adaptation_notes:
+        completeness.append("adaptation_notes_required")
+    if claim.kind in ("reference", "adaptation"):
+        if not claim.method_key.strip():
+            completeness.append("reviewed_method_scope_required")
+        if not claim.method_sources:
+            completeness.append("methods_review_required")
+        reviews = {
+            (review.revision_id, review.method_key): review for review in reviewed_methods.reviews
+        }
+        cited = {statement.revision_id for statement in claim.source_statements}
+        for revision in claim.method_sources:
+            review = reviews.get((revision, claim.method_key))
+            artifact = load(revision)
+            cited_method_spans = {
+                statement.span_id
+                for statement in verified_statements
+                if statement.revision_id == revision
+                and statement.purpose in ("method", "mathematics")
+            }
+            if revision not in cited:
+                completeness.append(f"method_source_not_cited:{revision}")
+            if review is None or review.disposition != "sufficient":
+                completeness.append(f"methods_review_required:{revision}")
+            else:
+                reviewed = set(review.span_ids)
+                if version >= 3:
+                    # Scope rule: cited method spans stay inside the review, and cite some.
+                    covered = bool(cited_method_spans) and cited_method_spans <= reviewed
+                else:
+                    covered = reviewed <= cited_method_spans
+                if (
+                    artifact is None
+                    or not reviewed <= {span.span_id for span in artifact.spans}
+                    or not covered
+                ):
+                    completeness.append(f"reviewed_method_evidence_invalid:{revision}")
+    missing = tuple(sorted(set(claim.required_inputs) - inputs))
+    return ClaimAssessment(
+        claim_id=claim.identity,
+        budget_scope_id=budget_scope_id,
+        inventory_id=reviewed_methods.identity,
+        input_inventory_id=input_inventory_id,
+        qualified_inputs=tuple(sorted(inputs)),
+        evidence_status=evidence_status,
+        completeness_status="specification_ready" if not completeness else "incomplete",
+        data_status="undeclared"
+        if not claim.required_inputs
+        else "needs_data"
+        if missing
+        else "ready",
+        evidence_issues=tuple(sorted(set(evidence_issues))),
+        completeness_issues=tuple(sorted(set(completeness))),
+        missing_inputs=missing,
+        # Declared defaults are recorded, never counted as completeness issues.
+        adaptation_record=tuple(f"declared_default:{d.rule}" for d in claim.declared_defaults),
+        assessment_version=version,
+    )
