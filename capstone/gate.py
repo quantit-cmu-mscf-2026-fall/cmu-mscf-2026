@@ -46,6 +46,9 @@ their own name.
    chosen variants and the registered holdout dates. Checks that can fail
    (inputs, bootstrap size, trial count, stages 1-3, graded scores) run
    before the look, so a failure there does not spend it.
+   The provider's answer is refused unless it is exactly those columns on
+   dates in [`holdout_start`, `holdout_end`], finite (the look stays spent).
+   A survivor with no holdout returns fails stage 4.
 4. **Graded scores never decide.** `grading` computes them from the search
    period; nothing reads them back.
 5. **Stage 3 is not measured yet:** it passes stage 2's survivors through and
@@ -310,6 +313,34 @@ def _checked_authorizer(authorizer: object) -> str:
     return authorizer.strip()
 
 
+def _checked_holdout(frame: object, ids: tuple, config: GateConfig) -> pd.DataFrame:
+    """The provider's answer: exactly the requested columns, on holdout dates only.
+
+    The look is already logged when this runs, so a bad answer leaves it
+    spent; the messages say so.
+    """
+    if not isinstance(frame, pd.DataFrame) or not isinstance(frame.index, pd.DatetimeIndex):
+        raise TypeError("the holdout provider must return a DataFrame indexed by date")
+    if not frame.columns.is_unique or set(frame.columns) != set(ids):
+        raise ValueError(
+            f"the holdout provider must return exactly the requested columns {list(ids)!r}, "
+            f"got {list(frame.columns)!r}; the look is spent"
+        )
+    start, end = pd.Timestamp(config.holdout_start), pd.Timestamp(config.holdout_end)
+    outside = (frame.index < start) | (frame.index > end)
+    if outside.any():
+        raise ValueError(
+            f"the holdout provider returned {int(outside.sum())} dates outside the holdout "
+            f"[{config.holdout_start}, {config.holdout_end}], e.g. "
+            f"{frame.index[outside][0].date()}; the look is spent"
+        )
+    if not (frame.index.is_monotonic_increasing and frame.index.is_unique):
+        raise ValueError("holdout dates must be strictly increasing; the look is spent")
+    if np.isinf(frame.to_numpy(dtype=np.float64)).any():
+        raise ValueError("holdout returns must be finite (NaN for missing); the look is spent")
+    return frame[list(ids)]
+
+
 def _checked_stage3(config: GateConfig) -> None:
     if config.factors_digest is not None:
         raise ValueError(
@@ -402,14 +433,15 @@ def run_gate(
     )
     if ids:
         start, end = pd.Timestamp(config.holdout_start), pd.Timestamp(config.holdout_end)
-        ho_returns = holdout(ids, start, end)
-        if not isinstance(ho_returns, pd.DataFrame) or not isinstance(
-            ho_returns.index, pd.DatetimeIndex
-        ):
-            raise TypeError("the holdout provider must return a DataFrame indexed by date")
+        ho_returns = _checked_holdout(holdout(ids, start, end), ids, config)
     else:
         ho_returns = pd.DataFrame(index=pd.DatetimeIndex([]))
-    alive = stages["stage3"]
+    # A survivor whose chosen variant has no holdout returns can't be tested:
+    # it fails stage 4.
+    has_holdout = pd.Series(
+        {f: bool(ho_returns[b].notna().any()) for f, b in chosen.dropna().items()}, dtype=bool
+    )
+    alive = stages["stage3"] & has_holdout.reindex(stages.index, fill_value=False)
     tested = stats["best"].where(alive)
     ho = funnel.holdout_statistics(ho_returns, tested)
     for column in ho.columns:
