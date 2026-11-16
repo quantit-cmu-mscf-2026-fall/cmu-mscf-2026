@@ -173,6 +173,19 @@ def test_store_survives_reopening_and_trees_read_back(tmp_path):
     assert factor_id(store.factor_trees(reopened)[0][1]) == fid
 
 
+def test_variants_record_how_a_factor_is_traded(con):
+    store.add_paper(con, "arxiv:2502.16789", "AlphaAgent")
+    hid = store.add_hypothesis(con, _hypothesis())
+    fid, _ = store.add_factor(con, parse("ts_mean(returns, 5)"), hid)
+    a = store.add_variant(con, fid, {"hold": 21, "neutral": "sector"})
+    assert store.add_variant(con, fid, {"neutral": "sector", "hold": 21}) == a  # key order
+    b = store.add_variant(con, fid, {"hold": 1, "neutral": "none"})
+    assert a != b and a.startswith(fid)
+    rows = store.variants(con, fid)
+    assert [r["id"] for r in rows] == [a, b]
+    assert rows[0]["spec"] == {"hold": 21, "neutral": "sector"}
+
+
 def test_factor_database_sidecars_are_ignored(tmp_path):
     import subprocess
     from pathlib import Path
