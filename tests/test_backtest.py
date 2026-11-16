@@ -6,7 +6,17 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from capstone.backtest import BacktestSummary, run_backtest, summarize, to_weights
+from capstone.backtest import (
+    BacktestSummary,
+    backtest_frame,
+    candidate_returns,
+    run_backtest,
+    sharpe_ratio,
+    summarize,
+    sweep,
+    to_weights,
+)
+from capstone.synth import make_panel
 
 
 def _random_panel(n_dates: int = 10, n_assets: int = 5, seed: int = 0) -> pd.DataFrame:
@@ -74,6 +84,67 @@ def test_lookahead_discrimination():
     assert foresight_mean > 20 * abs(contemporaneous_mean)
 
 
+def _constant_book(n_dates: int = 80) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Long A / short B every day, on flat prices: the only P&L is trading cost."""
+    dates = pd.bdate_range("2020-01-01", periods=n_dates)
+    signal = pd.DataFrame({"A": 1.0, "B": -1.0}, index=dates)
+    returns = pd.DataFrame(0.0, index=dates, columns=["A", "B"])
+    return signal, returns
+
+
+def test_first_period_is_nan_not_a_zero_return():
+    # Nothing is held on the first date, so it is not a period with a return.
+    signal, returns = _constant_book()
+    strategy = run_backtest(signal, returns)
+    assert np.isnan(strategy.iloc[0])
+    assert not strategy.iloc[1:].isna().any()
+    assert summarize(strategy).n_obs == len(signal) - 1
+
+
+def test_building_the_book_is_charged():
+    # Opening a gross-1.0 book is 1.0 of turnover, paid once, when the position
+    # is first held; holding it unchanged costs nothing after that.
+    signal, returns = _constant_book()
+    strategy = run_backtest(signal, returns, cost_bps=100.0)
+    assert strategy.iloc[1] == pytest.approx(-0.01)
+    assert (strategy.iloc[2:] == 0.0).all()
+
+
+def test_days_with_no_position_are_nan_not_flat_days():
+    # #25: a lookback's warm-up holds nothing, so those dates are not periods
+    # with a return; counting them as 0.0 inflated n_obs and the hit-rate base.
+    signal, returns = _constant_book(n_dates=120)
+    signal.iloc[:20] = np.nan  # 20-day warm-up: no signal, no position
+    strategy = run_backtest(signal, returns)
+    assert strategy.iloc[:21].isna().all()  # warm-up plus the one-day lag
+    assert not strategy.iloc[21:].isna().any()
+    assert summarize(strategy).n_obs == len(signal) - 21
+
+
+def test_closing_the_book_keeps_its_cost():
+    # Going flat is a trade: the exit date carries its cost rather than NaN,
+    # and only the dates after it, with nothing held, are NaN.
+    signal, returns = _constant_book()
+    signal.iloc[40:] = np.nan
+    strategy = run_backtest(signal, returns, cost_bps=100.0)
+    assert strategy.iloc[41] == pytest.approx(-0.01)  # unwinding 1.0 of gross
+    assert strategy.iloc[42:].isna().all()
+
+
+def test_flat_signal_days_are_zero_not_nan():
+    # #25: a day with a real signal but zero net weight is a flat day, 0.0, not
+    # a missing one. A row equal across assets demeans to an empty book;
+    # dropping those days would inflate a timing overlay's Sharpe.
+    signal = _random_panel(n_dates=30, n_assets=5, seed=4)
+    returns = _random_panel(n_dates=30, n_assets=5, seed=5) * 0.01
+    signal.iloc[10:15] = 1.0  # five equal rows: real signal, zero weight
+    strategy = run_backtest(signal, returns, cost_bps=10.0)
+    assert np.isnan(strategy.iloc[0])
+    assert not strategy.iloc[1:].isna().any()
+    assert strategy.iloc[11] < 0  # closing the book is charged
+    assert (strategy.iloc[12:16] == 0.0).all()
+
+
 def test_summarize_short_series_raises():
     returns = pd.Series(np.random.default_rng(0).standard_normal(30) * 0.01)
     with pytest.raises(ValueError):
@@ -98,6 +169,30 @@ def test_summarize_zero_vol_gives_nan_sharpe_not_error():
     assert np.isnan(summary.sharpe)
 
 
+def test_sharpe_ratio_is_mean_over_sample_sd_annualised():
+    r = pd.Series([0.01, -0.02, 0.03, np.nan, 0.005])
+    clean = r.dropna()
+    expected = clean.mean() / clean.std(ddof=1) * np.sqrt(252)
+    assert sharpe_ratio(r, 252) == pytest.approx(expected, rel=1e-15)
+    assert np.isnan(sharpe_ratio(pd.Series([0.0] * 5), 252))  # no variance
+    assert np.isnan(sharpe_ratio(pd.Series([0.01]), 252))  # one period
+    series = pd.Series(np.random.default_rng(0).normal(0.001, 0.01, 500))
+    for freq, periods in (("daily", 252), ("monthly", 12)):
+        summary = summarize(series, freq=freq)
+        assert summary.sharpe == sharpe_ratio(series, periods)
+        # Exactly the ratio summarize reports, as it was before sharpe_ratio existed.
+        assert summary.sharpe == summary.mean / summary.vol
+
+
+@pytest.mark.parametrize("level", [0.01, -0.002, 0.1, 0.003, 1e-4])
+def test_sharpe_ratio_is_nan_for_a_constant_series(level):
+    # Rounding leaves some constant series with an sd near 1e-18, not 0; a
+    # Sharpe ratio of 1e17 would pass into a p-value as near-certain skill.
+    constant = pd.Series([level] * 100)
+    assert np.isnan(sharpe_ratio(constant, 252))
+    assert np.isnan(summarize(constant, freq="daily").sharpe)
+
+
 def test_cost_bps_reduces_mean_return():
     rng = np.random.default_rng(3)
     dates = pd.bdate_range("2020-01-01", periods=150)
@@ -109,3 +204,120 @@ def test_cost_bps_reduces_mean_return():
     costly = run_backtest(signal, returns, cost_bps=50.0)
 
     assert costly.dropna().mean() < free.dropna().mean()
+
+
+class TestCandidateReturns:
+    def test_each_column_is_that_candidates_backtest(self):
+        panel = make_panel(n_dates=80, n_assets=6, n_candidates=4, n_real=1, seed=0)
+        matrix = candidate_returns(panel, cost_bps=5.0)
+        assert list(matrix.columns) == list(panel.truth.index)
+        for name in panel.truth.index:
+            expected = run_backtest(panel.signals[name], panel.returns, cost_bps=5.0)
+            pd.testing.assert_series_equal(
+                matrix[name], expected.iloc[1:], check_names=False, check_freq=False
+            )
+
+    def test_drops_the_untraded_first_date_and_leaves_no_gaps(self):
+        panel = make_panel(n_dates=80, n_assets=6, n_candidates=3, seed=0)
+        matrix = candidate_returns(panel)
+        assert matrix.index[0] == panel.returns.index[1]
+        assert len(matrix) == 79
+        assert not matrix.isna().any().any()
+
+    def test_agrees_with_sweep(self):
+        panel = make_panel(n_dates=120, n_assets=6, n_candidates=3, seed=0)
+        sharpe = candidate_returns(panel).apply(lambda col: summarize(col).sharpe)
+        swept = sweep(panel)["sharpe"]
+        # sweep keeps the zero first row; the difference is one observation.
+        np.testing.assert_allclose(sharpe.to_numpy(), swept.to_numpy(), rtol=0.05)
+
+
+# ---------------------------------------------------------------------------
+# Per-asset costs and holding periods (backtest_frame)
+
+
+def _panel(n_dates=60, n_assets=4, seed=0):
+    rng = np.random.default_rng(seed)
+    dates = pd.bdate_range("2015-01-02", periods=n_dates)
+    cols = [f"a{j}" for j in range(n_assets)]
+    signal = pd.DataFrame(rng.standard_normal((n_dates, n_assets)), dates, cols)
+    returns = pd.DataFrame(rng.normal(0, 0.01, (n_dates, n_assets)), dates, cols)
+    return signal, returns
+
+
+def test_a_table_of_one_rate_matches_the_flat_rate():
+    signal, returns = _panel()
+    flat = backtest_frame(signal, returns, cost_bps=7.0, demean=True, gross=1.0)
+    table = pd.DataFrame(7.0, index=signal.index, columns=signal.columns)
+    per_asset = backtest_frame(signal, returns, cost_bps=table, demean=True, gross=1.0)
+    pd.testing.assert_frame_equal(flat, per_asset)
+
+
+def test_each_asset_pays_its_own_rate_on_the_trade_date():
+    signal, returns = _panel(n_dates=5, n_assets=2)
+    signal.loc[:] = [1.0, -1.0]  # one fixed book: the only trade builds it
+    rate = pd.DataFrame([[10.0, 30.0]] * 5, index=signal.index, columns=signal.columns)
+    rate.iloc[0] = [20.0, 40.0]  # the book is built at the first close
+    frame = backtest_frame(signal, returns, cost_bps=rate, demean=True, gross=1.0)
+    # Weights +0.5 / -0.5, bought at the first date's rates, charged on the second.
+    assert frame["cost"].iloc[1] == pytest.approx(0.5 * 20e-4 + 0.5 * 40e-4)
+    assert (frame["cost"].iloc[2:] == 0.0).all()
+    np.testing.assert_allclose(frame["net"], frame["gross"] - frame["cost"])
+
+
+def test_a_missing_rate_pays_that_days_median():
+    signal, returns = _panel(n_dates=5, n_assets=3)
+    signal.loc[:] = [1.0, 0.0, -1.0]
+    rate = pd.DataFrame(10.0, index=signal.index, columns=signal.columns)
+    rate.iloc[0] = [np.nan, 20.0, 40.0]
+    frame = backtest_frame(signal, returns, cost_bps=rate, demean=True, gross=1.0)
+    assert frame["cost"].iloc[1] == pytest.approx(0.5 * 30e-4 + 0.5 * 40e-4)
+
+
+@pytest.mark.parametrize(
+    "break_table",
+    [
+        pytest.param(lambda r: r.drop(r.index[2]), id="a date missing from the table"),
+        pytest.param(lambda r: r.iloc[:3], id="a table that ends early"),
+        pytest.param(lambda r: r.set_axis(r.index.strftime("%Y-%m-%d")), id="string dates"),
+    ],
+)
+def test_a_trade_with_no_rate_at_all_raises_instead_of_trading_free(break_table):
+    # With every asset missing, the day's median is NaN too, and `.sum` used to
+    # charge those trades nothing: a string-dated table cost 0.0 in total.
+    signal, returns = _panel(n_dates=6, n_assets=3)
+    rate = pd.DataFrame(10.0, index=signal.index, columns=signal.columns)
+    with pytest.raises(ValueError, match="no rate for trades"):
+        backtest_frame(signal, returns, cost_bps=break_table(rate), demean=True, gross=1.0)
+
+
+def test_an_untraded_date_needs_no_rate():
+    # Only trades need a price: a held book on a date with no rates is fine.
+    signal, returns = _panel(n_dates=6, n_assets=3)
+    signal.loc[:] = [1.0, 0.0, -1.0]  # one book, built on day 0 and never changed
+    rate = pd.DataFrame(10.0, index=signal.index, columns=signal.columns)
+    rate.iloc[2:] = np.nan
+    frame = backtest_frame(signal, returns, cost_bps=rate, demean=True, gross=1.0)
+    assert frame["cost"].iloc[1] == pytest.approx(10e-4)
+    assert (frame["cost"].iloc[2:] == 0).all()
+
+
+def test_holding_trades_only_on_rebalance_dates():
+    signal, returns = _panel(n_dates=60)
+    daily = backtest_frame(signal, returns, cost_bps=10.0, demean=True, gross=1.0)
+    held = backtest_frame(signal, returns, cost_bps=10.0, demean=True, gross=1.0, hold=10)
+    traded = held["turnover"].fillna(0) > 0
+    # A rebalance at date t (every 10th from the first) is charged at t + 1.
+    assert set(np.flatnonzero(traded)) <= {1, 11, 21, 31, 41, 51}
+    assert held["turnover"].sum() < daily["turnover"].sum()
+    with pytest.raises(ValueError, match="hold"):
+        backtest_frame(signal, returns, cost_bps=10.0, demean=True, gross=1.0, hold=0)
+
+
+def test_a_warm_up_is_left_out_when_holding_too():
+    signal, returns = _panel(n_dates=40)
+    signal.iloc[:12] = np.nan  # no signal for 12 dates
+    held = backtest_frame(signal, returns, cost_bps=10.0, demean=True, gross=1.0, hold=5)
+    # The first rebalance with a signal is date 15; its book is held from 16.
+    assert held["net"].iloc[:16].isna().all()
+    assert held["net"].iloc[16:].notna().all()
