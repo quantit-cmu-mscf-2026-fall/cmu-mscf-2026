@@ -339,7 +339,7 @@ def parse_generation_payload(payload, frozen):
         spans = {} if source is None else {s["span_id"]: s["text"] for s in source["spans"]}
         text = spans.get(given.span_id)
         quote = given
-        # Models cannot count long offsets (slice-01: exact quotes, estimated starts).
+        # Models cannot count long offsets (exact quotes, estimated starts).
         # A verbatim quote occurring once in its span has exactly one location.
         if text is not None and text[given.start : given.end] != given.quote:
             if text.count(given.quote) == 1:
