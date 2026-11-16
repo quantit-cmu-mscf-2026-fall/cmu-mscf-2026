@@ -1,6 +1,9 @@
+from dataclasses import asdict
+
 import pytest
 
 from capstone.factors import store
+from capstone.factors.idea_contracts import IdeaClaimV2
 from capstone.factors.research_contracts import digest
 from capstone.factors.research_records import load_artifact, put_artifact
 
@@ -39,3 +42,12 @@ def test_reading_missing_artifact_does_not_create_a_table(tmp_path):
         assert not connection.execute(
             "SELECT name FROM sqlite_master WHERE name='research_artifacts'"
         ).fetchall()
+
+
+def test_idea_claims_round_trip_through_typed_records(tmp_path):
+    with store.connect(tmp_path / "research.db") as connection:
+        claim = IdeaClaimV2("exploratory_original", prediction="A testable draft.")
+        key = put_artifact(connection, "idea_claim_v2", asdict(claim))
+        assert key == put_artifact(connection, "idea_claim_v2", asdict(claim))
+        loaded = load_artifact(connection, key, kind="idea_claim_v2")
+        assert IdeaClaimV2.from_dict(loaded) == claim
