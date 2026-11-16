@@ -28,6 +28,7 @@ testpaths = ["tests"]
 markers = [
     "network: requires internet access (skips cleanly if unavailable)",
     "data: requires the team's shared data locally (skips cleanly if absent)",
+    "report: writes a checkpoint report; runs only with --report",
 ]
 
 [tool.ruff]

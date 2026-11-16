@@ -11,3 +11,5 @@ experiments/runs.jsonl
 experiments/factors.db*
 experiments/alignment_labels.csv
 experiments/factor_evaluation/
+experiments/reports/
+experiments/learned_memory_search_check/
