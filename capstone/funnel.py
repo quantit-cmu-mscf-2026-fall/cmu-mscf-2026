@@ -60,7 +60,8 @@ def check_dates(index: pd.Index) -> None:
         raise ValueError("returns' dates must be increasing")
     if not index.is_unique:
         raise ValueError(
-            f"returns' dates must be unique, e.g. {index[index.duplicated()][0].date()} repeats"
+            f"returns' dates must be unique (strictly increasing), "
+            f"e.g. {index[index.duplicated()][0].date()} repeats"
         )
 
 
