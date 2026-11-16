@@ -354,3 +354,236 @@ def test_stats_counts_trials_after_corrections(tmp_path, monkeypatch, capsys):
     assert "trials (corrections applied): 3" in out
     assert "  alpha: 2" in out and "  beta: 1" in out
     assert runlog.CORRECTION_NAME not in out
+
+
+# ---------------------------------------------------------------------------
+# Review of #94: a correction must say why, can be retracted, and a seen result
+# cannot leave the count invisibly.
+
+
+def _retraction(*targets, reason="the correction excluded the wrong runs"):
+    return runlog.log_run(
+        runlog.CORRECTION_NAME,
+        params={"retracts": [t["ts_utc"] for t in targets], "reason": reason},
+    )
+
+
+def _ten_seen_runs():
+    return [
+        runlog.log_run("mom", params={"lookback": i}, metrics={"sharpe": i / 10}) for i in range(10)
+    ]
+
+
+def _exclude_nine_losers(runs):
+    return _correction(
+        "mom", [{"ts_utc": r["ts_utc"], "lookback": r["params"]["lookback"]} for r in runs[:9]]
+    )
+
+
+@pytest.mark.parametrize("reason", [None, "", "   ", 7, ["why"]])
+def test_a_correction_needs_a_non_empty_reason(tmp_path, monkeypatch, reason):
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    run = runlog.log_run("sweep")
+    runlog.log_run(
+        runlog.CORRECTION_NAME,
+        params={"ledger_name": "sweep", "excludes": [{"ts_utc": run["ts_utc"]}], "reason": reason},
+    )
+    with pytest.raises(ValueError, match="reason"):
+        runlog.trial_count("sweep")
+
+
+def test_a_correction_without_any_reason_key_is_refused(tmp_path, monkeypatch):
+    # Nine of ten seen runs dropped, no explanation: the "best of N as one" case.
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    runs = _ten_seen_runs()
+    runlog.log_run(
+        runlog.CORRECTION_NAME,
+        params={"ledger_name": "mom", "excludes": [{"ts_utc": r["ts_utc"]} for r in runs[:9]]},
+    )
+    with pytest.raises(ValueError, match="reason"):
+        runlog.trial_count("mom")
+
+
+def test_a_correction_can_be_retracted(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    runs = [runlog.log_run("sweep", params={"i": i}) for i in range(4)]
+    wrong = _correction("sweep", [{"ts_utc": r["ts_utc"]} for r in runs[:3]])
+    assert runlog.trial_count("sweep") == 1
+    _retraction(wrong)
+    assert runlog.trial_count("sweep") == 4  # the mistake no longer lowers m
+    assert len(runlog.read_entries()) == 6  # and nothing was rewritten
+
+
+def test_a_retraction_can_be_retracted_in_turn(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    run = runlog.log_run("sweep")
+    runlog.log_run("sweep", params={"i": 1})
+    first = _correction("sweep", [{"ts_utc": run["ts_utc"]}])
+    undo = _retraction(first)
+    assert runlog.trial_count("sweep") == 2
+    _retraction(undo, reason="the first correction was right after all")
+    assert runlog.trial_count("sweep") == 1
+
+
+def test_a_retraction_names_an_earlier_correction(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    run = runlog.log_run("sweep")
+    runlog.log_run(
+        runlog.CORRECTION_NAME,
+        params={"retracts": [run["ts_utc"]], "reason": "r"},  # a run, not a correction
+    )
+    with pytest.raises(ValueError, match="no earlier correction"):
+        runlog.trial_count("sweep")
+
+
+@pytest.mark.parametrize("retracts", ["x", [], [3], {"ts_utc": "x"}])
+def test_a_malformed_retraction_raises(tmp_path, monkeypatch, retracts):
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    runlog.log_run("sweep")
+    runlog.log_run(runlog.CORRECTION_NAME, params={"retracts": retracts, "reason": "r"})
+    with pytest.raises(ValueError, match="retracts"):
+        runlog.trial_count("sweep")
+
+
+def test_one_entry_cannot_both_retract_and_exclude(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    run = runlog.log_run("sweep")
+    first = _correction("sweep", [{"ts_utc": run["ts_utc"]}])
+    runlog.log_run(
+        runlog.CORRECTION_NAME,
+        params={
+            "retracts": [first["ts_utc"]],
+            "ledger_name": "sweep",
+            "excludes": [],
+            "reason": "r",
+        },
+    )
+    with pytest.raises(ValueError, match="not both"):
+        runlog.trial_count("sweep")
+
+
+def test_excluding_seen_runs_warns_and_can_be_counted(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    _exclude_nine_losers(_ten_seen_runs())
+    with pytest.warns(UserWarning, match="9 run"):
+        assert runlog.trial_count("mom") == 1
+    assert runlog.trial_count("mom", count_seen_exclusions=True) == 10
+
+
+def test_excluding_unseen_runs_does_not_warn(tmp_path, monkeypatch, recwarn):
+    # No metrics logged: no result existed to be seen, so a duplicate is just dropped.
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    runs = [runlog.log_run("sweep", params={"i": i}) for i in range(3)]
+    _correction("sweep", [{"ts_utc": r["ts_utc"]} for r in runs[:2]])
+    assert runlog.trial_count("sweep") == 1
+    assert runlog.trial_count("sweep", count_seen_exclusions=True) == 1
+    assert not [w for w in recwarn if issubclass(w.category, UserWarning)]
+
+
+def test_the_seen_warning_is_scoped_to_the_counted_family(tmp_path, monkeypatch, recwarn):
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    seen = runlog.log_run("loud", metrics={"sharpe": 1.0})
+    runlog.log_run("loud", metrics={"sharpe": 0.5})
+    runlog.log_run("quiet")
+    _correction("loud", [{"ts_utc": seen["ts_utc"]}])
+    assert runlog.trial_count("quiet") == 1
+    assert not [w for w in recwarn if issubclass(w.category, UserWarning)]
+
+
+def test_stats_shows_what_was_excluded_and_what_was_seen(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    runs = _ten_seen_runs()
+    dups = [runlog.log_run("dup") for _ in range(3)]
+    _exclude_nine_losers(runs)
+    wrong = _correction("dup", [{"ts_utc": dups[0]["ts_utc"]}])
+    _retraction(wrong)
+    _correction("dup", [{"ts_utc": "2001-01-01T00:00:00+00:00"}])  # matches no run
+    runlog.main(["stats"])
+    out = capsys.readouterr().out
+    assert "trials (corrections applied): 4" in out  # mom 1 + dup 3
+    assert "excluded by corrections: 9" in out
+    assert "of which results already recorded (seen): 9" in out
+    assert "trials if seen exclusions were counted: 13" in out
+    assert "correction entries: 4 (1 retracted)" in out
+    assert "correction items matching no earlier run: 1" in out
+    assert "  mom: 9 (9)" in out
+    assert "  dup: 3" in out and "dup: 0" not in out
+
+
+def test_a_correction_matches_the_exact_json_value(tmp_path, monkeypatch):
+    # `1 == True` in Python; in JSON they are different values.
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    run = runlog.log_run("sweep", params={"flag": True, "w": 20})
+    runlog.log_run("sweep")
+    _correction("sweep", [{"ts_utc": run["ts_utc"], "flag": 1}])
+    _correction("sweep", [{"ts_utc": run["ts_utc"], "w": 20.0}])
+    _correction("sweep", [{"ts_utc": run["ts_utc"], "w": True}])
+    assert runlog.trial_count("sweep") == 2
+    _correction("sweep", [{"ts_utc": run["ts_utc"], "flag": True, "w": 20}])
+    assert runlog.trial_count("sweep") == 1
+
+
+def test_a_correction_only_applies_to_earlier_runs(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    path = tmp_path / runlog.LEDGER_FILENAME
+    stamp = "2026-01-01T00:00:00+00:00"
+    other = {"name": "sweep", "ts_utc": "2026-01-02T00:00:00+00:00", "params": {}}
+    target = {"name": "sweep", "ts_utc": stamp, "params": {}}
+    correction = {
+        "name": runlog.CORRECTION_NAME,
+        "ts_utc": "2026-01-03T00:00:00+00:00",
+        "params": {"ledger_name": "sweep", "excludes": [{"ts_utc": stamp}], "reason": "r"},
+    }
+    path.write_text("\n".join(json.dumps(e) for e in (correction, target, other)) + "\n")
+    assert runlog.trial_count("sweep") == 2  # written before the run, so it cannot exclude it
+    path.write_text("\n".join(json.dumps(e) for e in (target, correction, other)) + "\n")
+    assert runlog.trial_count("sweep") == 1
+
+
+@pytest.mark.parametrize("ledger_name", [None, "", ["sweep"], {"a": 1}, 3])
+def test_a_correction_needs_a_string_ledger_name(tmp_path, monkeypatch, ledger_name):
+    # None used to pass and exclude every unnamed run; a list raised TypeError.
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    runlog.log_run("sweep")
+    runlog.log_run(
+        runlog.CORRECTION_NAME,
+        params={"ledger_name": ledger_name, "excludes": [{"ts_utc": "x"}], "reason": "r"},
+    )
+    with pytest.raises(ValueError, match="ledger_name"):
+        runlog.trial_count("sweep")
+
+
+@pytest.mark.parametrize("ts_utc", [["t"], {"a": 1}, 3, None, ""])
+def test_a_correction_item_needs_a_string_ts_utc(tmp_path, monkeypatch, ts_utc):
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    runlog.log_run("sweep")
+    runlog.log_run(
+        runlog.CORRECTION_NAME,
+        params={"ledger_name": "sweep", "excludes": [{"ts_utc": ts_utc}], "reason": "r"},
+    )
+    with pytest.raises(ValueError, match="ts_utc"):
+        runlog.trial_count("sweep")
+
+
+def test_a_malformed_correction_names_the_file_and_line(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    runlog.log_run("sweep")
+    runlog.log_run("sweep")
+    runlog.log_run(
+        runlog.CORRECTION_NAME, params={"ledger_name": "sweep", "excludes": {}, "reason": "r"}
+    )
+    with pytest.raises(ValueError) as caught:
+        runlog.trial_count("sweep")
+    assert f"{tmp_path / runlog.LEDGER_FILENAME}:3 " in str(caught.value)
+
+
+def test_an_unnamed_run_is_not_excluded_by_a_null_ledger_name(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    path = tmp_path / runlog.LEDGER_FILENAME
+    path.write_text(json.dumps({"ts_utc": "U1", "params": {}}) + "\n")
+    runlog.log_run(
+        runlog.CORRECTION_NAME,
+        params={"ledger_name": None, "excludes": [{"ts_utc": "U1"}], "reason": "r"},
+    )
+    with pytest.raises(ValueError, match="ledger_name"):
+        runlog.trial_count()

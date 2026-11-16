@@ -208,10 +208,17 @@ temporary directory and never touch `experiments/runs.jsonl`.
 The ledger is append-only, so a run that should not count (a duplicate, a
 run against the wrong data) is never deleted. Log a correction instead:
 `log_run("ledger-correction", params={"ledger_name": "mom-sweep",
-"excludes": [{"ts_utc": "<the run's ts_utc>"}], "reason": "..."})`. Add any
-param of the run to an item to tell apart runs logged at the same time.
-`trial_count` and `stats` leave the excluded runs and the correction itself
-out of the count, and a malformed correction raises `ValueError`.
+"excludes": [{"ts_utc": "<the run's ts_utc>"}], "reason": "..."})`.
+The `reason` is required. Add any param of the run to an item to tell apart
+runs logged at the same time; it must match as the same JSON value, and the
+correction only applies to runs logged before it. A wrong correction is undone
+by a later one: `params={"retracts": ["<the correction's ts_utc>"],
+"reason": "..."}`. `trial_count` and `stats` leave the excluded runs and the
+correction itself out of the count, and a malformed correction raises
+`ValueError` naming the ledger file and line. A run that logged `metrics` has
+a result that may have been seen: `trial_count` warns when a correction drops
+one (`count_seen_exclusions=True` counts it), and `stats` prints the
+exclusions per name beside the count that ignores them.
 
 ## Avoiding merge conflicts
 
