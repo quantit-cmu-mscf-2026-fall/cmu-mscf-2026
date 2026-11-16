@@ -190,6 +190,39 @@ def guard_file(root):
     return json.loads((root / "autopilot/spend-guard.json").read_text(encoding="utf-8"))
 
 
+def test_a_verify_named_run_keeps_its_reservation_in_the_global_budget(tmp_path):
+    runs = tmp_path / "runs"
+    for name in ("r1", "r1-verify", "r2"):
+        autopilot_run(runs, name)
+    spend.guard(context(tmp_path, "r1"), "research", 200)
+    second = spend.guard(context(tmp_path, "r1-verify"), "research", 100)
+    assert second["global_total"] == 300
+
+    last = context(tmp_path, "r2")
+    with pytest.raises(Stop, match="spend_global_ceiling_exceeded"):
+        spend.guard(last, "research", 100)
+    assert not last.path(*spend.GUARD).exists()
+    assert guard_file(runs / "r1-verify")["scopes"] == {"research": 100}
+
+
+@pytest.mark.parametrize("calls", [None, 100])
+def test_a_verify_named_folder_needs_the_same_accounting_as_any_other_root(tmp_path, calls):
+    runs = tmp_path / "runs"
+    autopilot_run(runs, "r1")
+    scratch = runs / "r1-verify"
+    scratch.mkdir()
+    if calls is not None:
+        accounting(scratch, calls)
+    ctx = context(tmp_path, "r2")
+    if calls is None:
+        with pytest.raises(Stop, match="spend_accounting_unreadable"):
+            spend.guard(ctx, "research", 200)
+    else:
+        check = spend.guard(ctx, "research", 200)
+        assert check["global_total"] == 300
+        assert check["other_runs"][scratch.as_posix()] == 100
+
+
 def test_the_runner_passes_the_callers_guard_before_a_spending_stage_runs(tmp_path):
     ran = []
 
