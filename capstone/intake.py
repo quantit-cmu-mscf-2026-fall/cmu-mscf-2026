@@ -144,6 +144,34 @@ def from_returns(
     )
 
 
+def from_evaluation(
+    matrix: pd.DataFrame,
+    summary: pd.DataFrame,
+    *,
+    generator: str = "factor-trees",
+    data_version: str = "",
+) -> FunnelInput:
+    """A `FunnelInput` from `evaluate_factors`' (matrix, summary).
+
+    One family per hypothesis: each variant's family is its row's
+    `hypothesis_id` in `summary` (indexed by variant id). A variant without
+    one raises, naming it. `data_version` is the panel's
+    (`sd.data_version()`), recorded in `source` with each variant's factor.
+    Takes the plain frames evaluation returns and imports nothing from it.
+    """
+    if "hypothesis_id" not in summary.columns:
+        raise ValueError("summary has no hypothesis_id column")
+    family = summary["hypothesis_id"].reindex(matrix.columns).rename("hypothesis_id")
+    missing = family.index[family.isna()]
+    if len(missing):
+        raise ValueError(f"no hypothesis family for variants {list(missing)!r}")
+    factors = summary["factor_id"].reindex(matrix.columns) if "factor_id" in summary else None
+    source = {"data_version": data_version}
+    if factors is not None:
+        source["factor_ids"] = factors.to_dict()
+    return from_returns(matrix, family, generator=generator, source=source)
+
+
 def stage_inputs(
     fi: FunnelInput,
     *,

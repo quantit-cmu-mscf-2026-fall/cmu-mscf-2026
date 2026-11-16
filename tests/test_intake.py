@@ -15,10 +15,14 @@ import sys
 import numpy as np
 import pandas as pd
 import pytest
+from test_factor_evaluation import fake_rows
 
 from capstone import calibration, funnel
 from capstone.evaluate import benjamini_hochberg
-from capstone.intake import FunnelInput, from_returns, stage_inputs
+from capstone.factors import evaluation as ev
+from capstone.factors import store
+from capstone.factors.tree import parse
+from capstone.intake import FunnelInput, from_evaluation, from_returns, stage_inputs
 
 
 def _tiny(n=30):
@@ -29,6 +33,28 @@ def _tiny(n=30):
     return returns, family
 
 
+def _evaluated(tmp_path, monkeypatch, expressions):
+    """evaluate_factors on fake rows, families from a small store.
+
+    `expressions` maps a hypothesis name to the factor expressions proposed
+    under it. Returns (matrix, summary, {hypothesis name: hypothesis id}).
+    """
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    con = store.connect(tmp_path / "factors.db")
+    store.add_paper(con, "p", "Paper")
+    hids, trees = {}, {}
+    for name, exprs in expressions.items():
+        hids[name] = store.add_hypothesis(con, store.Hypothesis("p", name, "k", "j", "s", "f"))
+        for e in exprs:
+            fid, _ = store.add_factor(con, parse(e), hids[name])
+            trees[fid] = parse(e)
+    families = {fid: ev.hypothesis_of(con, fid) for fid in trees}
+    panel = ev.build_panel(fake_rows(n_stocks=12, n_days=80), data_version="v-test")
+    specs = ev.grid(holds=[1, 5], neutral=["none"])
+    matrix, summary = ev.evaluate_factors(trees, panel, specs=specs, con=con, families=families)
+    return matrix, summary, hids
+
+
 def _family_set(n_families, share_real, seed, *, sharpe_real=2.0, n_holdout=0):
     """Simulated families (k=5) on business days from 2015, 3 years of search."""
     fs = calibration.make_family_set(
@@ -37,6 +63,69 @@ def _family_set(n_families, share_real, seed, *, sharpe_real=2.0, n_holdout=0):
     assert isinstance(fs.returns.index, pd.DatetimeIndex)
     assert fs.returns.index.max() <= pd.Timestamp("2020-12-31")  # synthetic, pre-holdout dates
     return fs
+
+
+# ---------------------------------------------------------------------------
+# from_evaluation
+
+
+def test_from_evaluation_gives_one_family_per_hypothesis(tmp_path, monkeypatch):
+    matrix, summary, hids = _evaluated(
+        tmp_path,
+        monkeypatch,
+        {"volume": ["volume", "open"], "reversal": ["ts_mean(returns, 5)"]},
+    )
+    fi = from_evaluation(matrix, summary, data_version="v-test")
+
+    assert isinstance(fi, FunnelInput)
+    assert [f.name for f in dataclasses.fields(FunnelInput)] == [
+        "returns",
+        "family",
+        "generator",
+        "source",
+    ]
+    assert list(fi.returns.columns) == list(matrix.columns)
+    assert list(fi.family.index) == list(matrix.columns)
+    assert fi.family.to_dict() == summary["hypothesis_id"].to_dict()
+    assert fi.family.value_counts().to_dict() == {hids["volume"]: 4, hids["reversal"]: 2}
+    assert fi.generator == "factor-trees"
+    assert fi.source["data_version"] == "v-test"
+    assert fi.source["variant_ids"] == list(matrix.columns)
+    assert isinstance(fi.returns.index, pd.DatetimeIndex)
+
+
+def test_from_evaluation_drops_rows_no_variant_traded(tmp_path, monkeypatch):
+    # Every factor has a lookback, so the first days hold nothing anywhere.
+    matrix, summary, _ = _evaluated(
+        tmp_path, monkeypatch, {"a": ["ts_mean(returns, 5)"], "b": ["ts_mean(volume, 10)"]}
+    )
+    empty = matrix.isna().all(axis=1)
+    assert empty.any()  # the warm-up is in evaluation's matrix
+    fi = from_evaluation(matrix, summary)
+    assert not fi.returns.isna().all(axis=1).any()
+    pd.testing.assert_frame_equal(fi.returns, matrix.loc[~empty], check_freq=False)
+    assert fi.source["n_dropped_rows"] == int(empty.sum())
+
+
+def test_a_variant_with_no_family_raises_naming_it(tmp_path, monkeypatch):
+    matrix, summary, _ = _evaluated(tmp_path, monkeypatch, {"volume": ["volume"]})
+    orphan = summary.index[1]
+    summary = summary.copy()
+    summary.loc[orphan, "hypothesis_id"] = None
+    with pytest.raises(ValueError, match=orphan):
+        from_evaluation(matrix, summary)
+
+
+def test_a_variant_missing_from_the_summary_raises_naming_it(tmp_path, monkeypatch):
+    matrix, summary, _ = _evaluated(tmp_path, monkeypatch, {"volume": ["volume"]})
+    with pytest.raises(ValueError, match=summary.index[0]):
+        from_evaluation(matrix, summary.iloc[1:])
+
+
+def test_a_summary_without_a_hypothesis_column_raises(tmp_path, monkeypatch):
+    matrix, summary, _ = _evaluated(tmp_path, monkeypatch, {"volume": ["volume"]})
+    with pytest.raises(ValueError, match="hypothesis_id"):
+        from_evaluation(matrix, summary.drop(columns="hypothesis_id"))
 
 
 # ---------------------------------------------------------------------------
