@@ -161,3 +161,90 @@ def share_plan(
     if eligibility := weights.attrs.get("formation_eligibility"):
         result["formation_eligibility"] = deepcopy(eligibility)
     return result
+
+
+def portfolio_risk(
+    positions,
+    prices,
+    capital,
+    *,
+    side,
+    max_gross=1.0,
+    max_weight=0.1,
+    max_order_notional=50_000,
+    orders=(),
+):
+    """Check whole-share `positions` (permno -> shares) at `prices` against limits.
+
+    Returns the book's gross, net and largest weight (fractions of `capital`)
+    and the names of the limits it breaks (`blockers`): gross above
+    `max_gross`, a name above `max_weight`, a short under `long_only`, an order
+    above `max_order_notional`.
+
+    The defaults (gross 1.0, one name 0.1, one order 50,000) are the testbed's
+    values, documented here and not a policy: a caller with a real mandate
+    passes its own limits, and adopting these is the team's decision.
+    """
+    if capital <= 0 or not math.isfinite(capital):
+        raise ValueError("capital must be finite and positive")
+    if not 0 < max_weight <= max_gross or not math.isfinite(max_gross):
+        raise ValueError("invalid portfolio limits")
+    values = {n: int(q) * float(prices[n]) / capital for n, q in positions.items() if q}
+    if any(
+        not math.isfinite(float(prices[n])) or prices[n] <= 0 for n, q in positions.items() if q
+    ):
+        raise ValueError("risk checks require positive finite marks")
+    if not all(math.isfinite(v) for v in values.values()):
+        raise ValueError("position values must be finite")
+    blockers = []
+    gross = sum(abs(v) for v in values.values())
+    if gross > max_gross + 1e-10:
+        blockers.append("rounded_gross_limit")
+    if any(abs(v) > max_weight + 1e-10 for v in values.values()):
+        blockers.append("rounded_single_name_limit")
+    if side == "long_only" and any(v < 0 for v in values.values()):
+        blockers.append("long_only_short_position")
+    if side not in {"long_only", "long_short"}:
+        raise ValueError("unknown portfolio side")
+    if any(abs(o["shares"]) * float(prices[o["permno"]]) > max_order_notional for o in orders):
+        blockers.append("order_notional_limit")
+    return {
+        "gross": gross,
+        "net": sum(values.values()),
+        "largest_weight": max((abs(v) for v in values.values()), default=0),
+        "blockers": blockers,
+    }
+
+
+def execution_risk(plan, account, marks):
+    """Recheck remaining fixed quantities at current marks; never resize an instruction."""
+    marks = {int(n): float(p) for n, p in marks.items()}
+    if any(
+        isinstance(q, bool) or int(q) != q
+        for q in [*plan["projected_shares"].values(), *account["positions"].values()]
+    ):
+        raise ValueError("execution risk requires whole-share positions")
+    target = {int(n): int(q) for n, q in plan["projected_shares"].items()}
+    held = {int(n): int(q) for n, q in account["positions"].items()}
+    required = {n for n, q in target.items() if q} | {n for n, q in held.items() if q}
+    if any(not math.isfinite(marks[n]) or marks[n] <= 0 for n in required):
+        raise ValueError("execution risk requires positive finite marks")
+    orders = [
+        {"permno": n, "shares": target.get(n, 0) - held.get(n, 0)}
+        for n in sorted(set(target) | set(held))
+        if target.get(n, 0) != held.get(n, 0)
+    ]
+    result = portfolio_risk(
+        target, marks, plan["capital"], side=plan["profile"], orders=orders, **plan["limits"]
+    )
+    cash = float(account["cash"]) - sum(
+        (o["shares"] + abs(o["shares"]) * cost_rate(plan["execution_cost_bps"], o["permno"]))
+        * marks[o["permno"]]
+        for o in orders
+    )
+    if not math.isfinite(cash):
+        raise ValueError("current execution cash projection is invalid")
+    if plan["profile"] == "long_only" and cash < -1e-8:
+        result["blockers"].append("current_cash_deficit")
+    result["projected_cash_at_current_marks"] = cash
+    return result
