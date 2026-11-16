@@ -72,6 +72,14 @@ FUNCS = {
 BINARY_WINDOW_FUNCS = {"ts_corr", "ts_cov"}
 BINARY_PARAMETER_FUNCS = {"signed_power"}
 
+# Market-regime operators (off by default): f(x), no window. Not in
+# `FUNCS`: they parse only with `parse(..., regime_operators=True)`; otherwise they
+# are unknown identifiers, as before. `volscale(x)` scales x by a fixed target over the
+# market's rv126;
+# `bear_gate(x)` is x set to 0 in a bear market (`capstone.regimes`). A tree using
+# one belongs to its `regime_base` formula's family.
+REGIME_FUNCS = ("volscale", "bear_gate")
+
 # Five trading years, the horizon of long-run reversal (De Bondt & Thaler
 # 1985). At 252 a three-to-five-year lookback had to be written as nested
 # shifts. Originality is unaffected: the shape key ignores windows.
@@ -199,9 +207,10 @@ def _finite(text: str) -> float:
 
 
 class _Parser:
-    def __init__(self, tokens: list[tuple[str, str]]):
+    def __init__(self, tokens: list[tuple[str, str]], regime_operators: bool = False):
         self.tokens = tokens
         self.pos = 0
+        self.regime_operators = regime_operators
 
     def peek(self) -> tuple[str, str] | None:
         return self.tokens[self.pos] if self.pos < len(self.tokens) else None
@@ -251,6 +260,8 @@ class _Parser:
                 return Field_(value)
             if value in FUNCS or value in BINARY_WINDOW_FUNCS or value in BINARY_PARAMETER_FUNCS:
                 return self.call(value)
+            if self.regime_operators and value in REGIME_FUNCS:
+                return self.call(value)
             raise ParseError(f"unknown identifier {value!r}")
         raise ParseError(f"unexpected token {value!r}")
 
@@ -279,15 +290,17 @@ class _Parser:
             if kind != "num":
                 raise ParseError(f"{func} exponent must be a numeric literal, got {value!r}")
             arg2 = Const(_finite(value))
-        elif FUNCS[func]:
+        elif FUNCS.get(func):
             self.expect(",")
             window = self.window(func)
         self.expect(")")
         return Call(func, arg, window, arg2)
 
 
-def parse(expression: str) -> Node:
+def parse(expression: str, *, regime_operators: bool = False) -> Node:
     """Parse a factor expression into a tree. The ONLY entry point for strings.
+
+    `regime_operators` admits `REGIME_FUNCS` (off by default).
 
     Raises `ParseError` for anything outside the grammar: unknown identifiers
     or functions, quotes, attribute access, subscripts, non-literal windows,
@@ -297,7 +310,7 @@ def parse(expression: str) -> Node:
     tokens = _tokenize(expression)
     if not tokens:
         raise ParseError("empty expression")
-    parser = _Parser(tokens)
+    parser = _Parser(tokens, regime_operators)
     try:
         node = parser.expr()
     except RecursionError:
@@ -308,6 +321,26 @@ def parse(expression: str) -> Node:
         raise ParseError(f"expression exceeds {MAX_EXPRESSION_NODES} nodes")
     if not features_used(node) & set(STOCK_FIELDS):
         raise ParseError("expression references no stock field")
+    return node
+
+
+def uses_regime(node: Node) -> bool:
+    """Whether the tree applies a market-regime operator (`REGIME_FUNCS`)."""
+    return any(isinstance(n, Call) and n.func in REGIME_FUNCS for n in walk(node))
+
+
+def regime_base(node: Node) -> Node:
+    """The tree with every regime operator replaced by its argument: the base formula
+    whose family a regime variant is counted in, and which stage 3 spans it with."""
+    if isinstance(node, Call) and node.func in REGIME_FUNCS:
+        return regime_base(node.arg)
+    if isinstance(node, Unary):
+        return Unary(node.op, regime_base(node.operand))
+    if isinstance(node, BinOp):
+        return BinOp(node.op, regime_base(node.left), regime_base(node.right))
+    if isinstance(node, Call):
+        arg2 = None if node.arg2 is None else regime_base(node.arg2)
+        return Call(node.func, regime_base(node.arg), node.window, arg2)
     return node
 
 
