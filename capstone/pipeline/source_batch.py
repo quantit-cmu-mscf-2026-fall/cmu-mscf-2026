@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import platform
 from collections import Counter
 from dataclasses import asdict
+from html import escape
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
@@ -165,6 +167,59 @@ def _summary(root, manifest):
     }
 
 
+def _report(root, summary):
+    rows = []
+    for item in summary["sources"]:
+        request = item["request"]
+        title = request["title"] or request["locator"] or "Original observation"
+        evidence = ""
+        if item["revision_id"]:
+            revision = item["revision_id"]
+            evidence = f'<a href="archive/revisions/{revision}.json">Located evidence</a>'
+        excerpt = escape(item.get("excerpt", ""))
+        rows.append(
+            "<tr><td>"
+            + escape(title)
+            + "</td><td>"
+            + escape(request["kind"])
+            + "</td><td>"
+            + escape(item["state"])
+            + "</td><td>"
+            + escape(item["reason"])
+            + "</td><td>"
+            + evidence
+            + "</td></tr>"
+            + (
+                f'<tr><td colspan="5"><details><summary>Extracted excerpt</summary>'
+                f"<pre>{excerpt}</pre></details></td></tr>"
+                if excerpt
+                else ""
+            )
+        )
+    document = """<!doctype html><html lang="en"><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Source inbox</title>
+<style>body{font:17px/1.6 system-ui;margin:32px auto;max-width:1100px;padding:0 20px;
+color:#17324a}table{border-collapse:collapse;width:100%}th,td{border:1px solid #ccd6df;
+padding:10px;text-align:left;vertical-align:top}pre{white-space:pre-wrap;overflow-wrap:anywhere}
+.note{padding:18px;background:#eaf1f7}a{color:#075d91}.scroll{overflow-x:auto}</style>
+<h1>Source inbox</h1><p class="note">This is source acquisition and extraction.
+Ready means readable evidence was archived. It does not verify a paper's methods,
+qualify market data, produce a tested strategy, or admit it for trading.</p>
+"""
+    document += (
+        f"<p>{summary['input_rows']} input rows, {summary['unique_requests']} unique requests; "
+        + escape(str(summary["states"]))
+        + ". No model calls or financial evaluations.</p>"
+        + '<div class="scroll"><table><thead><tr><th>Source</th><th>Input</th>'
+        + "<th>Extraction</th><th>Action/blocker</th><th>Evidence</th></tr></thead><tbody>"
+        + "".join(rows)
+        + "</tbody></table></div>"
+        + '<p><a href="manifest.json">Frozen inputs</a> · <a href="summary.json">Source status</a>'
+        + ' · <a href="archive/outcomes.jsonl">Append-only acquisition history</a></p></html>'
+    )
+    (root / "SOURCE_INBOX.html").write_text(document, encoding="utf-8")
+
+
 def run_batch(output, *, sources=None, max_bytes=None, refresh=False, acquire=None):
     """Prepare/continue one frozen batch; refresh is explicit and retains old revisions."""
     root = Path(output)
@@ -184,4 +239,49 @@ def run_batch(output, *, sources=None, max_bytes=None, refresh=False, acquire=No
             archive.intake(SourceRequest(**row), acquire=acquire, refresh=refresh)
         result = _summary(root, manifest)
         atomic_json(root / "summary.json", result)
+        _report(root, result)
         return result
+
+
+def status(output):
+    """Verify evidence without refetching or requiring the original extraction engine."""
+    root = Path(output)
+    with exclusive_file(
+        root / "batch.lock", message="another source batch owns this directory", create=False
+    ):
+        return _summary(root, _read_manifest(root, require_engine=False))
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("command", choices=("ingest", "resume", "status"))
+    parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--sources", type=Path)
+    parser.add_argument("--max-bytes", type=int, help="ingest only; default 5000000")
+    parser.add_argument("--refresh", action="store_true")
+    args = parser.parse_args(argv)
+    if args.command == "ingest" and args.sources is None:
+        parser.error("ingest requires --sources")
+    if args.command != "ingest" and args.sources is not None:
+        parser.error("--sources is only accepted by ingest")
+    if args.command != "ingest" and args.max_bytes is not None:
+        parser.error("--max-bytes is frozen by ingest")
+    if args.command == "status" and args.refresh:
+        parser.error("status never refreshes sources")
+    result = (
+        status(args.out)
+        if args.command == "status"
+        else run_batch(
+            args.out, sources=args.sources, max_bytes=args.max_bytes, refresh=args.refresh
+        )
+    )
+    printed = {k: v for k, v in result.items() if k != "sources"}
+    # Revision ids are what a registration's `source_revisions` must name.
+    keys = ("source_id", "request_id", "state", "revision_id")
+    printed["revisions"] = [{k: row[k] for k in keys} for row in result["sources"]]
+    print(json.dumps(printed, indent=2))
+    return 0 if set(result["states"]) <= {"ready"} else 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
