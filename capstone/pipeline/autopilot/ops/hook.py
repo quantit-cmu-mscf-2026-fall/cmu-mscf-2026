@@ -4,7 +4,8 @@
 
 1. alert (`alert`): `<run>/ALERT.json` / `.md` for every new STOP (and blocker, unless
    `[alert] on_blocked = false`), then the notifier;
-2. status (`status`): `<run>/autopilot/ops/status.json` / `.md`.
+2. warnings (`early_warnings`): the run's typed early warnings, each sent once;
+3. status (`status`): `<run>/autopilot/ops/status.json` / `.md`.
 
 Each step is idempotent and resumable after a kill (its files are replaced atomically and
 its progress is recorded before it moves on); what goes wrong is a typed problem in
@@ -18,7 +19,7 @@ run's owner chose, so treat the config file like code. The default is no notifie
 from __future__ import annotations
 
 from capstone.pipeline.autopilot.config import Key
-from capstone.pipeline.autopilot.ops import alert, status
+from capstone.pipeline.autopilot.ops import alert, early_warnings, status
 from capstone.pipeline.autopilot.ops.common import problem
 
 SECTIONS = {
@@ -31,6 +32,7 @@ SECTIONS = {
 
 def after_tick(ctx, report):
     alert.run(ctx, report)
+    early_warnings.deliver(ctx, report)  # typed early warnings, each sent once
     try:
         status.write(ctx.config, list(report.states), journal=ctx.journal)
     except Exception as error:
