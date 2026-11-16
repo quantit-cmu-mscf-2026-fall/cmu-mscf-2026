@@ -1,7 +1,6 @@
-"""Scoped memo for pure functions of frozen replay inputs (byte-identical speed).
+"""Scoped memo for pure functions of frozen replay inputs.
 
-Inside `scope()` (one registered evaluation or portfolio study; `evaluate_frozen` and
-`portfolio_evaluation.run_study` open it) a value is
+Inside `scope()` (one registered evaluation or portfolio study opens it) a value is
 keyed by the *identity* of the input objects it was computed from plus plain values
 (a session, an end date). An entry keeps weak references to those objects and is used
 only while each one is still the very same object, so a panel rebuilt with any other
@@ -10,7 +9,7 @@ a session alone.
 
 Bound objects must not be mutated in place inside the scope. That is checked, not
 assumed: replay re-hashes all of its inputs on completion outside the memo
-(`completed_replay_metadata`) and refuses a changed input, so no result built on a
+and refuses a changed input, so no result built on a
 stale entry is ever reported. Outside a scope, or with `ENABLED = False` (the tests'
 reference path), nothing is cached.
 """
