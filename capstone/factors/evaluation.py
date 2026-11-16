@@ -93,6 +93,8 @@ class Panel:
     half_spread: pd.DataFrame  # cost of trading one unit of weight, as a fraction
     sic: pd.DataFrame | None = None  # SIC code, for sector neutrality
     data_version: str = ""
+    calendar: pd.DatetimeIndex | None = None
+    availability: dict[str, pd.Series] | None = None
 
 
 def _check_dates(dates: pd.Index) -> None:
