@@ -24,6 +24,7 @@ For development: `claude --plugin-dir ./mscf-plugin`.
 | Skill | `null-calibration` | Null and power tests every new validation method ships with |
 | Skill | `research-pr` | Branch, checks, PR template with seeds and trial count, review and merge |
 | Skill | `paper-round` | Weekly paper one-pager, smallest experiment, report back |
+| Skill | `paperlog` | Search the team's paper log (a read-only copy of the shared `papers.db`), add a paper, run the weekly collection on request |
 
 The skills only describe rules that are written down in `CLAUDE.md`, `CONTRIBUTING.md`,
 `docs/validation.md` and `docs/shared_data.md`; they add no policy of their own. For PR review

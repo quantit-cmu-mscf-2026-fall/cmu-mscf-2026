@@ -37,6 +37,7 @@ def test_skills_have_usable_frontmatter():
         "null-calibration",
         "research-pr",
         "paper-round",
+        "paperlog",
     }
     for path in SKILLS:
         meta = frontmatter(path)
