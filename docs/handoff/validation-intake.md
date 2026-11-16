@@ -18,6 +18,9 @@
 - `stage_inputs` cuts periods by date: stages 1-3 see `<= search_end` only;
   returns past `search_end` without `holdout_start` raise. It takes the
   registered stage-1 BH level `q` and raises if `n_boot` can't resolve it.
+- Period checks require enough search returns from every candidate. The funnel
+  checks holdout sufficiency only for carried-forward variants; an unchosen
+  candidate without holdout data stays in its family and trial count.
 - Imports no generator, backtest or data code.
 - Failures: `TypeError` (not a dated frame / Series), `ValueError` (the rest).
 

@@ -251,37 +251,24 @@ def test_timezone_aware_or_timed_dates_raise_at_intake():
         FunnelInput(aware, family, "g", {})
 
 
-@pytest.mark.parametrize("period", ["search period", "holdout"])
-def test_a_candidate_short_of_returns_in_a_period_is_refused_by_name(period):
+@pytest.mark.parametrize("n_obs", [0, 1])
+def test_a_candidate_short_of_search_returns_is_refused_by_name(n_obs):
     fs, search_end, holdout_start = _periods()
     returns = fs.returns.copy()
     victim = returns.columns[1]
-    if period == "holdout":
-        returns.loc[holdout_start:, victim] = np.nan
-    else:
-        returns.loc[:search_end, victim] = np.nan
+    returns.loc[:search_end, victim] = np.nan
+    if n_obs:
+        returns.loc[returns.index[0], victim] = 0.001
     # With the dates, intake itself refuses it ...
-    with pytest.raises(ValueError, match=rf"{period}.*{victim}"):
+    with pytest.raises(ValueError, match=rf"search period.*{victim}"):
         from_returns(
             returns, fs.family, generator="g", search_end=search_end, holdout_start=holdout_start
         )
     # ... and without them stage_inputs does, before the funnel runs.
     fi = from_returns(returns, fs.family, generator="g")
-    with pytest.raises(ValueError, match=rf"{period}.*{victim}"):
+    with pytest.raises(ValueError, match=rf"search period.*{victim}"):
         stage_inputs(
             fi, search_end=search_end, holdout_start=holdout_start, n_boot=0, seed=0, q=0.05
-        )
-
-
-def test_one_return_in_a_period_is_not_enough():
-    fs, search_end, holdout_start = _periods()
-    returns = fs.returns.copy()
-    victim = returns.columns[2]
-    returns.loc[holdout_start:, victim] = np.nan
-    returns.loc[holdout_start, victim] = 0.001
-    with pytest.raises(ValueError, match=victim):
-        from_returns(
-            returns, fs.family, generator="g", search_end=search_end, holdout_start=holdout_start
         )
 
 
@@ -299,3 +286,54 @@ def test_a_blank_family_label_raises_naming_the_candidate():
     family["b"] = " "
     with pytest.raises(ValueError, match="blank family.*'b'"):
         from_returns(returns, family, generator="g")
+
+
+def _six_variants():
+    dates = pd.bdate_range("2020-01-02", periods=400)
+    rng = np.random.default_rng(0)
+    returns = pd.DataFrame(
+        rng.normal(0, 0.01, (len(dates), 6)), index=dates, columns=[f"v{i}" for i in range(6)]
+    )
+    returns["v1"] += 0.002
+    returns["v5"] += 0.003
+    family = pd.Series(["A"] * 3 + ["B"] * 3, index=returns.columns)
+    kwargs = dict(search_end="2020-12-31", holdout_start="2021-01-01", n_boot=0, seed=0, q=0.05)
+    return returns, family, kwargs
+
+
+@pytest.mark.parametrize("check_at_intake", [False, True])
+def test_an_unchosen_variant_without_holdout_matches_the_funnel(check_at_intake):
+    returns, family, kwargs = _six_variants()
+    clean = funnel.family_statistics(returns, family, **kwargs)["reuse"]
+    assert list(clean["best"]) == ["v1", "v5"]
+    returns.loc[kwargs["holdout_start"] :, "v0"] = np.nan
+    direct = funnel.family_statistics(returns, family, **kwargs)["reuse"]
+    pd.testing.assert_frame_equal(direct, clean)
+
+    periods = {k: kwargs[k] for k in ("search_end", "holdout_start")} if check_at_intake else {}
+    fi = from_returns(returns, family, generator="synthetic", **periods)
+    got = stage_inputs(fi, **kwargs)
+    pd.testing.assert_frame_equal(got, direct)
+    assert got.attrs["n_variants"] == 6
+    pd.testing.assert_frame_equal(fi.returns, returns)
+
+
+@pytest.mark.parametrize("n_obs", [0, 1])
+def test_chosen_variant_holdout_sufficiency_stays_with_the_funnel(n_obs):
+    returns, family, kwargs = _six_variants()
+    victim = funnel.family_statistics(returns, family, **kwargs)["reuse"]["best"].iloc[0]
+    returns.loc[kwargs["holdout_start"] :, victim] = np.nan
+    if n_obs:
+        first_holdout = returns.index[returns.index >= kwargs["holdout_start"]][0]
+        returns.loc[first_holdout, victim] = 0.001
+    fi = from_returns(
+        returns,
+        family,
+        generator="synthetic",
+        search_end=kwargs["search_end"],
+        holdout_start=kwargs["holdout_start"],
+    )
+    with pytest.raises(ValueError, match=rf"{victim}.*holdout"):
+        funnel.family_statistics(returns, family, **kwargs)
+    with pytest.raises(ValueError, match=rf"{victim}.*holdout"):
+        stage_inputs(fi, **kwargs)

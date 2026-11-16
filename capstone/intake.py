@@ -8,9 +8,9 @@ net returns, dates x candidates, and a hypothesis family per candidate.
   (`funnel.check_dates`, the contract the funnel applies);
 - every candidate has a family label, and every label names a candidate;
 - values are finite or missing, and every candidate has some returns;
-- given the period dates, every candidate has enough returns in each period
-  (`check_periods`, the same rule the funnel tests with), so a frame the
-  funnel would refuse is refused here, naming the candidates;
+- given the period dates, every candidate has enough search-period returns
+  (`check_periods`), naming any that do not; holdout sufficiency stays with
+  the funnel, which tests only the variants it carries forward;
 - rows where no candidate has a return (an untraded first day, a warm-up
   every candidate shares) are dropped by `from_returns`, the same way for
   every generator.
@@ -85,19 +85,16 @@ def _check(returns: pd.DataFrame, family: pd.Series, generator: str) -> None:
 
 
 def check_periods(returns: pd.DataFrame, *, search_end, holdout_start=None) -> None:
-    """Refuse candidates with too few returns in a period the funnel tests.
+    """Refuse candidates with too few search-period returns for the funnel.
 
-    The search period is the dates on or before `search_end`; the holdout,
-    when `holdout_start` is given, the dates from then on. Every candidate
-    needs `funnel.MIN_PERIOD_OBS` non-NaN returns in each (a candidate that
-    starts after the search, or stops before the holdout, cannot be scored),
-    and the error names them. The cuts' own order and bounds stay with
-    `funnel.family_statistics`.
+    Every candidate needs `funnel.MIN_PERIOD_OBS` non-NaN returns on or
+    before `search_end`, and the error names any that do not. Holdout
+    sufficiency depends on selection: `funnel.family_statistics` tests only
+    carried-forward variants. It also checks the cuts' order and bounds;
+    `holdout_start` remains an accepted keyword for callers passing both cuts.
     """
     funnel.check_dates(returns.index)
     periods = {"search period": returns.loc[returns.index <= pd.Timestamp(search_end)]}
-    if holdout_start is not None:
-        periods["holdout"] = returns.loc[returns.index >= pd.Timestamp(holdout_start)]
     short = funnel.period_shortfalls(periods)
     if short:
         detail = "; ".join(f"{name}: {sorted(counts, key=str)!r}" for name, counts in short.items())
@@ -120,9 +117,9 @@ def from_returns(
     Rows where every candidate is missing are dropped; `family` is put in
     `returns`' column order. `source` is extra provenance (e.g. the
     `sd.data_version()` the returns were built on), kept alongside the
-    candidate ids and the number of rows dropped. With `search_end` (and
-    `holdout_start`) the periods are checked too (`check_periods`);
-    `stage_inputs` checks them regardless.
+    candidate ids and the number of rows dropped. With `search_end`, search
+    coverage is checked too (`check_periods`); `stage_inputs` checks it
+    regardless. The funnel checks holdout coverage after selecting variants.
     """
     _check(returns, family, generator)
     if search_end is not None:
@@ -161,8 +158,9 @@ def stage_inputs(
     `search_end` raise, so the holdout is never read by accident. `q` is the
     registered stage-1 BH level: `n_boot` too small to resolve it raises
     rather than leaving stage 1 without power. Returns the "reuse" design,
-    the frame the funnel's stages filter. A candidate with too few returns in
-    a period raises, naming it (`check_periods`).
+    the frame the funnel's stages filter. Every candidate needs enough search
+    returns (`check_periods`); the funnel checks holdout returns only for the
+    variants it carries forward. Insufficient tested data raises by name.
     """
     check_periods(fi.returns, search_end=search_end, holdout_start=holdout_start)
     return funnel.family_statistics(
