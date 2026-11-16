@@ -1,11 +1,24 @@
 """Collapse duplicates within a batch, then match the batch against the database."""
 
+import re
+
 from rapidfuzz import fuzz, process
 
 from .models import Paper
 
 _ARXIV_DOI = "10.48550/arxiv."
-_ROMAN = {"i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x"}
+_ROMAN = {
+    "i": 1,
+    "ii": 2,
+    "iii": 3,
+    "iv": 4,
+    "v": 5,
+    "vi": 6,
+    "vii": 7,
+    "viii": 8,
+    "ix": 9,
+    "x": 10,
+}
 
 
 def _ids_conflict(a: Paper, b: Paper) -> bool:
@@ -19,9 +32,12 @@ def _ids_conflict(a: Paper, b: Paper) -> bool:
     return False
 
 
-def _numbering(title_norm: str) -> set[str]:
-    """The numbers and roman numerals in a normalised title ("... part ii", "... 2")."""
-    return {t for t in title_norm.split() if t.isdigit() or t in _ROMAN}
+def _numbering(title_norm: str) -> set[int]:
+    """The numbers and roman numerals in a normalised title ("... part ii", "... 2"),
+    as integers, so "part i"/"part 1", "3,000"/"3000", "s&p 500"/"s&p500" and
+    "covid-19"/"covid19" agree."""
+    t = re.sub(r"(?<=\d) (?=\d{3}\b)", "", title_norm)  # "3,000" normalises to "3 000"
+    return {int(n) for n in re.findall(r"\d+", t)} | {_ROMAN[w] for w in t.split() if w in _ROMAN}
 
 
 def _same_numbering(a: str, b: str) -> bool:
