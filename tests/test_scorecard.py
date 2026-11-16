@@ -193,3 +193,16 @@ class TestReport:
         path.write_text(json.dumps(report), encoding="utf-8")
         with pytest.raises(ValueError, match="accepted"):
             read_report(path)
+
+    @pytest.mark.parametrize("column", ["s1_pass", "s3_measured", "s4_pass"])
+    @pytest.mark.parametrize("cell", ["", "maybe", "1", "yes", "true"])
+    def test_a_malformed_flag_cell_is_refused_not_read_as_true(self, tmp_path, column, cell):
+        # `astype(bool)` turned an empty cell (NaN) into True: a family that
+        # never reached stage 4 could read back as having passed it.
+        path = tmp_path / "gate_report.json"
+        _, csv_path = write_report(_result(accepted=("h0",)), path)
+        card = pd.read_csv(csv_path, dtype=str, keep_default_na=False)
+        card.loc[2, column] = cell
+        card.to_csv(csv_path, index=False)
+        with pytest.raises(ValueError, match=column):
+            read_report(path)
