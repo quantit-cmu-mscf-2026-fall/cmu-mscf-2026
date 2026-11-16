@@ -165,6 +165,17 @@ def compile_proposal(controller, packet, proposal, data_version, anchor, side):
         "construction_verified",
     }:
         raise ValueError("source or data qualification blocked compilation")
+    evidence = controller.source_evidence(key)
+    for field, retained in (
+        ("source_url", "source_url"),
+        ("method_location", "method_location"),
+        ("methods", "claim"),
+    ):
+        if any(
+            packet.get(field) != evidence[binding][retained]
+            for binding in ("catalogue", "grounded")
+        ):
+            raise ValueError("packet differs from retained grounded source evidence")
     required = set(tool()["input_schema"]["required"])
     if not isinstance(proposal, dict) or set(proposal) != required:
         raise ValueError("incomplete executable proposal")
@@ -177,9 +188,15 @@ def compile_proposal(controller, packet, proposal, data_version, anchor, side):
     if (
         not isinstance(quote, str)
         or len(quote.split()) < 4
-        or quote not in packet["methods"] + " " + (packet.get("method_excerpt") or "")
+        or not any(
+            quote in retained
+            for retained in (
+                evidence["grounded"]["claim"],
+                evidence.get("method_excerpt", ""),
+            )
+        )
     ):
-        raise ValueError("source quotation not present in the supplied evidence")
+        raise ValueError("source quotation not present in retained grounded evidence")
     if not isinstance(proposal["rationale"], str) or not proposal["rationale"].strip():
         raise ValueError("construction rationale required")
     dependencies = proposal["required_inputs"]
@@ -207,6 +224,7 @@ def compile_proposal(controller, packet, proposal, data_version, anchor, side):
         side,
         tuple(proposal["adaptations"]),
     )
+    # The packet digest is a metadata fingerprint; frozen evidence above owns authorization.
     spec = CompiledStrategySpec(
         method, canonical(p), digest(packet), frozen.identity, data_version, anchor, side
     )
