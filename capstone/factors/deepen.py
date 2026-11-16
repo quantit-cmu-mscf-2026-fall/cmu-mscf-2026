@@ -18,10 +18,14 @@ One `Deepener.step` is one deepen round:
    then decides whether the child joins it as a future parent.
 5. Every child becomes a memory event, and the round a `deepen` move.
 
-The scorer is an interface: on real data it comes from evaluation
-(QUANTIT-81); tests pass a fake. It sees only the search period. Memory and
-pool learn from search-period quality and from failures, never from the
-validation funnel or the holdout.
+The scorer is an interface: on CRSP it is evaluation
+(`capstone.factors.scoring.EvaluationScorer`, the funnel's stage 1 z for one
+traded variant); the synthetic checks use |ICIR|; tests pass a fake. Each
+scorer's quality has its own units, so the pool's thresholds and the
+memory's quality bins come with it (`config/deepen_crsp.toml` for CRSP). It
+sees only the search period. Memory and pool learn from search-period quality
+and from failures, never from stages 2-4 of the validation funnel or the
+holdout. A seed's score is logged as a trial too.
 """
 
 from __future__ import annotations
@@ -81,10 +85,18 @@ LEDGER_TAGS = ["learned-memory-search", "deepen"]
 
 @dataclass(frozen=True)
 class Scored:
-    """A factor's search-period quality and the values its correlations use."""
+    """A factor's search-period quality and the values its correlations use.
 
-    quality: float  # Q: |ICIR| on the search period
+    `params` and `metrics` go into the score's ledger entry next to the
+    deepen move's own: what was scored and how (the data version, the trading
+    spec), and the numbers behind `quality`. A scorer never logs: the deepen
+    move does, once per score.
+    """
+
+    quality: float  # Q, in the scorer's units (|ICIR|, or the evaluation z)
     values: np.ndarray  # one vector, the same cells for every factor
+    params: dict = field(default_factory=dict)
+    metrics: dict = field(default_factory=dict)
 
 
 class Scorer(Protocol):
@@ -561,7 +573,12 @@ class Deepener:
     # -- the pool and the store -------------------------------------------
 
     def add_parent(self, fid: str) -> bool:
-        """Score a stored factor and add it to the pool; False if it cannot be scored."""
+        """Score a stored factor and add it to the pool; False if it cannot be scored.
+
+        The seed's score is a trial like any other, so it is logged first
+        (`role` "parent"); its params say which variant was scored, so a repeat
+        of an earlier evaluation can be matched to it.
+        """
         row = self.con.execute("SELECT expression FROM factors WHERE id = ?", (fid,)).fetchone()
         if row is None:
             raise KeyError(f"no factor {fid!r} in the store")
@@ -572,6 +589,7 @@ class Deepener:
         log_run(
             LEDGER_NAME,
             params={
+                **scored.params,
                 "run_id": self.run_id,
                 "factor_id": fid,
                 "expression": unparse(tree),
@@ -579,7 +597,7 @@ class Deepener:
                 "iteration": self.evaluations,
                 "model": self.config.model,
             },
-            metrics={"quality": scored.quality},
+            metrics={**scored.metrics, "quality": scored.quality},
             seed=self.seed,
             tags=self.ledger_tags,
         )
@@ -620,7 +638,13 @@ class Deepener:
         return [
             ParentView(
                 fid,
-                parent_context(self.trees[fid], quality=q, times_selected=self.selected[fid]),
+                parent_context(
+                    self.trees[fid],
+                    quality=q,
+                    times_selected=self.selected[fid],
+                    quality_edges=self.config.memory_quality_edges,
+                    signed_quality=self.config.memory_signed_quality,
+                ),
                 q,
                 self.pool.rho_max(fid),
                 self.selected[fid],
@@ -816,6 +840,7 @@ class Deepener:
         log_run(
             LEDGER_NAME,
             params={
+                **scored.params,
                 "run_id": self.run_id,
                 "factor_id": fid,
                 "expression": unparse(draft.tree),
@@ -824,7 +849,7 @@ class Deepener:
                 "iteration": self.evaluations,
                 "model": self.config.model,
             },
-            metrics={"quality": scored.quality},
+            metrics={**scored.metrics, "quality": scored.quality},
             seed=self.seed,
             tags=self.ledger_tags,
         )
