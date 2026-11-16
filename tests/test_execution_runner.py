@@ -7,6 +7,7 @@ ledger; never the real repo's tags, never a network or a broker connection.
 
 from __future__ import annotations
 
+import ast
 import dataclasses
 import inspect
 import json
@@ -197,14 +198,18 @@ def test_the_default_configuration_never_constructs_a_live_connection(repo):
     assert inspect.signature(run_once).parameters["broker"].default is inspect.Parameter.empty
     assert runner.MODES == ("dry-run",)
     source = Path(runner.__file__).read_text(encoding="utf-8")
-    for word in ("ib_async", "ib_insync", "socket", "connect(", "environ", "getenv"):
+    for word in ("socket", "connect(", "environ", "getenv"):
         assert word not in source
-    probe = (
-        "import sys, capstone.execution.runner\n"
-        "bad = [m for m in ('ib_async', 'ib_insync') if m in sys.modules]\n"
-        "sys.exit(len(bad))"
-    )
-    assert subprocess.run([sys.executable, "-c", probe], check=False).returncode == 0
+    # Every import is the package itself, the standard library or the data stack:
+    # no third-party client library can come in through the runner.
+    allowed = {"capstone", "pandas", "numpy"} | set(sys.stdlib_module_names)
+    imported = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            imported |= {alias.name.split(".")[0] for alias in node.names}
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            imported.add(node.module.split(".")[0])
+    assert imported <= allowed, sorted(imported - allowed)
 
 
 def test_a_post_2020_book_is_refused_before_the_data_or_broker_is_asked(tmp_path):
