@@ -238,3 +238,22 @@ def test_a_source_changed_after_the_preflight_refuses_the_load(tmp_path, monkeyp
     monkeypatch.setattr(sd, "load", load)
     with pytest.raises(ValueError, match="changed while"):
         h.load_inputs(descriptor)
+
+
+def test_the_evaluation_memo_keys_on_every_input_of_a_real_panel():
+    from capstone.factors.evaluation import Panel
+    from capstone.strategy import input_memo
+
+    idx = pd.date_range("2000-01-03", periods=2)
+    frame = pd.DataFrame({1: [1.0, 2.0]}, index=idx)
+    panel = Panel({"close": frame}, frame.gt(0), frame * 0, data_version="v")
+    rebuilt = Panel({"close": frame.copy()}, panel.universe, panel.half_spread, data_version="v")
+    calls = []
+
+    def run(p):
+        return input_memo.panel_cached("t", "spec", p, (), lambda: calls.append(1) or len(calls))
+
+    with input_memo.scope():
+        assert run(panel) == run(panel) == 1
+        assert run(rebuilt) == 2  # a rebuilt field frame never hits
+    assert run(panel) == 3  # outside a scope nothing is cached
