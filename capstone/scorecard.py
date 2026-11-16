@@ -228,6 +228,20 @@ def _number(value) -> float:
     return float("nan") if value is None else float(value)
 
 
+def _flags(cells: pd.Series, path: Path, column: str) -> pd.Series:
+    """Parse a flag column strictly: exactly "True" or "False", else raise.
+
+    `astype(bool)` would read an empty cell (NaN) as True, so a family that
+    never reached a stage could read back as having passed it.
+    """
+    parsed = cells.map({"True": True, "False": False})
+    bad = parsed.isna()
+    if bad.any():
+        rows = [str(i) for i in cells.index[bad]]
+        raise ValueError(f"{path}: {column} must be exactly True or False; bad rows {rows}")
+    return parsed.astype(bool)
+
+
 def read_report(path: str | Path) -> GateResult:
     """Read a gate report written by `write_report` back into a `GateResult`.
 
@@ -239,13 +253,13 @@ def read_report(path: str | Path) -> GateResult:
     card = pd.read_csv(
         path.parent / report["scorecard_csv"],
         index_col=0,
-        dtype=dict.fromkeys(_LABEL_COLUMNS, str),
+        dtype=dict.fromkeys(_LABEL_COLUMNS + _BOOL_COLUMNS, str),
         keep_default_na=False,
         na_values=[""],
         **_ROUND_TRIP,
     )
     for column in _BOOL_COLUMNS:
-        card[column] = card[column].astype(bool)
+        card[column] = _flags(card[column], path, column)
     h = report["header"]
     h["thresholds"] = Thresholds(**h["thresholds"])
     h["trial_scope"] = TrialScope(**h["trial_scope"])
