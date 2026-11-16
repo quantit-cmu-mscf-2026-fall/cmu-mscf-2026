@@ -21,7 +21,7 @@ import pandas as pd
 from capstone.factors.evaluation import TradingSpec, grid
 from capstone.factors.llm import FactorConfig
 from capstone.funnel import Thresholds
-from capstone.pipeline.executor import AUTO
+from capstone.pipeline.executor import AUTO, Resources
 from capstone.pipeline.rows import REPO
 
 DEFAULT_CONFIG = REPO / "config" / "e2e_synthetic.toml"
@@ -121,6 +121,9 @@ class E2EConfig:
     # Papers in flight at once in "isolated" mode; AUTO sizes it from the machine. A
     # runtime knob, never in the digest: the results are the same at every value.
     concurrency: int = AUTO
+    # `[resources]` caps on the evaluation pool (`pipeline.panel_pool`), with
+    # `CAPSTONE_MAX_WORKERS`. Runtime only, never in the digest.
+    resources: Resources = Resources()
 
     def __post_init__(self) -> None:
         names = ("search_end", "holdout_start", "holdout_end")
@@ -168,6 +171,7 @@ _SECTIONS = {
     "incubation": {f.name for f in fields(IncubationSettings)},
     "stage3": {f.name for f in fields(Stage3Settings)},
     "papers": None,  # FileSource checks its own entries
+    "resources": {"max_workers", "memory_budget_mb"},
 }
 
 
@@ -197,6 +201,7 @@ def load_config(path: str | Path | None = None) -> E2EConfig:
         max_model_calls=int(run.get("max_model_calls", DEFAULT_MAX_MODEL_CALLS)),
         paper_mode=run.get("paper_mode", "sequential"),
         concurrency=int(run.get("concurrency", AUTO)),
+        resources=Resources.from_section(values.get("resources")),
         **values["periods"],
         papers=str(papers),
         factors=FactorConfig(**values.get("factors", {})),

@@ -18,7 +18,7 @@ from capstone.pipeline.config import E2EConfig
 # E2EConfig fields added after configs were first hashed: at their default they stay
 # out of the digest, so existing configs keep theirs.
 _OPTIONAL_FIELDS = ("deepen_on_budget", "paper_mode")
-_RUNTIME_FIELDS = ("concurrency",)  # never change a result: never in the digest
+_RUNTIME_FIELDS = ("concurrency", "resources")  # never change a result: never in the digest
 _DEFAULTS = {f.name: f.default for f in fields(E2EConfig) if f.name in _OPTIONAL_FIELDS}
 
 __all__ = ["config_digest"]
