@@ -11,12 +11,16 @@ structures an earlier paper made frequent, and its originality screen does not s
 an earlier paper's factors), so it is opt-in (`--paper-mode isolated` on the command line);
 the sequential default is unchanged.
 
-After the concurrent part, each paper's new rows (paper, hypotheses, proposals with
+As each source-ordered result arrives, its new rows (paper, hypotheses, proposals with
 their factors, usage) are copied into `con` in source order, exactly as the store's
 own writers would have made them: a factor a previous paper already stored becomes a
 "duplicate" proposal ("already in the store"). The source's hand-off (`done`) is
 called in the same order. So the store, and everything computed from it, is the
 same at every concurrency, 1 included, for the same model answers.
+
+On interruption, no new papers are scheduled. Already-running papers are joined
+and their completed or partial rows and recorded usage are merged before the
+exception is re-raised. A partial paper is not handed off as done.
 
 `slot()` names the paper a call belongs to (a context variable set inside each
 paper's task), so a recorder can keep its records in paper order
@@ -27,10 +31,12 @@ from __future__ import annotations
 
 import contextvars
 import sqlite3
+import uuid
 from collections import Counter
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from threading import Event, Lock
 
 from capstone.factors.llm import FactorConfig
 from capstone.factors.pipeline import RunSummary, process_paper
@@ -59,7 +65,8 @@ def slot(index: int) -> Iterator[None]:
 
 def resolve_concurrency(configured: int, papers: int) -> int:
     """`configured`, or (at `executor.AUTO`) the machine's cores under the operator's
-    `CAPSTONE_MAX_WORKERS` cap; never more than the papers, never fewer than one."""
+    `CAPSTONE_MAX_WORKERS` cap (also applied to explicit sizes); never more than
+    the papers, never fewer than one."""
     if configured < executor.AUTO:
         raise ValueError(f"concurrency must be >= {executor.AUTO}, got {configured}")
     caps = [papers, configured or executor.detect().cores]
@@ -70,7 +77,11 @@ def resolve_concurrency(configured: int, papers: int) -> int:
 def _snapshot(con: sqlite3.Connection) -> sqlite3.Connection:
     """An in-memory copy of the store, usable from one worker thread."""
     private = sqlite3.connect(":memory:", check_same_thread=False)
-    con.backup(private)
+    try:
+        con.backup(private)
+    except BaseException:
+        private.close()
+        raise
     private.row_factory = sqlite3.Row
     private.execute("PRAGMA foreign_keys = ON")
     return private
@@ -93,7 +104,12 @@ def _insert(con: sqlite3.Connection, table: str, row: dict, verb: str = "INSERT"
 
 
 def copy_new_rows(
-    private: sqlite3.Connection, con: sqlite3.Connection, base: dict[str, int], keys: dict
+    private: sqlite3.Connection,
+    con: sqlite3.Connection,
+    base: dict[str, int],
+    keys: dict,
+    *,
+    _marker: tuple[str, int] | None = None,
 ) -> Counter:
     """Copy one paper's new rows from `private` into `con`, as the store's writers would
     have written them there; returns how many "stored" proposals became "duplicate".
@@ -122,6 +138,9 @@ def copy_new_rows(
         query = "SELECT * FROM usage WHERE id > ? ORDER BY id"
         for row in private.execute(query, (base["usage"],)).fetchall():
             _insert(con, "usage", {k: row[k] for k in row.keys() if k != "id"})
+        if _marker is not None:
+            table, index = _marker
+            con.execute(f'INSERT INTO "{table}" (paper_index) VALUES (?)', (index,))
     return changed
 
 
@@ -130,8 +149,9 @@ def run_isolated(
 ) -> RunSummary:
     """`pipeline.run` with every paper against the starting store, `concurrency` papers
     in flight at once (see the module docstring). `client` must be safe to call from
-    several threads (`BudgetedClient` is)."""
+    several threads. Interrupted runs persist already-started work before re-raising."""
     papers = list(source.papers())
+    workers = resolve_concurrency(concurrency, len(papers))
     zoo = default_zoo()
     name = type(source).__name__
     before = _counts(con)
@@ -140,43 +160,121 @@ def run_isolated(
         "papers": {r[0] for r in con.execute("SELECT key FROM papers")},
         "hypotheses": {r[0] for r in con.execute("SELECT id FROM hypotheses")},
     }
-    privates = [_snapshot(con) for _ in papers]
+    starting = _snapshot(con)
+    snapshot_lock = Lock()
+    stopped = Event()
+    summary = RunSummary()
+    completed = {}
+    consumed = set()
+    marker = f"paper_pool_{uuid.uuid4().hex}"
+    con.execute(f'CREATE TEMP TABLE "{marker}" (paper_index INTEGER PRIMARY KEY)')
 
-    def task(index: int) -> RunSummary:
+    def copied(index):
+        return (
+            con.execute(f'SELECT 1 FROM "{marker}" WHERE paper_index=?', (index,)).fetchone()
+            is not None
+        )
+
+    def task(index: int):
+        private = None
         out = RunSummary()
-        with slot(index):
-            process_paper(privates[index], papers[index], client, config, zoo, name, out)
-        return out
+        error = None
+        try:
+            if stopped.is_set():
+                return None, out, None
+            with snapshot_lock:
+                private = _snapshot(starting)
+            with slot(index):
+                process_paper(private, papers[index], client, config, zoo, name, out)
+        except BaseException as exc:
+            stopped.set()
+            error = exc
+        completed[index] = (private, out, error)
+        return completed[index]
 
-    workers = resolve_concurrency(concurrency, len(papers))
-    try:
-        if workers <= executor.INLINE:
-            results = [task(i) for i in range(len(papers))]
-        else:
-            with ThreadPoolExecutor(max_workers=workers) as pool:
-                results = list(pool.map(task, range(len(papers))))
-        summary = RunSummary()
-        for index, (paper, result) in enumerate(zip(papers, results, strict=True)):
-            private = privates[index]
+    def merge(index, outcome):
+        private, result, error = outcome
+        try:
+            if private is None:
+                if error is not None:
+                    raise error
+                return  # Cancelled before starting: no rows, calls or handoff.
             touched = {t for t, n in _counts(private).items() if n != before.get(t, 0)}
             if not touched <= set(_PAPER_TABLES):
                 raise RuntimeError(f"a paper wrote outside the paper tables: {sorted(touched)}")
-            changed = copy_new_rows(private, con, base, keys)
+            # The TEMP marker commits atomically with the batch. After an
+            # interrupted commit, retry only if both marker and batch rolled back.
+            changed = (
+                Counter()
+                if copied(index)
+                else copy_new_rows(private, con, base, keys, _marker=(marker, index))
+            )
             summary.hypotheses.update(result.hypotheses)
             summary.outcomes.update(result.outcomes)
             summary.outcomes.update(changed)
             summary.outcomes = +summary.outcomes
             summary.usage.update(result.usage)
-            key = paper["key"]
+            if error is not None:
+                raise error
+            key = papers[index]["key"]
             if key in result.papers_failed:
                 summary.papers_failed[key] = result.papers_failed[key]
-                continue
+                return
             try:
                 source.done([key])
                 summary.papers_done.append(key)
             except Exception as exc:  # noqa: BLE001 - as pipeline.run
                 summary.papers_failed[key] = f"{type(exc).__name__}: {exc}"
+        finally:
+            if private is None or copied(index):
+                consumed.add(index)
+                if private is not None:
+                    private.close()
+
+    try:
+        if workers <= executor.INLINE:
+            for index in range(len(papers)):
+                merge(index, task(index))
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                pending = {}
+                try:
+                    for i in range(min(workers, len(papers))):
+                        pending[i] = pool.submit(task, i)
+                    next_index = len(pending)
+                    while pending:
+                        index = next(iter(pending))
+                        outcome = pending[index].result()
+                        del pending[index]
+                        merge(index, outcome)
+                        if not stopped.is_set() and next_index < len(papers):
+                            pending[next_index] = pool.submit(task, next_index)
+                            next_index += 1
+                except BaseException:
+                    stopped.set()
+                    for future in pending.values():
+                        future.cancel()
+                    pool.shutdown(wait=True, cancel_futures=True)
+                    raise
+    except BaseException as exc:
+        stopped.set()
+        errors = []
+        for index in sorted(completed):
+            if index in consumed:
+                continue
+            try:
+                merge(index, completed[index])
+            except BaseException as error:
+                errors.append(error)
+        if errors:
+            raise BaseExceptionGroup(
+                "paper interruption and drain errors", [exc, *errors]
+            ) from None
+        raise
     finally:
-        for private in privates:
-            private.close()
+        for private, _, _ in completed.values():
+            if private is not None:
+                private.close()
+        con.execute(f'DROP TABLE "{marker}"')
+        starting.close()
     return summary

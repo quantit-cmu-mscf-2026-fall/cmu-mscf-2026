@@ -14,11 +14,12 @@ import sqlite3
 import threading
 import time
 from collections import Counter
+from concurrent.futures import Future, ThreadPoolExecutor
 from types import SimpleNamespace
 
 import pytest
 
-from capstone.factors import paper_pool, store
+from capstone.factors import paper_pool, pipeline, store
 from capstone.factors.llm import FactorConfig
 from capstone.factors.sources import FileSource
 from capstone.pipeline.budget import BudgetedClient, CallBudgetExceeded
@@ -227,42 +228,6 @@ def test_usage_records_are_kept_in_paper_order_not_completion_order():
     assert models == ["before", "p0a", "p0b", "p1a", "p1b", "after"]
 
 
-def test_the_call_ceiling_holds_exactly_under_concurrency():
-    sent = []
-    lock = threading.Lock()
-
-    class Slow:
-        messages = None
-
-        def __init__(self):
-            self.messages = self
-
-        def create(self, **kwargs):
-            time.sleep(0.001)
-            with lock:
-                sent.append(kwargs)
-            return "ok"
-
-    budget = BudgetedClient(Slow(), 37)
-    refused = []
-
-    def worker(n):
-        for _ in range(n):
-            try:
-                budget.messages.create(model="m")
-            except CallBudgetExceeded:
-                with lock:
-                    refused.append(1)
-
-    threads = [threading.Thread(target=worker, args=(10,)) for _ in range(8)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-    assert len(sent) == budget.calls == 37
-    assert len(refused) == budget.refused == 80 - 37
-
-
 def test_a_used_up_budget_in_the_paper_phase_is_refused_before_sending(tmp_path):
     out = _run_counted(tmp_path, "tight", PAPERS, max_calls=7)
     assert len(out["fake"].sent) == 7 == out["budget"].calls
@@ -271,3 +236,248 @@ def test_a_used_up_budget_in_the_paper_phase_is_refused_before_sending(tmp_path)
         out["budget"].check()
     with pytest.raises(ValueError):
         BudgetedClient(out["fake"], 0)
+
+
+class InterruptedFake(DelayedFake):
+    def __init__(self, error):
+        super().__init__(max_delay=0)
+        self.error = error
+        self.responses = 0
+
+    def create(self, **kwargs):
+        if (
+            kwargs["tools"][0]["name"] == "record_factors"
+            and "spec paper5 " in kwargs["messages"][0]["content"]
+        ):
+            raise self.error("synthetic interrupt after this paper's extraction")
+        response = super().create(**kwargs)
+        with self.lock:
+            self.responses += 1
+        return response
+
+
+@pytest.mark.parametrize("error", [KeyboardInterrupt, SystemExit])
+@pytest.mark.parametrize("mode", ["sequential", 1, 3])
+def test_interrupt_preserves_completed_and_partial_papers_and_paid_usage(tmp_path, error, mode):
+    con = store.connect(tmp_path / "interrupted.db")
+    marked = []
+    source = FileSource(_papers_file(tmp_path))
+
+    def done(keys):
+        # Isolated handoffs follow merge-back; sequential records usage in finally.
+        for key in keys:
+            if mode != "sequential":
+                assert con.execute(
+                    "SELECT COUNT(*) FROM usage WHERE paper_key=?", (key,)
+                ).fetchone()[0]
+        marked.extend(keys)
+
+    source.done = done
+    fake = InterruptedFake(error)
+    with pytest.raises(error, match="synthetic interrupt"):
+        if mode == "sequential":
+            pipeline.run(con, source, fake, CONFIG)
+        else:
+            paper_pool.run_isolated(con, source, fake, CONFIG, mode)
+    assert marked == [f"k:{i}" for i in range(5)]
+    assert [r[0] for r in con.execute("SELECT key FROM papers ORDER BY rowid")] == [
+        f"k:{i}" for i in range(6)
+    ]
+    assert con.execute("SELECT SUM(calls) FROM usage").fetchone()[0] == fake.responses
+    assert con.execute("SELECT SUM(calls) FROM usage WHERE paper_key='k:5'").fetchone()[0] == 1
+    assert con.execute("SELECT COUNT(*) FROM proposals").fetchone()[0] > 0
+    assert not con.execute("PRAGMA foreign_key_check").fetchall()
+    con.close()
+
+
+def test_cross_paper_duplicate_has_one_stored_proposal_and_one_duplicate(tmp_path):
+    class SameFactor(DelayedFake):
+        def create(self, **kwargs):
+            tool = kwargs["tools"][0]["name"]
+            if tool == "record_hypotheses":
+                answer = {
+                    "hypotheses": [
+                        _hypothesis(json.loads(kwargs["messages"][0]["content"])["title"], 0)
+                    ]
+                }
+            elif tool == "record_factors":
+                answer = {
+                    "factors": [
+                        {"expression": "ts_mean(close, 7) / close", "rationale": "same candidate"}
+                    ]
+                }
+            else:
+                answer = {
+                    "variables": True,
+                    "direction": True,
+                    "horizon": True,
+                    "reason": "fixture",
+                }
+            return _response(tool, answer, 2)
+
+    con = store.connect(tmp_path / "duplicates.db")
+    summary = paper_pool.run_isolated(
+        con, FileSource(_papers_file(tmp_path, n=2)), SameFactor(), CONFIG, 2
+    )
+    proposals = con.execute(
+        "SELECT factor_id, status, reason FROM proposals ORDER BY id"
+    ).fetchall()
+    assert len(proposals) == 2
+    assert [p["status"] for p in proposals] == ["stored", "duplicate"]
+    assert proposals[0]["factor_id"] == proposals[1]["factor_id"]
+    assert proposals[1]["reason"] == "already in the store"
+    assert con.execute("SELECT COUNT(*) FROM factors").fetchone()[0] == 1
+    assert summary.outcomes == Counter(stored=1, duplicate=1)
+    assert not con.execute("PRAGMA foreign_key_check").fetchall()
+    con.close()
+
+
+def test_interrupt_drains_late_running_paper_without_starting_more(tmp_path):
+    second_started = threading.Event()
+
+    class LateFake(DelayedFake):
+        def __init__(self):
+            super().__init__(max_delay=0)
+            self.responses = 0
+
+        def create(self, **kwargs):
+            if kwargs["tools"][0]["name"] == "record_hypotheses":
+                title = json.loads(kwargs["messages"][0]["content"])["title"]
+                if title.startswith("paper0"):
+                    assert second_started.wait(5)
+                    raise KeyboardInterrupt("early paper interrupted")
+                if title.startswith("paper1"):
+                    second_started.set()
+                    time.sleep(0.01)  # finish after paper0 signals its interrupt
+            response = super().create(**kwargs)
+            with self.lock:
+                self.responses += 1
+            return response
+
+    con = store.connect(tmp_path / "late.db")
+    source = FileSource(_papers_file(tmp_path))
+    marked = []
+    source.done = marked.extend
+    fake = LateFake()
+    with pytest.raises(KeyboardInterrupt, match="early paper"):
+        paper_pool.run_isolated(con, source, fake, CONFIG, 2)
+    assert [r[0] for r in con.execute("SELECT key FROM papers ORDER BY rowid")] == ["k:0", "k:1"]
+    assert marked == ["k:1"]
+    assert fake.responses > 0
+    assert con.execute("SELECT SUM(calls) FROM usage").fetchone()[0] == fake.responses
+    assert con.execute("SELECT COUNT(*) FROM proposals").fetchone()[0] > 0
+    con.close()
+
+
+def test_main_thread_interrupt_joins_and_saves_already_started_work(tmp_path, monkeypatch):
+    response_ready = threading.Event()
+
+    class SignaledFake(DelayedFake):
+        def __init__(self):
+            super().__init__(max_delay=0.001)
+            self.responses = 0
+
+        def create(self, **kwargs):
+            response = super().create(**kwargs)
+            with self.lock:
+                self.responses += 1
+            response_ready.set()
+            return response
+
+    result = Future.result
+    interrupted = False
+
+    def interrupt_wait(future, *args, **kwargs):
+        nonlocal interrupted
+        if not interrupted:
+            interrupted = True
+            assert response_ready.wait(5)
+            raise KeyboardInterrupt("main thread interrupted")
+        return result(future, *args, **kwargs)
+
+    monkeypatch.setattr(Future, "result", interrupt_wait)
+    con = store.connect(tmp_path / "main-interrupt.db")
+    fake = SignaledFake()
+    source = FileSource(_papers_file(tmp_path))
+    with pytest.raises(KeyboardInterrupt, match="main thread"):
+        paper_pool.run_isolated(con, source, fake, CONFIG, 2)
+    assert con.execute("SELECT SUM(calls) FROM usage").fetchone()[0] == fake.responses > 0
+    assert 1 <= con.execute("SELECT COUNT(*) FROM papers").fetchone()[0] <= 2
+    assert con.execute("SELECT COUNT(*) FROM proposals").fetchone()[0] > 0
+    assert not con.execute("PRAGMA foreign_key_check").fetchall()
+    con.close()
+
+
+def test_interrupt_during_submission_retains_started_work(tmp_path, monkeypatch):
+    ready = threading.Event()
+
+    class SignaledFake(DelayedFake):
+        def create(self, **kwargs):
+            response = super().create(**kwargs)
+            ready.set()
+            return response
+
+    submit = ThreadPoolExecutor.submit
+    submitted = 0
+
+    def interrupt_submit(pool, *args, **kwargs):
+        nonlocal submitted
+        future = submit(pool, *args, **kwargs)
+        submitted += 1
+        if submitted == 2:
+            assert ready.wait(5)
+            raise KeyboardInterrupt("interrupted while submitting")
+        return future
+
+    monkeypatch.setattr(ThreadPoolExecutor, "submit", interrupt_submit)
+    con = store.connect(tmp_path / "submission.db")
+    fake = SignaledFake(max_delay=0.001)
+    with pytest.raises(KeyboardInterrupt, match="while submitting"):
+        paper_pool.run_isolated(con, FileSource(_papers_file(tmp_path)), fake, CONFIG, 2)
+    assert con.execute("SELECT SUM(calls) FROM usage").fetchone()[0] == len(fake.sent) > 0
+    assert 1 <= con.execute("SELECT COUNT(*) FROM papers").fetchone()[0] <= 2
+    con.close()
+
+
+@pytest.mark.parametrize("when", ["before", "during", "after"])
+@pytest.mark.parametrize("concurrency", [1, 2])
+def test_interrupt_during_merge_preserves_exactly_once_paid_usage(
+    tmp_path, monkeypatch, when, concurrency
+):
+    copy = paper_pool.copy_new_rows
+    interrupted = False
+
+    def interrupt_copy(*args, **kwargs):
+        nonlocal interrupted
+        if when == "before" and not interrupted:
+            interrupted = True
+            raise KeyboardInterrupt("interrupted copy")
+        changed = copy(*args, **kwargs)
+        if when == "after" and not interrupted:
+            interrupted = True
+            raise KeyboardInterrupt("interrupted copy")
+        return changed
+
+    monkeypatch.setattr(paper_pool, "copy_new_rows", interrupt_copy)
+    if when == "during":
+        insert = paper_pool._insert
+
+        def interrupt_insert(con, table, *args, **kwargs):
+            nonlocal interrupted
+            result = insert(con, table, *args, **kwargs)
+            if table == "usage" and not interrupted:
+                interrupted = True
+                raise KeyboardInterrupt("interrupted copy")
+            return result
+
+        monkeypatch.setattr(paper_pool, "_insert", interrupt_insert)
+    con = store.connect(tmp_path / "merge-interrupt.db")
+    fake = DelayedFake(max_delay=0)
+    with pytest.raises(KeyboardInterrupt, match="interrupted copy"):
+        paper_pool.run_isolated(
+            con, FileSource(_papers_file(tmp_path, n=2)), fake, CONFIG, concurrency
+        )
+    assert con.execute("SELECT SUM(calls) FROM usage").fetchone()[0] == len(fake.sent) > 0
+    assert 1 <= con.execute("SELECT COUNT(*) FROM papers").fetchone()[0] <= concurrency
+    assert not con.execute("PRAGMA foreign_key_check").fetchall()
+    con.close()

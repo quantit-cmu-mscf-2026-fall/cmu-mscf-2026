@@ -1,1 +1,1 @@
-"""Pipeline plumbing shared by the search stages."""
+"""Pipeline stages and the guards on the data they read."""

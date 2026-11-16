@@ -5,12 +5,16 @@ from __future__ import annotations
 import sys
 import types
 
+import pytest
+
 from capstone.factors import llm
 from capstone.pipeline import usage
+from capstone.pipeline.budget import BudgetedClient
 
 
 class _Capture:
-    def __init__(self):
+    def __init__(self, max_retries=2):  # the SDK's default: make_client must override it
+        self.max_retries = max_retries
         self.kwargs = []
         self.messages = self
 
@@ -38,8 +42,18 @@ def test_prompt_caching_marks_the_system_text_without_changing_it():
 def test_make_client_wraps_for_prompt_caching_only_when_asked(monkeypatch):
     fake = types.SimpleNamespace(Anthropic=_Capture)
     monkeypatch.setitem(sys.modules, "anthropic", fake)
-    assert isinstance(llm.make_client(), _Capture)
-    assert isinstance(llm.make_client(prompt_caching=True), usage.PromptCaching)
+    plain = llm.make_client()
+    assert isinstance(plain, _Capture) and plain.max_retries == 0
+    cached = llm.make_client(prompt_caching=True)
+    assert isinstance(cached, usage.PromptCaching) and cached.client.max_retries == 0
+    BudgetedClient(cached, 1)  # the shared budget accepts the wrapped client
+
+
+@pytest.mark.parametrize("wrapper", [usage.PromptCaching, usage.UsageRecorder])
+def test_wrappers_do_not_hide_sdk_retries_from_the_budget(wrapper):
+    with pytest.raises(ValueError, match="hidden SDK retries"):
+        BudgetedClient(wrapper(_Capture(max_retries=2)), 1)
+    BudgetedClient(wrapper(_Capture(max_retries=0)), 1)
 
 
 def test_the_models_are_priced():
