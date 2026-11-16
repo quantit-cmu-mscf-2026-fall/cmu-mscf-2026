@@ -21,7 +21,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["capstone", "capstone.factors", "capstone.pipeline", "capstone.pipeline.autopilot"]
+packages = ["capstone", "capstone.factors", "capstone.pipeline", "capstone.pipeline.autopilot", "capstone.strategy"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

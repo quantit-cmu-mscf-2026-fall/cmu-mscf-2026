@@ -12,3 +12,4 @@ experiments/factors.db*
 experiments/alignment_labels.csv
 experiments/reports/
 experiments/learned_memory_search_check/
+experiments/factor_evaluation/
