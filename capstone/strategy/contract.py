@@ -12,6 +12,29 @@ bytes every time. `load_spec` refuses a file that is not exactly what its
 spec would write (an edited value, a stale id or derived field). The file
 carries a `band` line only for a spec with a no-trade band, so specs written
 without one keep their bytes and id.
+
+`target_weights(spec, panel, as_of)` is the book the strategy holds after
+`as_of`'s close, permno -> weight, computed by evaluation's own
+`factor_signal` and `signal_weights`:
+
+- **Anchored calendar.** The book is rebalanced on every `hold`-th trading day
+  counted from `spec.anchor` in the panel's calendar, and held in between, so
+  the rebalance dates belong to the spec, not to whichever window was loaded.
+  The panel must therefore contain the anchor. Anchored at the panel's first
+  date the dates are evaluation's (its backtest counts from row 0).
+- **Fixed window.** The signal is computed on exactly the `lookback` rows its
+  expression needs before the rebalance date, not on all the history loaded.
+  Every operator but `ema` has finite memory, so this is evaluation's value;
+  with it, even `ema` gives the same book whatever window is loaded. Too few
+  rows raises `InsufficientHistoryError`.
+- **No-trade band.** With `trading.band` > 0 the book on a rebalance date
+  depends on the book before it, so it is the backtest's `band_book` replayed
+  from the anchor (flat there): the same rule, on the same targets, as
+  evaluation. The spec's file carries a `band` line only then. A banded book
+  is not rescaled, so its gross can differ from the spec's by up to `band`
+  per kept name.
+- **Holdout guard.** A panel holding any date after `DISCOVERY_END` is refused
+  (`CURRENT_ROUTE_MISSING`): there is no flag that admits it.
 """
 
 from __future__ import annotations
@@ -24,13 +47,38 @@ from pathlib import Path
 
 import pandas as pd
 
-from capstone.factors.evaluation import TradingSpec
+from capstone.backtest import band_book, to_weights
+from capstone.factors.evaluation import (
+    DISCOVERY_END,
+    HoldoutError,
+    Panel,
+    TradingSpec,
+    factor_signal,
+    signal_weights,
+    trading_signal,
+)
 from capstone.factors.store import variant_id as _variant_id
-from capstone.factors.tree import Node, factor_id, features_used, parse, unparse
+from capstone.factors.tree import (
+    BINARY_WINDOW_FUNCS,
+    FUNCS,
+    MARKET_FIELDS,
+    BinOp,
+    Call,
+    Node,
+    Unary,
+    factor_id,
+    features_used,
+    parse,
+    unparse,
+)
 
 HEADER = (
     "# Strategy spec (capstone.strategy.contract). Written by code; the id is a hash of the rest."
 )
+
+
+class InsufficientHistoryError(ValueError):
+    """The panel has fewer rows before the rebalance date than the expression reads."""
 
 
 @dataclass(frozen=True)
@@ -171,3 +219,136 @@ def save_spec(spec: StrategySpec, path: Path) -> None:
 def load_spec(path: Path) -> StrategySpec:
     """The spec a file holds (refused if the file is not exactly what its spec writes)."""
     return StrategySpec.from_toml(Path(path).read_bytes().decode("utf-8"))
+
+
+# ---------------------------------------------------------------------------
+# The book
+
+
+def lookback(node: Node) -> int:
+    """Rows before a date that the expression's value on that date reads.
+
+    `shift` and `delta` by d read d rows back; a d-day window (rolling
+    operators, `ts_corr`, `ts_cov`, `ema`'s first value) reads d - 1. Nested
+    operators add up; operands of one operator take the longer of the two.
+    """
+    if isinstance(node, Unary):
+        return lookback(node.operand)
+    if isinstance(node, BinOp):
+        return max(lookback(node.left), lookback(node.right))
+    if isinstance(node, Call):
+        inner = lookback(node.arg)
+        if node.arg2 is not None:
+            inner = max(inner, lookback(node.arg2))
+        if node.func in ("shift", "delta"):
+            return inner + node.window
+        if node.func in BINARY_WINDOW_FUNCS or FUNCS.get(node.func):
+            return inner + node.window - 1
+        return inner
+    return 0  # a field or a constant
+
+
+def history(node: Node) -> int:
+    """Rows a panel needs before a date for the expression's value there: its
+    `lookback`, plus one for a market field (the panel's first row has no
+    market return: it weights by the previous day's cap)."""
+    return lookback(node) + (1 if features_used(node) & set(MARKET_FIELDS) else 0)
+
+
+def _rows(panel: Panel, start: int, stop: int) -> Panel:
+    def cut(frame):
+        return None if frame is None else frame.iloc[start:stop]
+
+    fields = {name: cut(value) for name, value in panel.fields.items()}
+    return Panel(
+        fields, cut(panel.universe), cut(panel.half_spread), cut(panel.sic), panel.data_version
+    )
+
+
+CURRENT_ROUTE_MISSING = (
+    "panels reaching past the discovery period require an authorized current-feature route; "
+    "none is available here, and a flag is not an access authorization"
+)
+
+
+def target_weights(spec: StrategySpec, panel: Panel, as_of) -> pd.Series:
+    """The book the strategy holds after `as_of`'s close: permno -> weight.
+
+    A panel holding any date after `DISCOVERY_END` is refused
+    (`CURRENT_ROUTE_MISSING`): the holdout is not read through the contract.
+    """
+    dates = pd.DatetimeIndex(panel.universe.index)
+    if len(dates) and dates.max() > pd.Timestamp(DISCOVERY_END):
+        raise HoldoutError(CURRENT_ROUTE_MISSING)
+    return _target_weights(spec, panel, as_of)
+
+
+def _target_weights(spec: StrategySpec, panel: Panel, as_of) -> pd.Series:
+    """The book held after `as_of`'s close: permno -> weight, nonzero weights
+    only, sorted by permno, summing in absolute value to `spec.gross` (a banded
+    book: see the module docstring).
+
+    `as_of` and `spec.anchor` must be trading dates of the panel, `as_of` on
+    or after the anchor. The book is set on the last anchored rebalance date
+    on or before `as_of`. Only `target_weights` calls this, after refusing
+    any panel holding a date past `DISCOVERY_END`.
+    """
+    dates = pd.DatetimeIndex(panel.universe.index)
+    as_of = pd.Timestamp(as_of)
+    anchor = pd.Timestamp(spec.anchor)
+    if as_of not in dates:
+        raise ValueError(f"as_of {as_of.date()} is not a trading date of the panel")
+    if anchor not in dates:
+        raise ValueError(
+            f"the panel does not contain the spec's anchor {spec.anchor}; "
+            "its rebalance calendar counts trading days from there"
+        )
+    if as_of < anchor:
+        raise ValueError(f"as_of {as_of.date()} is before the spec's anchor {spec.anchor}")
+    a, p = dates.get_loc(anchor), dates.get_loc(as_of)
+    rebalance = a + (p - a) // spec.trading.hold * spec.trading.hold
+    tree = spec.tree
+    need = history(tree)
+    start = rebalance - need
+    if start < 0:
+        raise InsufficientHistoryError(
+            f"the book set on {dates[rebalance].date()} needs {need} earlier rows; "
+            f"the panel has {rebalance}"
+        )
+    if spec.trading.band > 0:
+        row = _banded_row(spec, panel, a, rebalance, need)
+    else:
+        window = _rows(panel, start, rebalance + 1)
+        signal = factor_signal(tree, window)
+        row = signal_weights(signal, window, spec.trading.neutral).iloc[-1]
+    if row.isna().all():
+        raise InsufficientHistoryError(f"no stock has a signal on {dates[rebalance].date()}")
+    book = (row * spec.gross).astype("float64")
+    book = book[book != 0].sort_index().rename("weight")
+    book.index.name = "permno"
+    return book
+
+
+def _banded_row(spec: StrategySpec, panel: Panel, a: int, rebalance: int, need: int) -> pd.Series:
+    """The gross-1 book on row `rebalance` under the spec's no-trade band.
+
+    A banded book depends on the book before it, so it is the backtest's
+    `band_book` replayed from the anchor (flat there) over every anchored
+    rebalance, on evaluation's target weights. The signal is computed from
+    `need` rows before the anchor (or the panel's first row), so each target
+    is evaluation's. NaN when the rebalance row has no signal at all.
+    """
+    first = max(0, a - need)
+    window = _rows(panel, first, rebalance + 1)
+    neutral = spec.trading.neutral
+    traded = trading_signal(factor_signal(spec.tree, window), window, neutral)
+    if traded.iloc[-1].isna().all():
+        return traded.iloc[-1]
+    weights = to_weights(traded, demean=neutral == "none")
+    path = band_book(
+        weights.iloc[a - first :],
+        traded.isna().iloc[a - first :],
+        band=spec.trading.band,
+        hold=spec.trading.hold,
+    )
+    return path.iloc[-1]
