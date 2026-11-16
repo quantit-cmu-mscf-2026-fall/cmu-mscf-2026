@@ -18,7 +18,9 @@ have been known:
   fiscal year, held until the next one is available. A year reported with a
   missing value is missing until the next year, not filled from the year
   before ("don't fill missing fundamentals"). An older fiscal year that
-  becomes available after a newer one never replaces it.
+  becomes available after a newer one never replaces it. A year is held
+  only until the following year would be available: an absent year or an
+  ended link leaves the value missing, not carried forward indefinitely.
 
 Known limitation (as the shared data's): Compustat values may include later
 restatements rather than the figures first reported.
@@ -50,6 +52,8 @@ FUNDA_COLUMNS = [
     "sale",
 ]
 LINK_COLUMNS = ["gvkey", "lpermno", "linktype", "linkprim", "linkdt", "linkenddt"]
+# Annual data: a fiscal year's value is held until the next year would be available.
+MAX_HOLD_YEARS = 1
 
 
 def book_equity(funda: pd.DataFrame) -> pd.Series:
@@ -130,7 +134,10 @@ def as_of_fields(
 
     `fund` has `FUNDAMENTAL_COLUMNS` and `available` (a trading date of
     `dates`, or NaT: never visible). Before a permno's first available year,
-    and for a permno without rows, the value is NaN.
+    and for a permno without rows, the value is NaN. A year expires on the day
+    the following fiscal year would be available (its fiscal year end plus
+    `MAX_HOLD_YEARS`, then the annual 90-day rule); with no newer year by
+    then, the value is NaN rather than carried on.
     """
     dates = pd.DatetimeIndex(dates)
     rows = _checked(fund)
@@ -154,10 +161,17 @@ def as_of_fields(
     )
     position = position.reindex(index=dates, columns=permnos).ffill()
     index = position.fillna(len(rows)).to_numpy().astype("int64")
+    # A year is held only until the next one would be available: from that day on,
+    # with no newer year (none filed, or the link ended), the value is missing.
+    next_year = rows.assign(datadate=rows["datadate"] + pd.DateOffset(years=MAX_HOLD_YEARS))
+    expires = sd.available_from(next_year, dates, report_col=None, period_col="datadate")
+    held_until = np.append(expires.to_numpy(dtype="datetime64[ns]"), np.datetime64("NaT", "ns"))
+    stale = held_until[index] <= dates.to_numpy(dtype="datetime64[ns]")[:, None]  # NaT: False
     out = {}
     for name in FUNDAMENTAL_FIELDS:
-        values = np.append(rows[name].to_numpy(dtype="float64"), np.nan)
-        out[name] = pd.DataFrame(values[index], index=dates, columns=permnos)
+        values = np.append(rows[name].to_numpy(dtype="float64"), np.nan)[index]
+        values[stale] = np.nan
+        out[name] = pd.DataFrame(values, index=dates, columns=permnos)
     return out
 
 

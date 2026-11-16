@@ -110,7 +110,34 @@ def test_years_available_before_the_panel_start_leave_only_the_latest():
         ],
         "sales",
     )
-    assert (sales == 2.0).all()
+    # Held until the next year would be available: 2015-06-30 + 90 days is Monday
+    # 09-28; strictly after is 09-29. No newer year by then, so missing.
+    expiry = pd.Timestamp("2015-09-29")
+    assert (sales[sales.index < expiry] == 2.0).all()
+    assert sales[sales.index >= expiry].isna().all()
+
+
+def test_a_year_is_not_carried_past_when_the_next_would_be_available():
+    # Only FY2013: visible from before the panel, missing once FY2014 would be
+    # (2014-12-31 + 90 days is Tuesday 2015-03-31; strictly after is 04-01).
+    book = field([one_row(10000, "2013-12-31", book=5.0)], "book")
+    expiry = pd.Timestamp("2015-04-01")
+    assert (book[book.index < expiry] == 5.0).all()
+    assert book[book.index >= expiry].isna().all()
+
+
+def test_an_absent_year_reads_the_same_as_a_year_reported_missing():
+    old = one_row(10000, "2013-12-31", book=5.0)
+    absent = field([old], "book")
+    reported = field([old, one_row(10000, "2014-12-31", book=np.nan)], "book")
+    pd.testing.assert_series_equal(absent, reported)
+
+
+def test_a_regular_filer_has_no_gap_between_years():
+    rows = [one_row(10000, f"{y}-12-31", book=float(y)) for y in (2013, 2014, 2015)]
+    book = field(rows, "book")
+    assert book.notna().all()
+    assert book.iloc[0] == 2013.0 and book.iloc[-1] == 2014.0
 
 
 def test_an_older_year_never_overrides_a_newer_one():
@@ -211,6 +238,38 @@ def test_compustat_rows_map_to_permnos_with_book_equity_as_fama_french():
     # 002's fiscal year ended before its link started; 003 has no primary link.
     assert set(out.index.get_level_values("permno")) == {10000}
     assert list(out.columns) == list(FUNDAMENTAL_FIELDS)
+
+
+def _funda_row(**values) -> pd.DataFrame:
+    base = dict.fromkeys(["seq", "ceq", "pstk", "pstkrv", "pstkl", "txditc", "at", "lt"], np.nan)
+    return pd.DataFrame([base | values])
+
+
+@pytest.mark.parametrize(
+    ("values", "expected", "step"),
+    [
+        (dict(seq=10.0, ceq=4.0, pstk=1.0), 10.0 - 1.0, "seq before ceq + pstk"),
+        (dict(ceq=4.0, pstk=1.0), 5.0 - 1.0, "ceq + pstk when seq is missing"),
+        (dict(ceq=4.0), 4.0, "ceq alone: pstk missing counts 0"),
+        (dict(at=100.0, lt=70.0), 30.0, "at - lt when seq and ceq are missing"),
+        (dict(seq=10.0, pstkrv=3.0, pstkl=7.0, pstk=9.0), 7.0, "redemption value first"),
+        (dict(seq=10.0, pstkl=2.0, pstk=9.0), 8.0, "liquidating value next"),
+        (dict(seq=10.0, pstk=2.0), 8.0, "par value last"),
+        (dict(seq=10.0), 10.0, "no preferred: 0"),
+        (dict(seq=10.0, txditc=1.5), 11.5, "deferred taxes added"),
+    ],
+)
+def test_each_step_of_the_book_equity_fallback(values, expected, step):
+    assert fu.book_equity(_funda_row(**values)).iloc[0] == pytest.approx(expected), step
+
+
+def test_an_ended_link_does_not_carry_its_last_year_forward():
+    funda = fake_funda().iloc[:2]  # 001: FY2013 and FY2014
+    link = fake_link().iloc[:1].assign(linkenddt=pd.Timestamp("2014-06-30"))
+    rows = fu.from_compustat(funda, link)
+    assert list(rows["datadate"]) == [pd.Timestamp("2013-12-31")]
+    book = fu.fundamental_fields(rows, DATES, PERMNOS)["book"][10000]
+    assert book[book.index >= pd.Timestamp("2015-04-01")].isna().all()
 
 
 def test_a_fiscal_year_after_the_link_ends_is_dropped_and_the_link_end_is_inclusive():
