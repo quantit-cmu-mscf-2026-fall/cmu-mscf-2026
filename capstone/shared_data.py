@@ -346,6 +346,65 @@ def load(
     return frame
 
 
+def load_live(
+    name: str,
+    columns: list[str] | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    auto_sync: bool = True,
+    date_column: str = "date",
+) -> pd.DataFrame:
+    """Read live-era rows of one shared CRSP file: the post-holdout route.
+
+    `holdout_live.guard_live_read` admits only a window that starts after the
+    sealed holdout's end; `load` and its guard are unchanged and still refuse such a
+    read. The bounds go into the parquet filter, so no holdout-era row reaches memory,
+    and the frame is checked against them again after the read."""
+    from capstone import holdout_live
+
+    first, last = holdout_live.guard_live_read(name, start, end, date_column)
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    if auto_sync:
+        sync()
+    path = cache_dir() / f"{name}.parquet"
+    if not path.exists():
+        raise SharedDataError(f"{name}.parquet is not in the shared data")
+    filters = [(date_column, ">=", pd.Timestamp(first))]
+    if last is not None:
+        filters.append((date_column, "<=", pd.Timestamp(last)))
+    table = pq.read_table(path, columns=columns, filters=filters)
+    strings = {pa.string(): pd.StringDtype("pyarrow"), pa.large_string(): pd.StringDtype("pyarrow")}
+    frame = table.to_pandas(types_mapper=strings.get)
+    if date_column in frame.columns:
+        dates = pd.to_datetime(frame[date_column])
+        outside = dates < pd.Timestamp(first)
+        if last is not None:
+            outside |= dates > pd.Timestamp(last)
+        if outside.any():
+            raise holdout_live.LiveReadRefused(
+                "live_read_touches_holdout", f"{name}: a row outside {first}..{last} was read"
+            )
+    return _plain_dtypes(frame)
+
+
+def _plain_dtypes(frame: pd.DataFrame) -> pd.DataFrame:
+    """`load`'s nullable-to-numpy conversion, for `load_live`."""
+    for col in frame.columns:
+        dtype = frame[col].dtype
+        if not isinstance(dtype, pd.api.extensions.ExtensionDtype) or isinstance(
+            dtype, pd.StringDtype
+        ):
+            continue
+        if pd.api.types.is_float_dtype(dtype):
+            frame[col] = frame[col].astype("float64")
+        elif pd.api.types.is_integer_dtype(dtype) or pd.api.types.is_bool_dtype(dtype):
+            plain = "int64" if pd.api.types.is_integer_dtype(dtype) else "bool"
+            frame[col] = frame[col].astype("float64" if frame[col].isna().any() else plain)
+    return frame
+
+
 # --- Treatment of missing values -------------------------------------------
 # The team's agreed rules, in one place so every strategy and agent applies them
 # identically. Measured on the 1990-2025 file, they leave no missing return and
