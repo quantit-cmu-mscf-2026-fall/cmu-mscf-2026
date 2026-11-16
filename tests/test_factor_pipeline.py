@@ -10,7 +10,7 @@ import pytest
 from capstone.factors import __main__ as cli
 from capstone.factors import store
 from capstone.factors.llm import FactorConfig
-from capstone.factors.pipeline import run
+from capstone.factors.pipeline import RunSummary, default_zoo, process_paper, run
 from capstone.factors.sources import FileSource, PaperlogSource
 
 HYPOTHESIS = {
@@ -95,6 +95,25 @@ def test_run_stores_the_chain_and_marks_only_finished_papers(tmp_path):
     assert edge["paper_key"] == "arxiv:ok"
     citation = con.execute("SELECT citation FROM papers WHERE key = 'arxiv:ok'").fetchone()[0]
     assert citation == "A et al., 2025"
+
+
+def test_process_paper_over_a_source_equals_run(tmp_path):
+    papers = [{"key": "arxiv:ok", "title": "Works"}, {"key": "arxiv:bad", "title": "FAIL here"}]
+    con_run = store.connect(tmp_path / "run.db")
+    source = ListSource(papers)
+    expected = run(con_run, source, ScriptedClient(), CONFIG)
+
+    con_each = store.connect(tmp_path / "each.db")
+    other = ListSource(papers)
+    summary, zoo = RunSummary(), default_zoo()
+    for paper in other.papers():
+        process_paper(
+            con_each, paper, ScriptedClient(), CONFIG, zoo, "ListSource", summary, other.done
+        )
+
+    assert summary == expected
+    assert other.marked == source.marked
+    assert [f["id"] for f in store.factors(con_each)] == [f["id"] for f in store.factors(con_run)]
 
 
 def test_paperlog_source_claims_papers_through_its_api(monkeypatch):

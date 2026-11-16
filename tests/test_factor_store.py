@@ -5,7 +5,25 @@ from __future__ import annotations
 import pytest
 
 from capstone.factors import store
-from capstone.factors.tree import factor_id, parse
+from capstone.factors.tree import factor_id, parse, zoo_similarity
+
+
+def test_nearest_factor_ties_keep_insertion_order_across_clock_boundaries(con, monkeypatch):
+    monkeypatch.setattr(store, "_now", lambda: "2000-01-01T00:00:00+00:00")
+    hid = store.add_hypothesis(con, _hypothesis())
+    nodes = sorted(
+        (parse("ts_mean(close, 2)"), parse("ts_mean(close, 3)")), key=factor_id, reverse=True
+    )
+    first, second = [store.add_factor(con, node, hid)[0] for node in nodes]
+    candidate = parse("ts_mean(close, 5)")
+    tied = zoo_similarity(candidate, store.factor_trees(con))
+    with con:
+        con.execute(
+            "UPDATE factors SET created_at = ? WHERE id = ?", ("2000-01-01T00:00:01+00:00", second)
+        )
+    separated = zoo_similarity(candidate, store.factor_trees(con))
+    assert tied == separated
+    assert tied[2] == first
 
 
 @pytest.fixture
