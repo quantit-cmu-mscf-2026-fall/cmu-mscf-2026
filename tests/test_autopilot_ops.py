@@ -27,7 +27,7 @@ REASONS = {
     "inbox_empty": ReasonSpec("Source", "drop a file"),
 }
 SECTIONS, HOOKS = ops.discover()
-CLEAR = {"reviewer": "cal", "reason": "test"}
+CLEAR = {"reviewer": "reviewer-a", "reason": "test"}
 
 
 def toy(name, run=None, deps=(), **more):
