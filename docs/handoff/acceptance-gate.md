@@ -9,8 +9,11 @@ description.
   `family_statistics` (periods cut by date), `holdout_statistics` (stage 4's
   input alone) and `best_by_family`. `calibration.family_statistics` now maps
   its simulated periods to dates and calls it. Tests: `tests/test_funnel.py`.
-- Not yet: the stages and thresholds, the scorecard, registration and the
-  single-look run (later PRs in this stack).
+- **Stages 1-3 and the thresholds** (QUANTIT-32): `Thresholds` (checked when
+  built, `stage1` a field, default "rho" as on `main`), `thresholds_dict`
+  (plain data to register), `screen` (stages 1-3, no holdout),
+  `stage1_pvalues`, `run_funnel`. `calibration` re-exports them.
+- Not yet: the scorecard, registration and the single-look run.
 
 ## 2. Contract
 - Input: a performance matrix (dates x variants, `docs/validation.md`) and a
@@ -21,14 +24,18 @@ description.
 - Errors: `TypeError` without a date index; `ValueError` for unordered
   dates, an empty period, a holdout that does not follow the search, or a
   variant with no hypothesis label.
+- `screen` never reads `ho_*`. Stage 1 refuses a missing family p-value
+  (BH would drop it); stage 4 refuses a live candidate with no holdout
+  statistics. Stage 3 passes through (spanning test not built yet).
 
 ## 3. How it was vetted
 
 | Check | How | Result | Reproduce with |
 |---|---|---|---|
-| Unit tests | `tests/test_funnel.py` | pass | `pytest -q tests/test_funnel.py` |
+| Unit tests | `tests/test_funnel.py`, 73 tests | pass | `pytest -q tests/test_funnel.py` |
 | Holdout blindness | shock holdout dates, compare stage-1/2 numbers | unchanged | `pytest -q tests/test_funnel.py -k only_search` |
 | Calibration unchanged | old vs new `calibration.family_statistics`, 4 sets x 2 `n_boot` x 2 designs | exactly equal | see the PR description |
+| Calibration runs unchanged | old vs new `run_funnel`/`run_naive_stack`/`gates_alone`, 96 settings | exactly equal | see the PR description |
 | pandas 3 | all-NaN family, nothing passes the naive stack | no warning | `pytest -q tests/test_funnel.py -k Pandas3` |
 
 ## 4. Provenance
