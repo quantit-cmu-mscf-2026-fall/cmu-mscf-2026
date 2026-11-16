@@ -14,6 +14,10 @@ A `variants` row is one way of trading a stored factor (a trading spec:
 holding period, sector neutrality, ...). Evaluation trades variants, not
 bare formulas, so each variant is a candidate with lineage to its factor.
 
+`memory_events` is learned memory search's record of each deepen edit
+(`capstone.factors.memory`). Its parent and child ids are plain text, not
+references into `factors`: a child that failed to parse has no factor.
+
 Nothing here computes performance, so nothing here is a ledger trial.
 """
 
@@ -137,6 +141,24 @@ CREATE TABLE IF NOT EXISTS variants (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_variants_factor ON variants(factor_id);
+CREATE TABLE IF NOT EXISTS memory_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL,
+  iteration INTEGER NOT NULL,
+  parent_id TEXT NOT NULL,
+  child_id TEXT,
+  child_expression TEXT NOT NULL,
+  hypothesis_id TEXT,
+  context TEXT NOT NULL,
+  motif_intended TEXT NOT NULL,
+  motif_realized TEXT,
+  status TEXT NOT NULL,
+  quality REAL,
+  baseline REAL,
+  residual REAL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_memory_events_run ON memory_events(run_id);
 CREATE INDEX IF NOT EXISTS ix_proposals_factor ON proposals(factor_id);
 CREATE INDEX IF NOT EXISTS ix_proposals_hypothesis ON proposals(hypothesis_id);
 CREATE INDEX IF NOT EXISTS ix_hypotheses_paper ON hypotheses(paper_key);
