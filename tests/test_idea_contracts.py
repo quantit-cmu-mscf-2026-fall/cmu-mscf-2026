@@ -286,7 +286,7 @@ def test_v2_claims_keep_identity_and_assess_under_v1_semantics(archive):
     saved = {k: v for k, v in asdict(hypothesis()).items() if k != "declared_defaults"}
     legacy = IdeaClaimV2.from_dict(saved | {"semantics_version": 2})
     assert legacy.semantics_version == 2 and legacy.declared_defaults == ()
-    # Identity computed by the v2-only implementation (main @ b3588d8).
+    # Identity computed by the v2-only implementation.
     assert legacy.identity == "864b7c037b33e466d4562c32cc518bd3c7b33e424a8f617bf57455b4c0241925"
     result = assess(legacy, archive)
     assert result.assessment_version == 1 and result.adaptation_record == ()
@@ -317,7 +317,7 @@ def test_v3_claims_keep_identity_and_assess_exactly_as_before(archive):
     default = DeclaredDefault("lookback", "252 sessions", "Researcher choice.")
     plain = replace(hypothesis(), semantics_version=3)
     defaulted = replace(hypothesis(declared_defaults=(default,)), semantics_version=3)
-    # Identities computed by the claim-v3 implementation (main @ 37da276).
+    # Identities computed by the claim-v3 implementation.
     assert plain.identity == "6bf6cf6ae970c110e83472ab66fa27cc77142305675da64527302d77ab110c32"
     assert defaulted.identity == "f20044c7391cc25d3d971ccdfa7238b9b5b63eaa6f39407a5882a633fe0d50db"
     assert IdeaClaimV2.from_dict(asdict(defaulted)) == defaulted
@@ -459,8 +459,8 @@ def test_large_review_needs_cited_subset_within_scope(archive):
     assert issue in assess(claim, archive, reviewed_methods=forged).completeness_issues
 
 
-def test_slice01_shaped_low_risk_review_replays_under_scope_rule(archive):
-    """Registered slice-01 low-risk-control: 64 reviewed spans, 2 cited method spans.
+def test_large_reviewed_method_replays_under_scope_rule(archive):
+    """A low-risk-control shape: 64 reviewed spans, 2 cited method spans.
 
     The saved v2 claim keeps its assessment-v1 outcome (old runs are immutable); the
     same content as a v3 claim clears the method-evidence axis. The Cohen-Frazzini
