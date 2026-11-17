@@ -1,6 +1,10 @@
 """Mixed source files reach immutable evidence through a frozen, resumable batch."""
 
 import json
+import os
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -8,7 +12,7 @@ from capstone.factors.source_acquisition import AcquisitionResult
 from capstone.factors.source_archive import SourceArchive
 from capstone.factors.source_intake import SourceRequest
 from capstone.pipeline import source_batch
-from capstone.pipeline.source_batch import run_batch
+from capstone.pipeline.source_batch import run_batch, status
 
 
 def batch_file(tmp_path):
@@ -182,3 +186,112 @@ def test_resume_verifies_superseded_revisions_and_allows_uncheckpointed_crash_ta
     next(p for p in old_objects if b"A method" in p.read_bytes()).write_bytes(b"damaged")
     with pytest.raises(ValueError, match="digest"):
         run_batch(root)
+
+
+def test_resume_cli_in_a_fresh_process_and_readable_report(tmp_path):
+    source = batch_file(tmp_path)
+    root = tmp_path / "batch"
+    first = run_batch(root, sources=source)
+    revisions = revisions_of(root)
+    (tmp_path / "paper.md").unlink()
+    result = subprocess.run(
+        [sys.executable, "-m", "capstone.pipeline.source_batch", "resume", "--out", str(root)],
+        env=dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1])),
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 2, result.stderr
+    printed = json.loads(result.stdout)
+    assert printed["states"] == first["states"] and "sources" not in printed
+    assert {row["state"] for row in printed["revisions"]} == {"ready", "blocked"}
+    assert status(root)["states"] == first["states"]
+    assert revisions_of(root) == revisions
+    assert "source acquisition and extraction" in (root / "SOURCE_INBOX.html").read_text()
+
+
+def test_report_escapes_source_text(tmp_path):
+    source = tmp_path / "sources.json"
+    source.write_text(
+        json.dumps(
+            [{"kind": "inline_text", "key": "x", "text": "<script>alert(1)</script> & more"}]
+        )
+    )
+    run_batch(tmp_path / "batch", sources=source)
+    page = (tmp_path / "batch" / "SOURCE_INBOX.html").read_text()
+    assert "<script>alert(1)" not in page
+    assert "&lt;script&gt;alert(1)&lt;/script&gt; &amp; more" in page
+
+
+def test_status_verifies_without_the_original_engine_and_without_writing(tmp_path, monkeypatch):
+    root = tmp_path / "batch"
+    first = run_batch(root, sources=batch_file(tmp_path))
+    before = {p: p.read_bytes() for p in root.rglob("*") if p.is_file() and p.name != "batch.lock"}
+    monkeypatch.setattr("capstone.pipeline.source_batch.engine_identity", lambda: {})
+    assert status(root) == first
+    after = {p: p.read_bytes() for p in root.rglob("*") if p.is_file() and p.name != "batch.lock"}
+    assert after == before
+
+
+def test_status_never_creates_nonexistent_output_or_missing_archive_directories(tmp_path):
+    root = tmp_path / "missing"
+    with pytest.raises(FileNotFoundError):
+        status(root)
+    assert not root.exists()
+    root = tmp_path / "batch"
+    run_batch(root, sources=batch_file(tmp_path))
+    objects = root / "archive/objects"
+    for file in objects.iterdir():
+        file.unlink()
+    objects.rmdir()
+    with pytest.raises(ValueError):
+        status(root)
+    assert not objects.exists()
+
+
+def test_corrupt_source_is_an_error_in_status(tmp_path):
+    root = tmp_path / "batch"
+    run_batch(root, sources=batch_file(tmp_path))
+    next((root / "archive/objects").glob("*.bin")).write_bytes(b"changed")
+    with pytest.raises(ValueError):
+        status(root)
+
+
+@pytest.mark.parametrize("damage", ["missing", "truncated"])
+def test_status_refuses_lost_completed_history(tmp_path, damage):
+    root = tmp_path / "batch"
+    run_batch(root, sources=batch_file(tmp_path))
+    run_batch(root, refresh=True)
+    journal = root / "archive/outcomes.jsonl"
+    if damage == "missing":
+        journal.unlink()
+    else:
+        journal.write_bytes(b"".join(journal.read_bytes().splitlines(keepends=True)[:-1]))
+    with pytest.raises(ValueError, match="history"):
+        status(root)
+
+
+def test_status_verifies_superseded_revisions(tmp_path):
+    root = tmp_path / "batch"
+    run_batch(root, sources=batch_file(tmp_path))
+    old_objects = set((root / "archive/objects").glob("*.bin"))
+    (tmp_path / "paper.md").write_text("Changed source methods.", encoding="utf-8")
+    run_batch(root, refresh=True)
+    assert status(root)["states"] == {"blocked": 1, "ready": 2}
+    next(p for p in old_objects if b"A method" in p.read_bytes()).write_bytes(b"damaged")
+    with pytest.raises(ValueError, match="digest"):
+        status(root)
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["ingest", "--out", "x"],
+        ["resume", "--out", "x", "--sources", "s.json"],
+        ["status", "--out", "x", "--max-bytes", "5"],
+        ["status", "--out", "x", "--refresh"],
+    ],
+)
+def test_cli_refuses_inconsistent_arguments(argv):
+    with pytest.raises(SystemExit) as exit_info:
+        source_batch.main(argv)
+    assert exit_info.value.code == 2
