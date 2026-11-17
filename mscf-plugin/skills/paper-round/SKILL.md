@@ -30,7 +30,7 @@ Leave **Report back** empty until the experiment has run.
 
 - A `.py` script under `experiments/` or `scripts/` with seeds and parameters in a file.
 - Every trial through `runlog.log_run` with tags `paper:<short-id>` plus the stage tag if
-  it touches real candidates; synthetic-only checks go to `CAPSTONE_LEDGER_DIR=.ledger-scratch`.
+  it touches real candidates; synthetic-only checks are logged too, tagged `synthetic`.
 - If it needs a new method, the method ships with `null-calibration` tests.
 
 ## Report back (following week)
@@ -41,5 +41,6 @@ Expected vs. observed, the numbers with seeds and trial count, and the next step
 ## Carrying a knowledge skill into the team
 
 Per `docs/exercise_knowledge_to_skill.md` Part 8: a skill that changes an experiment
-(e.g. purged CV) is ported by PR into this plugin's `skills/`, an experiment is rerun with it
+(e.g. purged CV) is ported by PR as the exercise says, into `.claude/skills/<name>/` (the team's project
+skills; this plugin's `skills/` only if the team agrees, see the plugin README), an experiment is rerun with it
 active, and the before/after goes in the paper-round issue's Report back.

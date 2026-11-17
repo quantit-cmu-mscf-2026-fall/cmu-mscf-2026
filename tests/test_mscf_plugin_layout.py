@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import builtins
 import importlib
 import json
+import pkgutil
 import re
 from pathlib import Path
+
+import capstone
 
 ROOT = Path(__file__).resolve().parent.parent
 PLUGIN = ROOT / "mscf-plugin"
@@ -103,14 +107,69 @@ def test_skills_name_only_capstone_functions_that_exist():
     assert checked >= 30
 
 
+def _capstone_names() -> set[str]:
+    """Every public name defined in any capstone module, plus the module names."""
+    names: set[str] = set()
+    for info in pkgutil.walk_packages(capstone.__path__, "capstone."):
+        try:
+            module = importlib.import_module(info.name)
+        except ImportError:  # an optional dependency is missing; skip that module
+            continue
+        names.update(n for n in dir(module) if not n.startswith("_"))
+        names.add(info.name.rsplit(".", 1)[-1])
+    return names
+
+
+# Backticked words that are ledger columns or other libraries' names, and the Claude Code
+# tool a command's `allowed-tools: Bash(...)` frontmatter names.
+NOT_CAPSTONE = {"bh", "by", "q", "lfdr", "Path", "Series", "DataFrame", "Bash"}
+CALL = re.compile(r"(?<![\w.])([A-Za-z_]\w*)\((?!s\))")  # not the prose "seed(s)"
+SPAN = re.compile(r"`([^`\n]+)`")
+
+
+def _unqualified_names(text: str, catalog: bool) -> set[str]:
+    """Names used without a module: calls like `log_run(...)` and, in the method catalog
+    (references/methods.md), every identifier in a table's first column (`holm`)."""
+    found = set(CALL.findall(text)) - set(vars(builtins))
+    for line in text.splitlines():
+        if catalog and line.startswith("|") and not set(line) <= set("|- "):
+            for span in SPAN.findall(line.split("|")[1]):
+                found.update(re.findall(r"^[A-Za-z_]\w*$", span.strip()))
+    return {n for n in found - NOT_CAPSTONE if not n.startswith(("test_", "my_"))}
+
+
+def test_every_unqualified_name_the_skills_use_exists():
+    """`holm` or `PurgedKFold(...)` named without a module is still something capstone has."""
+    known = _capstone_names()
+    checked = 0
+    for path in MARKDOWN:
+        for name in sorted(
+            _unqualified_names(path.read_text(encoding="utf-8"), path.name == "methods.md")
+        ):
+            assert name in known, f"{path.parent.name}: `{name}` is not defined in capstone"
+            checked += 1
+    assert checked >= 25
+
+
+FILE_REFERENCE = re.compile(
+    r"`((?:docs|deploy|scripts|tests|\.github|\.claude)/[\w./-]+\.(?:md|yml|py))`"
+    r"|\b([A-Z][A-Z_]{3,}\.md)\b"
+)
+
+
 def test_skills_point_at_repository_files_that_exist():
-    pattern = re.compile(r"`((?:docs|deploy|\.github)/[\w./-]+\.(?:md|yml))`")
-    seen = {m for path in MARKDOWN for m in pattern.findall(path.read_text(encoding="utf-8"))}
-    assert seen, "expected the skills to name repository files"
+    seen = {
+        quoted or bare
+        for path in MARKDOWN
+        for quoted, bare in FILE_REFERENCE.findall(path.read_text(encoding="utf-8"))
+    }
+    assert {"CONTRIBUTING.md", "CLAUDE.md"} <= seen, "expected the skills to name repository files"
     assert sorted(m for m in seen if not (ROOT / m).is_file()) == []
 
 
 def test_the_plugin_carries_no_private_or_host_specific_text():
-    banned = re.compile(r"caleb|ibkr|interactive brokers|OMP_NUM_THREADS|[A-Za-z]:\\[A-Za-z]", re.I)
+    banned = re.compile(
+        r"ibkr|interactive brokers|OMP_NUM_THREADS|[A-Za-z]:\\[A-Za-z]|/Users/|/home/", re.I
+    )
     for path in [*MARKDOWN, *PLUGIN.rglob("*.json"), PLUGIN / "hooks" / "guard.py"]:
         assert not banned.search(path.read_text(encoding="utf-8")), path

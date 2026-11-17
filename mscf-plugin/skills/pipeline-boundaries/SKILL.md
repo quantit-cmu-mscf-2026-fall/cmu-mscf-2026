@@ -44,6 +44,10 @@ would cross one, stop and say which rule it crosses instead of finding a way aro
   procedure or a threshold after seeing results is multiple testing of its own.
 - Thresholds come from simulating the whole funnel on known-truth candidate sets
   (`capstone.calibration`), to a 10% end-to-end FDR, not textbook defaults.
+- Until the funnel is shown to beat it, the baseline decides: BH on each family's
+  bootstrap p-value, at the level `docs/validation/framework.md` registers (Q5). The code
+  defaults (`Thresholds()`, `run_baseline`) are not registered and use the formula
+  p-value; real candidates need `stage1="bootstrap"`.
 
 ## 5. The repository is public
 
