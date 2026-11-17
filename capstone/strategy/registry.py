@@ -16,8 +16,17 @@ defaults. Rules:
   labelled incubate, or "plumbing-test" for an entry that tests plumbing and
   claims no edge. Reading never changes a role.
 - `state`: "active" (the default), "suspended" or "retired". The state is
-  recorded here and changes only through the lifecycle events of a later change;
-  `version` is an optional label (for example an allocation version).
+  recorded here and changes only through `set_state`, which appends a hash-chained
+  event to `deploy/lifecycle.jsonl` before rewriting the entry. `version` is an
+  optional label (for example an allocation version).
+- A registry whose entries disagree with their events is refused when read (an
+  entry with no events at all is a legacy entry that predates the file). A crash
+  between the event and the entry is the recoverable
+  `lifecycle_entry_rewrite_pending:<id>`, completed by the same call again.
+  Retired is terminal. Rollback is a revert of the registry commit, which takes
+  an entry and its events back together.
+- These events only RECORD a state a person confirmed. Nothing in this module
+  decides to suspend or retire a strategy.
 
 The project has no YAML dependency, so this module reads and writes the
 registry's own narrow schema: a header of comments, then `strategies: []` or
@@ -29,13 +38,17 @@ guessed at.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Literal, get_args
+from typing import Any, Literal, get_args
+
+from capstone.artifacts import canonical, digest
+from capstone.faults import maybe_fault
 
 MODULE = "capstone.strategy.contract"
 MODULES = (MODULE,)
 REGISTRY_FILE = Path("deploy") / "strategies.yml"
+LIFECYCLE_FILE = Path("deploy") / "lifecycle.jsonl"
 KEYS = ("id", "module", "gate_report", "enabled", "role", "state", "version")
 Role = Literal["deploy", "incubation-only", "plumbing-test"]
 ROLES: tuple[str, ...] = get_args(Role)
@@ -43,6 +56,14 @@ INCUBATION_ONLY = "incubation-only"
 PLUMBING_TEST = "plumbing-test"
 State = Literal["active", "suspended", "retired"]
 STATES: tuple[str, ...] = get_args(State)
+TRANSITIONS = frozenset(
+    {
+        ("active", "suspended"),
+        ("suspended", "active"),
+        ("active", "retired"),
+        ("suspended", "retired"),
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -156,10 +177,227 @@ def _render(header: str, entries: list[RegistryEntry]) -> str:
 
 
 def parse_registry(text: str) -> tuple[RegistryEntry, ...]:
-    """The entries of a registry file's text, in file order (e.g. read at a git tag)."""
+    """The entries of a registry file's text, in file order (e.g. read at a git tag).
+    Text alone cannot show its states are backed by events: `verify_lifecycle` does
+    (and `read_registry` runs it)."""
     return tuple(_parse(text)[1])
 
 
 def read_registry(root: Path) -> tuple[RegistryEntry, ...]:
-    """The entries of `<root>/deploy/strategies.yml`, in file order."""
-    return parse_registry((Path(root) / REGISTRY_FILE).read_bytes().decode("utf-8"))
+    """The entries of `<root>/deploy/strategies.yml`, in file order, checked
+    against `<root>/deploy/lifecycle.jsonl` (absent: no events)."""
+    entries = parse_registry(_read(root, REGISTRY_FILE))
+    verify_lifecycle(_lifecycle_text(root), entries)
+    return entries
+
+
+def _read(root: Path, path: Path) -> str:
+    return (Path(root) / path).read_bytes().decode("utf-8")
+
+
+def _lifecycle_text(root: Path) -> str:
+    path = Path(root) / LIFECYCLE_FILE
+    return path.read_bytes().decode("utf-8") if path.exists() else ""
+
+
+def read_lifecycle(root: Path) -> tuple[dict[str, Any], ...]:
+    """The verified lifecycle events of `<root>`, oldest first."""
+    return verify_lifecycle(_lifecycle_text(root), parse_registry(_read(root, REGISTRY_FILE)))
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle events: deploy/lifecycle.jsonl, one canonical JSON event per line,
+# each carrying the digest of the event before it ("" for the first).
+
+REGISTERED_EVENT = frozenset(
+    {"prev_hash", "field", "id", "role", "state", "module", "version", "reviewer", "at"}
+)
+STATE_EVENT = frozenset({"prev_hash", "field", "id", "from", "to", "reason", "reviewer", "at"})
+EVENT_KEYS = {"registered": REGISTERED_EVENT, "state": STATE_EVENT}
+PENDING = "lifecycle_entry_rewrite_pending"
+
+
+def _refused(message: str) -> ValueError:
+    return ValueError(f"lifecycle {LIFECYCLE_FILE.as_posix()}: {message}")
+
+
+class LifecycleRewritePending(ValueError):
+    """The last event is written and its entry not yet (a crash between the two
+    writes). Recoverable: the same `set_state` call again rewrites the entry
+    without a second event. Until then reads refuse."""
+
+    def __init__(self, event: dict[str, Any]):
+        self.strategy_id = event["id"]
+        self.event = event
+        super().__init__(
+            f"lifecycle {LIFECYCLE_FILE.as_posix()}: {PENDING}:{self.strategy_id} (its last "
+            f"{event['field']} event is written, the entry is not; repeat the same call)"
+        )
+
+
+def _event(n: int, line: str) -> dict[str, Any]:
+    try:
+        event = json.loads(line)
+    except ValueError as exc:
+        raise _refused(f"line {n} is not JSON") from exc
+    if not isinstance(event, dict) or canonical(event) != line:
+        raise _refused(f"line {n} is not a canonical JSON event")
+    keys = EVENT_KEYS.get(event.get("field"))
+    if keys is None or set(event) != keys or not all(isinstance(v, str) for v in event.values()):
+        raise _refused(f"line {n} is not a registered or state event")
+    if event["field"] == "registered":  # a caller may record no time
+        required = ("id",)
+    else:
+        required = ("id", "reason", "reviewer", "at")
+    if not all(event[k] for k in required):
+        raise _refused(f"line {n} lacks one of {required}")
+    return event
+
+
+def _replay(events) -> tuple[dict[str, str], dict[str, dict]]:
+    """(state, registered event) after `events`; refuses an impossible sequence."""
+    states: dict[str, str] = {}
+    registered: dict[str, dict] = {}
+    for n, event in enumerate(events, start=1):
+        sid, field = event["id"], event["field"]
+        if field == "registered":
+            if sid in registered or sid in states:
+                raise _refused(f"line {n}: {sid} is registered after events of its own")
+            if (
+                event["state"] != "active"
+                or event["role"] not in ROLES
+                or event["module"] not in MODULES
+            ):
+                raise _refused(f"line {n}: not a valid registration")
+            registered[sid] = event
+        else:
+            if event["from"] != states.get(sid, "active"):
+                raise _refused(f"line {n}: {sid} was not {event['from']}")
+            if (event["from"], event["to"]) not in TRANSITIONS:
+                raise _refused(f"line {n}: {event['from']} -> {event['to']} is not allowed")
+            states[sid] = event["to"]
+    return states, registered
+
+
+def _mismatches(entries, model) -> dict[str, str]:
+    """Each strategy whose entry is not where the events leave it, and why."""
+    states, registered = model
+    bad: dict[str, str] = {}
+    for entry in entries:
+        reg = registered.get(entry.id)
+        if reg is not None and (entry.module, entry.version) != (reg["module"], reg["version"]):
+            bad[entry.id] = "has a module or version its registered event does not"
+        if reg is not None and entry.role != reg["role"]:
+            bad[entry.id] = f"says role {entry.role!r} but its events leave {reg['role']!r}"
+        state = states.get(entry.id, "active")
+        if entry.state != state:
+            bad[entry.id] = (
+                f"says {entry.state!r} but its events leave it {state!r}; "
+                "a state changes only through set_state"
+            )
+    present = {entry.id for entry in entries}
+    for sid in registered:
+        if sid not in present:
+            bad[sid] = "has a registered event but no entry"
+    return bad
+
+
+def verify_lifecycle(text: str, entries) -> tuple[dict[str, Any], ...]:
+    """The events of a lifecycle file's text; refused unless every line is a
+    canonical event, the hash chain is intact, each transition is allowed, and
+    every entry's state, role, module and version are where its events leave
+    them. An entry with no `registered` event is a legacy entry (it predates
+    the file); its state still changes only through events.
+
+    The one recoverable case, files with the last event written and its entry
+    not yet, raises `LifecycleRewritePending` (`lifecycle_entry_rewrite_pending:<id>`)."""
+    if text and not text.endswith("\n"):
+        raise _refused("the file does not end with a newline")
+    events: list[dict[str, Any]] = []
+    previous = ""
+    for n, line in enumerate(text.split("\n")[:-1], start=1):
+        event = _event(n, line)
+        if event["prev_hash"] != previous:
+            raise _refused(f"line {n} does not follow the line before it (hash chain broken)")
+        previous = digest(event)
+        events.append(event)
+    bad = _mismatches(entries, _replay(events))
+    if not bad:
+        return tuple(events)
+    last = events[-1] if events else None
+    present = {entry.id for entry in entries}
+    if (
+        last is not None
+        and set(bad) == {last["id"]}
+        and (last["field"] != "registered" or last["id"] not in present)
+        and not _mismatches(entries, _replay(events[:-1]))
+    ):
+        raise LifecycleRewritePending(last)
+    sid, why = next(iter(bad.items()))
+    raise _refused(f"strategy {sid} {why}")
+
+
+def _commit(root: Path, event: dict[str, Any], entry: RegistryEntry) -> RegistryEntry:
+    """Append `event` (chained), then write `entry` into the registry.
+
+    A crash between the two writes leaves `LifecycleRewritePending`; the same
+    call again finds exactly its own event pending and only writes the entry."""
+    text = _lifecycle_text(root)
+    entries = parse_registry(_read(root, REGISTRY_FILE))
+    try:
+        events = verify_lifecycle(text, entries)
+    except LifecycleRewritePending as pending:
+        written = {k: v for k, v in pending.event.items() if k != "prev_hash"}
+        if pending.strategy_id != event["id"] or written != event:
+            raise ValueError(f"{pending}; only that same call completes it") from None
+    else:
+        event = {"prev_hash": digest(events[-1]) if events else "", **event}
+        path = Path(root) / LIFECYCLE_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes((text + canonical(event) + "\n").encode("utf-8"))
+        maybe_fault("registry:after_event")
+    header, current = _parse(_read(root, REGISTRY_FILE))
+    if any(e.id == entry.id for e in current):
+        rewritten = [entry if e.id == entry.id else e for e in current]
+    else:
+        rewritten = [*current, entry]
+    (Path(root) / REGISTRY_FILE).write_bytes(_render(header, rewritten).encode("utf-8"))
+    return entry
+
+
+def _entry(root: Path, strategy_id: str, reviewer: str, at: str) -> RegistryEntry:
+    if not (isinstance(reviewer, str) and reviewer and isinstance(at, str) and at):
+        raise ValueError("a lifecycle event needs a reviewer and a timestamp (`at`)")
+    for entry in parse_registry(_read(root, REGISTRY_FILE)):
+        if entry.id == strategy_id:
+            return entry
+    raise ValueError(f"strategy {strategy_id} is not registered")
+
+
+def set_state(
+    root: Path, strategy_id: str, state: State, *, reason: str, reviewer: str, at: str
+) -> RegistryEntry:
+    """Move an entry to `state` by appending a lifecycle event; return the new
+    entry. Allowed: active <-> suspended and active/suspended -> retired. `at`
+    is the event's timestamp, passed in (never read from the clock). This only
+    records the decision a person (the strategy owner) confirmed; nothing here
+    decides it."""
+    if not (isinstance(reason, str) and reason):
+        raise ValueError("a state change needs a reason")
+    if state not in STATES:
+        raise ValueError(f"state must be one of {STATES}: {state!r}")
+    entry = _entry(root, strategy_id, reviewer, at)
+    if entry.state == "retired":
+        raise ValueError(f"strategy {strategy_id} is retired; retired is terminal")
+    if entry.state == state:
+        raise ValueError(f"strategy {strategy_id} is already {state}")
+    event = {
+        "field": "state",
+        "id": strategy_id,
+        "from": entry.state,
+        "to": state,
+        "reason": reason,
+        "reviewer": reviewer,
+        "at": at,
+    }
+    return _commit(root, event, replace(entry, state=state))
