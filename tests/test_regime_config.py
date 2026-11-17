@@ -25,10 +25,11 @@ def _digest_before_the_field(config) -> str:
         "papers": f"sha256:{papers}",
     }
     del content["regime_operators"]
-    for name, default in (("deepen_on_budget", "raise"), ("paper_mode", "sequential")):
+    optional = (("deepen_on_budget", "raise"), ("paper_mode", "sequential"))
+    for name, default in (*optional, ("placebo", None), ("placebo_seed", None)):
         if content[name] == default:
             del content[name]
-    content.pop("concurrency")
+    content.pop("concurrency"), content.pop("resources")
     text = json.dumps(content, sort_keys=True, default=str, separators=(",", ":"))
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 

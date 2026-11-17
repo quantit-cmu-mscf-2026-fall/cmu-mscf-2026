@@ -62,10 +62,11 @@ def _digest_without_placebo_fields(config):
     }
     for name in ("placebo", "placebo_seed"):
         assert content.pop(name) is None
-    for name, default in (("deepen_on_budget", "raise"), ("paper_mode", "sequential")):
+    optional = (("deepen_on_budget", "raise"), ("paper_mode", "sequential"))
+    for name, default in (*optional, ("regime_operators", False)):
         if content[name] == default:
             del content[name]
-    del content["concurrency"]
+    del content["concurrency"], content["resources"]
     text = json.dumps(content, sort_keys=True, default=str, separators=(",", ":"))
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -94,6 +95,8 @@ def test_guard_and_apply_follow_the_config(tmp_path, monkeypatch):
     config = replace(real, placebo=METHOD, placebo_seed=5)
     rows = _rows()
     # a real config is untouched: no ledger check, rows and version unchanged
+    main = tmp_path / "experiments"
+    monkeypatch.setattr(placebo, "main_ledger_dir", lambda: main)
     monkeypatch.delenv("CAPSTONE_LEDGER_DIR", raising=False)
     placebo.guard(real)
     same, version = placebo.apply(real, rows, "v1")
@@ -104,7 +107,7 @@ def test_guard_and_apply_follow_the_config(tmp_path, monkeypatch):
     monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(placebo.main_ledger_dir()))
     with pytest.raises(placebo.PlaceboRefused):
         placebo.guard(config)
-    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path / "ledger"))
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(main / "placebo"))
     placebo.guard(config)
     with pytest.raises(ValueError, match="no holdout"):
         placebo.guard(config, holdout=True)
