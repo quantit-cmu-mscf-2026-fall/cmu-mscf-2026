@@ -7,6 +7,8 @@ import pytest
 from capstone.factors.tree import (
     FIELDS,
     OHLCV,
+    BinOp,
+    Const,
     ParseError,
     factor_id,
     features_used,
@@ -242,6 +244,14 @@ def test_deep_nesting_is_a_parse_error_not_a_crash():
         parse("(" * 600 + "close" + ")" * 600)
 
 
+@pytest.mark.parametrize("n", [500, 1000, 2000])
+@pytest.mark.parametrize("op", ["+", "*", "-"])
+def test_a_long_flat_expression_is_a_parse_error_not_a_recursion_error(n, op):
+    # A left-leaning chain is not nested in the source, but the tree is n deep.
+    with pytest.raises(ParseError):
+        parse(f"close{op}" * n + "close")
+
+
 def test_sums_and_products_of_three_terms_are_one_factor_in_any_order():
     assert factor_id(parse("close + volume + open")) == factor_id(parse("open + volume + close"))
     assert factor_id(parse("close * (volume * open)")) == factor_id(
@@ -312,3 +322,48 @@ def test_frequent_genes_are_closed_counted_once_per_factor_and_capped_at_k():
     assert all("ts_std" not in t for t in texts)
     assert len(frequent_root_genes(trees, k=1)) == 1
     assert frequent_root_genes([], k=3) == []
+
+
+NEGATED_CORR = [
+    "ts_corr(open, volume, 10) * -1",
+    "-1 * ts_corr(open, volume, 10)",
+    "-(ts_corr(open, volume, 10))",
+    "0 - ts_corr(open, volume, 10)",
+    "-(-(-(ts_corr(open, volume, 10))))",
+    "(-1 * -1) * -(ts_corr(volume, open, 10))",
+]
+
+
+def test_every_spelling_of_a_negation_is_one_factor():
+    ids = {factor_id(parse(e)) for e in NEGATED_CORR}
+    assert len(ids) == 1
+    assert factor_id(parse("-ts_corr(open, volume, 10)")) in ids
+
+
+def test_a_double_negation_cancels_and_is_not_the_negation():
+    plain = factor_id(parse("ts_corr(open, volume, 10)"))
+    assert factor_id(parse("-(-(ts_corr(open, volume, 10)))")) == plain
+    assert factor_id(parse("-1 * -1 * ts_corr(open, volume, 10)")) == plain
+    assert plain != factor_id(parse("-ts_corr(open, volume, 10)"))
+
+
+def test_a_negated_product_keeps_its_other_factors_and_constants():
+    assert factor_id(parse("-(close * volume)")) == factor_id(parse("close * -volume"))
+    assert factor_id(parse("-2 * close")) == factor_id(parse("close * -2"))
+    assert factor_id(parse("-2 * close")) != factor_id(parse("-3 * close"))
+    assert factor_id(parse("-2 * close")) != factor_id(parse("2 * close"))
+    assert factor_id(parse("-close")) != factor_id(parse("close"))
+
+
+def test_a_negative_constant_built_in_code_keys_like_the_parsed_expression():
+    built = BinOp("*", Const(-1.0), parse("close"))
+    assert identity_key(built) == identity_key(parse(unparse(built)))
+    assert factor_id(built) == factor_id(parse("-close"))
+
+
+@pytest.mark.parametrize("expression", NEGATED_CORR)
+def test_a_negated_copy_of_a_zoo_member_is_not_partly_original(expression):
+    zoo = default_zoo()
+    _, share, closest = zoo_similarity(parse(expression), zoo)
+    assert share == 1.0
+    assert closest == "alpha_006"

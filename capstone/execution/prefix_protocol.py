@@ -1,8 +1,8 @@
 """Opt-in observed-prefix identity for historical Program account continuation.
 
-`canonical_inputs` and `formation_panel` read `capstone.pipeline.prefix_inputs`, which is
-not part of this build yet: calling them fails with an import error rather than
-continuing on a different closure.
+`canonical_inputs` and `formation_panel` read `capstone.pipeline.prefix_inputs` lazily: a
+build without that module fails with an import error rather than continuing on a
+different closure.
 """
 
 from __future__ import annotations
