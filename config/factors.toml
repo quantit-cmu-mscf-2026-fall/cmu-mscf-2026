@@ -1,0 +1,85 @@
+# Parameters for the paper -> hypothesis -> factor pipeline (capstone.factors).
+# Changing a value changes what gets stored, so bump prompt_version with any
+# prompt or threshold change; every stored row records the version it used.
+
+model = "claude-opus-5"
+max_tokens = 16000  # Opus 5 thinks by default; thinking counts against this
+prompt_version = "v7"  # v7: frequent subtree avoidance; v6: alignment judge; v5: mkt_return; v4: windows up to 1260; v3: returns, shares, cap; v2: kinds, node limit
+
+# How much to ask for per call.
+hypotheses_per_paper = 3
+factors_per_hypothesis = 4
+
+# Rounds of "this did not parse, here is the error, fix it" per call.
+max_repairs = 2
+
+# Originality, as the share of a candidate's nodes inside its largest
+# subtree shared with the reference (AlphaAgent Eq. 6). Rejected at or above:
+#   max_zoo_share: against Alpha101. 0.75 leaves room for a published
+#     building block inside a new idea, not a published alpha retuned.
+#   max_store_share: against factors already stored. 1.0 rejects only a
+#     candidate whose whole shape is already stored, i.e. a window or
+#     constant variant of an existing factor.
+max_zoo_share = 0.75
+max_store_share = 1.0
+
+# Complexity (AlphaAgent's third mechanism): a formula with more tree nodes
+# than this is rejected as over-engineered. Every Alpha101 member in the zoo
+# has a spelling with at most 28 nodes; the first real run's rejected-in-hindsight formulas
+# had 31-45.
+max_nodes = 30
+
+# Frequent subtree avoidance (Navigating the Alpha Jungle, #45, Sec. 3): the
+# most frequent closed "root genes" in the store (subtrees whose leaves are
+# all fields, windows abstracted) are named in the prompt as structures to
+# avoid, and a formula containing one is rejected. The paper avoids 3. 0 is off.
+avoid_frequent_subtrees = 3
+
+# Hypothesis-formula alignment (AlphaAgent's second mechanism, QUANTIT-83): a
+# cheaper model checks each formula that passed the size and originality
+# checks against its hypothesis's variables, direction and horizon. The score
+# is the share of the three it passes. Empty alignment_model turns it off.
+#   min_alignment: proposals scoring below it are rejected. 0 until it is
+#     calibrated on hand-labelled proposals; never tune it on performance.
+alignment_model = "claude-haiku-4-5"
+min_alignment = 0.0
+
+# Strategy graph (capstone.factors.graph): a bond joins strategies, and is
+# checked for uniqueness before it is stored. Rejected at or above:
+#   max_member_share: the largest share of one of its factors that is a
+#     subtree of another; 0.75 matches max_zoo_share.
+#   max_bond_overlap: Jaccard overlap of its factors with a stored bond's.
+#   max_bond_leaves: the most factors one bond may tie together.
+max_bond_leaves = 4
+max_member_share = 0.75
+max_bond_overlap = 0.75
+
+# Learned memory search, the agent's deepen move (capstone.factors.memory;
+# AlphaMemo, arXiv 2606.20625). The memory's weight grows with evaluations t:
+# lambda_t = lambda_max * min(1, max(0, t - start) / length) (paper Table 4,
+# "balanced"). kappa shrinks the confidence gate for small samples; an edit
+# is vetoed for a kind of parent when the gate exceeds memory_veto_confidence
+# and the posterior failure rate exceeds memory_veto_failure_rate. The paper
+# publishes no kappa, epsilon or veto thresholds: these are proposals.
+memory_lambda_max = 0.05
+memory_warmup_start = 0
+memory_warmup_length = 200
+memory_kappa = 5.0
+memory_epsilon = 1e-6
+memory_veto_confidence = 0.3
+memory_veto_failure_rate = 0.7
+# The deepen move's pool of parents (AlphaMemo Sec. 4.5, App. C): a child
+# enters with |ICIR| at least memory_min_quality, at most max_nodes nodes and
+# |corr| at most memory_max_correlation with every member; a full pool swaps
+# out its weakest member only for a better child. memory_high_quality marks
+# the best. Each deepen round asks Opus for memory_children_per_parent edits.
+memory_min_quality = 0.10
+memory_high_quality = 0.20
+# A parent's quality bin in its context key (q0..q3), in the scorer's units.
+# |ICIR| here, so the sign is ignored; config/deepen_crsp.toml sets the
+# evaluation scorer's units (a net-of-cost z, where the sign matters).
+memory_quality_edges = [0.05, 0.10, 0.20]
+memory_signed_quality = false
+memory_max_correlation = 0.70
+memory_pool_capacity = 50
+memory_children_per_parent = 5
