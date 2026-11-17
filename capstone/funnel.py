@@ -41,15 +41,18 @@ from capstone.evaluate import (
     holm_adjusted,
     sharpe_test,
 )
+from capstone.ratio_spec import RatioSpec, check_thresholds
 from capstone.search_fdr import bootstrap_family_pvalues, search_adjusted_pvalue
 
 Stage1Method = Literal["independent", "rho", "bootstrap"]
 FinalGate = Literal["dsr", "bh"]
 FinalTrials = Literal["searched", "survivors"]
+ThresholdMode = Literal["fdr", "ratio"]
 
 STAGE1_METHODS: tuple[str, ...] = get_args(Stage1Method)
 _FINAL_GATES: tuple[str, ...] = get_args(FinalGate)
 _FINAL_TRIALS: tuple[str, ...] = get_args(FinalTrials)
+THRESHOLD_MODES: tuple[str, ...] = get_args(ThresholdMode)
 
 # The holdout statistics stage 4 reads, per carried-forward variant.
 _HOLDOUT_FIELDS = ("p", "sharpe", "n_obs", "skew", "kurtosis", "variance")
@@ -137,6 +140,12 @@ class Thresholds:
     "dsr", the trial count it charges, "survivors" (only the candidates taken
     to the holdout, which is independent data) or "searched" (every variant
     tried; calibration found it cuts power to about a sixth).
+
+    mode: "fdr" (the default: q1 and q4 as given, a flat false-discovery target)
+    or "ratio" (opt-in: q1 and q4 are the grid point of least expected cost
+    registered in `ratio`, a `ratio_spec.RatioSpec`; a dict is read back into
+    one). Both stay out of `thresholds_dict` while they hold their defaults, so
+    every registered "fdr" setting keeps its content and its hash.
     """
 
     q1: float = 0.10
@@ -146,6 +155,8 @@ class Thresholds:
     d4: float = 0.95
     q4: float = 0.30
     final_trials: FinalTrials = "survivors"
+    mode: ThresholdMode = "fdr"
+    ratio: RatioSpec | None = None
 
     def __post_init__(self) -> None:
         if self.stage1 not in STAGE1_METHODS:
@@ -167,6 +178,10 @@ class Thresholds:
                 raise ValueError(f"{name} must be in (0, 1)")
         if not 0.0 < self.alpha2 <= 1.0:
             raise ValueError("alpha2 must be in (0, 1]; 1.0 means no stage-2 gate")
+        if self.mode not in THRESHOLD_MODES:
+            raise ValueError(f"mode must be one of {THRESHOLD_MODES}")
+        if self.mode != "fdr" or self.ratio is not None:
+            check_thresholds(self)
 
 
 _NUMERIC_FIELDS = ("q1", "alpha2", "d4", "q4")
