@@ -23,6 +23,7 @@ from capstone.factors.tree import (
     BINARY_WINDOW_FUNCS,
     FUNCS,
     MARKET_FIELDS,
+    REGIME_FUNCS,
     STOCK_FIELDS,
     WINDOW_MAX,
     WINDOW_MIN,
@@ -111,8 +112,15 @@ def load_config(path: str | Path | None = None) -> FactorConfig:
     return FactorConfig(**values)
 
 
-def make_client():
+def make_client(prompt_caching: bool = False):
     """A real Anthropic client; the SDK finds the credentials.
+
+    `prompt_caching=True` marks each request's system text as a cacheable prefix
+    (`capstone.pipeline.usage.PromptCaching`); off by default, as it changes the
+    request shape.
+
+    Hidden SDK retries are disabled: a retry must pass through the caller's
+    budget/journal as another counted attempt. API failures propagate to callers.
 
     In order: ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, an `ant auth login`
     profile, or workload identity federation (short-lived tokens in CI or a
@@ -122,7 +130,12 @@ def make_client():
         import anthropic
     except ImportError as exc:  # pragma: no cover - depends on the environment
         raise ImportError('install the agents extra: pip install -e ".[agents]"') from exc
-    return anthropic.Anthropic()
+    client = anthropic.Anthropic(max_retries=0)
+    if prompt_caching:
+        from capstone.pipeline.usage import PromptCaching
+
+        return PromptCaching(client)
+    return client
 
 
 def call_tool(
@@ -157,8 +170,12 @@ def call_tool(
     raise ValueError(f"the model did not call {tool['name']}")
 
 
-def grammar_help() -> str:
-    """The factor grammar in words, generated from the parser's own tables."""
+def grammar_help(*, regime_operators: bool = False) -> str:
+    """The factor grammar in words, generated from the parser's own tables.
+
+    `regime_operators` (off by default) adds the two market-regime operators; off, the
+    text is what it was.
+    """
     windowed = sorted(name for name, takes in FUNCS.items() if takes)
     plain = sorted(name for name, takes in FUNCS.items() if not takes)
     return (
@@ -172,4 +189,12 @@ def grammar_help() -> str:
         f"Windows are integer literals in [{WINDOW_MIN}, {WINDOW_MAX}]; exponents are "
         "numeric literals. No other identifiers exist, and every expression must use "
         "at least one per-stock field."
+        + (
+            f" Market-regime operators, f(x): {', '.join(REGIME_FUNCS)}: volscale(x) scales "
+            "x by a fixed target volatility over the market's trailing 126-day volatility; "
+            "bear_gate(x) is x, set to 0 when the market's past-504-day return is negative. "
+            "A formula wrapped in one is counted in its unwrapped formula's family."
+            if regime_operators
+            else ""
+        )
     )

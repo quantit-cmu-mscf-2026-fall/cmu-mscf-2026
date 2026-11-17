@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import math
 import sqlite3
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Literal, get_args
 
@@ -402,6 +402,49 @@ def hypothesis_of(con: sqlite3.Connection, fid: str) -> str | None:
     return stored[0]["hypothesis_id"] if stored else None
 
 
+@dataclass(frozen=True)
+class FactorOutcome:
+    """One factor traded by every spec, nothing logged (`factor_outcome`).
+
+    `error` is why the factor could not be computed (then there are no `results`);
+    `results` is `(metrics, net)` per spec in spec order; `refused` is the message of the
+    backtest's refusal (no cost rate on a trading day) at the spec after the last result.
+    """
+
+    error: str | None = None
+    results: tuple[tuple[dict, pd.Series], ...] = ()
+    refused: str | None = None
+
+
+def factor_outcome(tree: Node, panel: Panel, specs: Sequence[TradingSpec]) -> FactorOutcome:
+    """The pure part of `evaluate_factors` for one factor: compute it and trade it by each
+    spec. No store, no ledger, so a worker process returns the bytes this process would."""
+    try:
+        signal = factor_signal(tree, panel)
+    except (ValueError, ArithmeticError) as exc:
+        return FactorOutcome(error=str(exc))
+    traded: dict[str, pd.DataFrame] = {}  # the sector demean is slow: once per factor
+    results = []
+    for spec in specs:
+        if spec.neutral not in traded:
+            traded[spec.neutral] = trading_signal(signal, panel, spec.neutral)
+        try:
+            result = _backtest(traded[spec.neutral], panel, spec)
+        except ValueError as exc:
+            return FactorOutcome(results=tuple(results), refused=str(exc))
+        metrics = {
+            "sharpe_net": result.sharpe("net"),
+            "sharpe_gross": result.sharpe("gross"),
+            "sharpe_net_full_spread": result.sharpe("net_full_spread"),
+            "mean_turnover": float(result.turnover.mean()),
+            "mean_cost": float(result.cost.mean()),
+            "days": int(result.net.notna().sum()),
+            "pvalue_screen": screen_pvalue(result.net),
+        }
+        results.append((metrics, result.net))
+    return FactorOutcome(results=tuple(results))
+
+
 def evaluate_factors(
     trees: Mapping[str, Node],
     panel: Panel,
@@ -411,6 +454,7 @@ def evaluate_factors(
     families: Mapping[str, str | None] | None = None,
     extra_params: dict | None = None,
     tags: Sequence[str] = (),
+    outcomes: Callable | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Every variant's net returns, side by side: each factor traded by each spec.
 
@@ -427,17 +471,25 @@ def evaluate_factors(
     entry's "evaluation" tag (a run's tag, to scope its trial count). Returns
     (matrix: dates x variant net returns, summary: one row per variant).
     A panel holding a date after `DISCOVERY_END` raises `HoldoutError`.
+
+    `outcomes(items)` computes the factors: given `[(fid, tree)]` in the trees' order it
+    yields one `(fid, factor_outcome(tree, panel, specs))` per factor, in that order
+    (`capstone.pipeline.panel_pool` runs them on worker processes). The store rows, ledger
+    entries and frames are written here, in the trees' order, so they are the same
+    however the factors were computed. None: inline, lazily, as one loop.
     """
     require_discovery(panel)
+    specs = tuple(specs)
+    if outcomes is None:
+        computed = ((fid, factor_outcome(tree, panel, specs)) for fid, tree in trees.items())
+    else:
+        computed = outcomes(list(trees.items()))
     columns, summary = {}, []
-    for fid, tree in trees.items():
+    for (fid, tree), (done, outcome) in zip(trees.items(), computed, strict=True):
+        if done != fid:
+            raise RuntimeError(f"factor outcomes out of order: {done!r} for {fid!r}")
         family = (families or {}).get(fid)
-        try:
-            signal, error = factor_signal(tree, panel), ""
-        except (ValueError, ArithmeticError) as exc:
-            signal, error = None, str(exc)
-        traded: dict[str, pd.DataFrame] = {}  # the sector demean is slow: once per factor
-        for spec in specs:
+        for position, spec in enumerate(specs):
             vid = (
                 store.add_variant(con, fid, spec.as_dict())
                 if con is not None
@@ -453,36 +505,27 @@ def evaluate_factors(
                 "costs": "half quoted spread per unit traded",
                 **(extra_params or {}),
             }
-            if signal is None:
+            if outcome.error is not None:
                 log_run(
-                    LEDGER_NAME, params=params, metrics={"error": error}, tags=["evaluation", *tags]
+                    LEDGER_NAME,
+                    params=params,
+                    metrics={"error": outcome.error},
+                    tags=["evaluation", *tags],
                 )
                 continue
-            if spec.neutral not in traded:
-                traded[spec.neutral] = trading_signal(signal, panel, spec.neutral)
-            try:
-                result = _backtest(traded[spec.neutral], panel, spec)
-            except ValueError as exc:
+            if position >= len(outcome.results):
                 # The backtest refused (no cost rate on a trading day): the trial
                 # was run, so it is counted, and the refusal is not swallowed.
                 log_run(
                     LEDGER_NAME,
                     params=params,
-                    metrics={"error": str(exc)},
+                    metrics={"error": outcome.refused},
                     tags=["evaluation", *tags],
                 )
-                raise
-            metrics = {
-                "sharpe_net": result.sharpe("net"),
-                "sharpe_gross": result.sharpe("gross"),
-                "sharpe_net_full_spread": result.sharpe("net_full_spread"),
-                "mean_turnover": float(result.turnover.mean()),
-                "mean_cost": float(result.cost.mean()),
-                "days": int(result.net.notna().sum()),
-                "pvalue_screen": screen_pvalue(result.net),
-            }
+                raise ValueError(outcome.refused)
+            metrics, net = outcome.results[position]
             log_run(LEDGER_NAME, params=params, metrics=metrics, tags=["evaluation", *tags])
-            columns[vid] = result.net
+            columns[vid] = net
             summary.append(
                 {
                     "variant_id": vid,
