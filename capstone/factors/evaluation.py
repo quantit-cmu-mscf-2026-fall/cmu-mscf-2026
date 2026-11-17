@@ -31,6 +31,12 @@ validation stack), one column per `factor_id`.
 - **Ledger** (`evaluate_factors`): every evaluated variant is logged with
   `log_run` as soon as its series exists, before anything uses it, with
   `sd.data_version()` in its params.
+- **Screen statistic** (`screen_pvalue`): each variant's one-sided HAC
+  p-value against a Sharpe ratio of zero, on its net returns. It is the
+  per-variant input to the validation funnel's stage 1 and the deepen move's
+  reward. The stage 1 gate itself (each hypothesis family's search-adjusted
+  p-value, then BH across families) belongs to validation, so the summary
+  only adds each variant's `hypothesis_id`, the family it belongs to.
 """
 
 from __future__ import annotations
@@ -44,7 +50,8 @@ import numpy as np
 import pandas as pd
 
 from capstone import shared_data as sd
-from capstone.backtest import backtest_frame, to_weights
+from capstone.backtest import backtest_frame, sharpe_ratio, to_weights
+from capstone.evaluate import sharpe_test
 from capstone.factors import store
 from capstone.factors.interpret import evaluate
 from capstone.factors.tree import Node, unparse
@@ -172,10 +179,12 @@ class FactorReturns:
         """Net of the full quoted spread instead of half: a pessimistic cost view."""
         return (self.gross - 2 * self.cost).rename("net_full_spread")
 
-    def sharpe(self, which: str = "net") -> float:
-        r = getattr(self, which).dropna()
-        sd_ = r.std(ddof=1)
-        return float(r.mean() / sd_ * np.sqrt(PERIODS_PER_YEAR)) if sd_ > 0 else float("nan")
+    def sharpe(
+        self, which: Literal["net", "gross", "cost", "turnover", "net_full_spread"] = "net"
+    ) -> float:
+        """Annualised Sharpe of one of the series: `backtest.sharpe_ratio`, the
+        project's one definition (the one `backtest.summarize` reports)."""
+        return sharpe_ratio(getattr(self, which), PERIODS_PER_YEAR)
 
 
 # ---------------------------------------------------------------------------
@@ -321,12 +330,38 @@ def factor_returns(tree: Node, panel: Panel, spec: TradingSpec | int = 1) -> Fac
     return signal_returns(factor_signal(tree, panel), panel, spec)
 
 
+def screen_pvalue(net: pd.Series) -> float:
+    """One-sided p-value of H0: Sharpe ratio <= 0, with a HAC variance (`sharpe_test`).
+
+    Computed as 1 - PSR, which equals `sharpe_test(...).pvalue_greater` on the
+    validation stack (#31) to rounding; switch to that field once #31 is on
+    `main`. NaN when the series has no variance.
+    """
+    clean = net.dropna()
+    if len(clean) < 2 or not clean.std(ddof=1) > 0:
+        return float("nan")
+    p = 1.0 - sharpe_test(clean, periods_per_year=PERIODS_PER_YEAR).psr
+    return float(p) if np.isfinite(p) else float("nan")
+
+
+def hypothesis_of(con: sqlite3.Connection, fid: str) -> str | None:
+    """The hypothesis a factor belongs to: the one whose proposal first stored it.
+
+    A factor proposed again under another hypothesis is recorded as a
+    duplicate there and stays in its first family.
+    """
+    rows = store.lineage(con, fid)
+    stored = [r for r in rows if r["status"] == "stored"] or rows
+    return stored[0]["hypothesis_id"] if stored else None
+
+
 def evaluate_factors(
     trees: Mapping[str, Node],
     panel: Panel,
     *,
     specs: Sequence[TradingSpec] = (TradingSpec(),),
     con: sqlite3.Connection | None = None,
+    families: Mapping[str, str | None] | None = None,
     extra_params: dict | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Every variant's net returns, side by side: each factor traded by each spec.
@@ -337,11 +372,15 @@ def evaluate_factors(
     are recorded in the store's `variants` table. A factor that cannot be
     computed is logged once per spec (each was a trial) and gets no column.
     Costs are half the quoted spread; the full-spread Sharpe is reported
-    alongside as a robustness view, not a separate candidate. Returns
+    alongside as a robustness view, not a separate candidate. Each variant's
+    screen p-value (`screen_pvalue`) is logged with its metrics, and the
+    summary names its hypothesis family from `families` (factor id ->
+    hypothesis id, as `hypothesis_of` gives). Returns
     (matrix: dates x variant net returns, summary: one row per variant).
     """
     columns, summary = {}, []
     for fid, tree in trees.items():
+        family = (families or {}).get(fid)
         try:
             signal, error = factor_signal(tree, panel), ""
         except (ValueError, ArithmeticError) as exc:
@@ -377,18 +416,14 @@ def evaluate_factors(
                     LEDGER_NAME, params=params, metrics={"error": str(exc)}, tags=["evaluation"]
                 )
                 raise
-            full = result.net_full_spread.dropna()
             metrics = {
                 "sharpe_net": result.sharpe("net"),
                 "sharpe_gross": result.sharpe("gross"),
-                "sharpe_net_full_spread": float(
-                    full.mean() / full.std(ddof=1) * np.sqrt(PERIODS_PER_YEAR)
-                )
-                if full.std(ddof=1) > 0
-                else float("nan"),
+                "sharpe_net_full_spread": result.sharpe("net_full_spread"),
                 "mean_turnover": float(result.turnover.mean()),
                 "mean_cost": float(result.cost.mean()),
                 "days": int(result.net.notna().sum()),
+                "pvalue_screen": screen_pvalue(result.net),
             }
             log_run(LEDGER_NAME, params=params, metrics=metrics, tags=["evaluation"])
             columns[vid] = result.net
@@ -396,6 +431,7 @@ def evaluate_factors(
                 {
                     "variant_id": vid,
                     "factor_id": fid,
+                    "hypothesis_id": family,
                     "hold": spec.hold,
                     "neutral": spec.neutral,
                     "expression": params["expression"],
