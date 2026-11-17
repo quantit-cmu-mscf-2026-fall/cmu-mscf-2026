@@ -59,6 +59,8 @@ class FactorConfig:
     memory_veto_failure_rate: float = 0.7
     memory_min_quality: float = 0.10
     memory_high_quality: float = 0.20
+    memory_quality_edges: tuple[float, ...] = (0.05, 0.10, 0.20)
+    memory_signed_quality: bool = False
     memory_max_correlation: float = 0.70
     memory_pool_capacity: int = 50
     memory_children_per_parent: int = 5
@@ -85,6 +87,11 @@ class FactorConfig:
             raise ValueError("need memory_lambda_max >= 0, memory_kappa > 0, memory_epsilon > 0")
         if not 0 <= self.memory_min_quality <= self.memory_high_quality:
             raise ValueError("need 0 <= memory_min_quality <= memory_high_quality")
+        # TOML gives arrays as lists; keep the config hashable.
+        object.__setattr__(self, "memory_quality_edges", tuple(self.memory_quality_edges))
+        edges = self.memory_quality_edges
+        if not edges or any(b <= a for a, b in zip(edges, edges[1:], strict=False)):
+            raise ValueError("memory_quality_edges must be non-empty and strictly increasing")
         if not 0 < self.memory_max_correlation <= 1:
             raise ValueError("memory_max_correlation must be in (0, 1]")
         if self.memory_pool_capacity < 1 or self.memory_children_per_parent < 1:
@@ -104,8 +111,15 @@ def load_config(path: str | Path | None = None) -> FactorConfig:
     return FactorConfig(**values)
 
 
-def make_client():
+def make_client(prompt_caching: bool = False):
     """A real Anthropic client; the SDK finds the credentials.
+
+    `prompt_caching=True` marks each request's system text as a cacheable prefix
+    (`capstone.pipeline.usage.PromptCaching`); off by default, as it changes the
+    request shape.
+
+    Hidden SDK retries are disabled: a retry must pass through the caller's
+    budget/journal as another counted attempt. API failures propagate to callers.
 
     In order: ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, an `ant auth login`
     profile, or workload identity federation (short-lived tokens in CI or a
@@ -115,7 +129,12 @@ def make_client():
         import anthropic
     except ImportError as exc:  # pragma: no cover - depends on the environment
         raise ImportError('install the agents extra: pip install -e ".[agents]"') from exc
-    return anthropic.Anthropic()
+    client = anthropic.Anthropic(max_retries=0)
+    if prompt_caching:
+        from capstone.pipeline.usage import PromptCaching
+
+        return PromptCaching(client)
+    return client
 
 
 def call_tool(

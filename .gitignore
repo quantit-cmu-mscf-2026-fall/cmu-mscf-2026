@@ -8,14 +8,14 @@ __pycache__/
 *.egg-info/
 .sessions/
 experiments/runs.jsonl
+experiments/factors.db*
+experiments/alignment_labels.csv
+experiments/reports/
+experiments/factor_evaluation/
+experiments/learned_memory_search_check/
 
 # paperlog working data (keep it out of this public repo; see research/paperlog/README.md)
 papers.db
 papers.csv
 digests/
 research/paperlog/learned_queries.yaml
-experiments/factors.db*
-experiments/alignment_labels.csv
-experiments/reports/
-experiments/learned_memory_search_check/
-experiments/factor_evaluation/
