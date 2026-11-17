@@ -50,6 +50,20 @@ class FactorConfig:
     max_bond_leaves: int = 4
     max_member_share: float = 0.75
     max_bond_overlap: float = 0.75
+    memory_lambda_max: float = 0.05
+    memory_warmup_start: int = 0
+    memory_warmup_length: int = 200
+    memory_kappa: float = 5.0
+    memory_epsilon: float = 1e-6
+    memory_veto_confidence: float = 0.3
+    memory_veto_failure_rate: float = 0.7
+    memory_min_quality: float = 0.10
+    memory_high_quality: float = 0.20
+    memory_quality_edges: tuple[float, ...] = (0.05, 0.10, 0.20)
+    memory_signed_quality: bool = False
+    memory_max_correlation: float = 0.70
+    memory_pool_capacity: int = 50
+    memory_children_per_parent: int = 5
 
     def __post_init__(self) -> None:
         if self.max_nodes < 3:
@@ -67,6 +81,24 @@ class FactorConfig:
         for name in ("max_zoo_share", "max_store_share", "max_member_share", "max_bond_overlap"):
             if not 0 < getattr(self, name) <= 1:
                 raise ValueError(f"{name} must be in (0, 1]")
+        if self.memory_warmup_start < 0 or self.memory_warmup_length < 1:
+            raise ValueError("need memory_warmup_start >= 0 and memory_warmup_length >= 1")
+        if self.memory_lambda_max < 0 or self.memory_kappa <= 0 or self.memory_epsilon <= 0:
+            raise ValueError("need memory_lambda_max >= 0, memory_kappa > 0, memory_epsilon > 0")
+        if not 0 <= self.memory_min_quality <= self.memory_high_quality:
+            raise ValueError("need 0 <= memory_min_quality <= memory_high_quality")
+        # TOML gives arrays as lists; keep the config hashable.
+        object.__setattr__(self, "memory_quality_edges", tuple(self.memory_quality_edges))
+        edges = self.memory_quality_edges
+        if not edges or any(b <= a for a, b in zip(edges, edges[1:], strict=False)):
+            raise ValueError("memory_quality_edges must be non-empty and strictly increasing")
+        if not 0 < self.memory_max_correlation <= 1:
+            raise ValueError("memory_max_correlation must be in (0, 1]")
+        if self.memory_pool_capacity < 1 or self.memory_children_per_parent < 1:
+            raise ValueError("memory_pool_capacity and memory_children_per_parent must be >= 1")
+        for name in ("memory_veto_confidence", "memory_veto_failure_rate"):
+            if not 0 <= getattr(self, name) <= 1:
+                raise ValueError(f"{name} must be in [0, 1]")
 
 
 def load_config(path: str | Path | None = None) -> FactorConfig:

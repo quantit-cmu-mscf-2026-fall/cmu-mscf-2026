@@ -44,7 +44,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, get_args
 
 import numpy as np
@@ -101,6 +101,18 @@ class Panel:
     half_spread: pd.DataFrame  # cost of trading one unit of weight, as a fraction
     sic: pd.DataFrame | None = None  # SIC code, for sector neutrality
     data_version: str = ""
+    calendar: pd.DatetimeIndex | None = None
+    availability: dict[str, pd.Series] | None = None
+    company: pd.DataFrame | None = None
+    fundamentals: pd.DataFrame | None = None
+    # Opt-in, execution-scoped cache only for checksum-frozen research inputs.
+    target_cache: dict | None = field(default=None, repr=False, compare=False)
+    # Raw execution closes the share planner sizes with; bound by replay for formation
+    # eligibility. None outside replay.
+    sizing_prices: pd.DataFrame | None = field(default=None, repr=False, compare=False)
+    # Provenance of a post-discovery panel read under authorized access. None for every
+    # discovery panel.
+    provenance: object | None = field(default=None, repr=False, compare=False)
 
 
 def panel_period(panel: Panel) -> list[str]:

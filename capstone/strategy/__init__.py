@@ -1,1 +1,1 @@
-"""Strategy contracts: deterministic orders from a current book and a target book."""
+"""Strategy programs, schedules and contracts: typed factor expressions, orders and specs."""
