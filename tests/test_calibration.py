@@ -58,6 +58,36 @@ class TestMakeFamilySet:
             make_family_set(5, 2, 0.0, 1.0, within_rho=0.0, **SMALL)
 
 
+class TestVariantsPerFamily:
+    """`k` may list each family's variant count (the gate's power analysis);
+    a scalar `k` gives exactly the data it always did."""
+
+    def test_scalar_k_is_unchanged(self):
+        fs = make_family_set(3, 2, 0.34, 1.0, seed=5, n_search=300, n_holdout=100, rho=0.1)
+        # Computed before `k` could be a list.
+        assert np.float64(fs.returns.to_numpy().sum()).hex() == "0x1.36e94c172e08cp+0"
+        assert fs.truth.to_dict() == {"cand_0000": False, "cand_0001": False, "cand_0002": True}
+        assert list(fs.returns.columns) == [f"cand_000{h}_v{j}" for h in range(3) for j in range(2)]
+
+    def test_equal_counts_listed_equal_the_scalar(self):
+        a = make_family_set(4, 3, 0.25, 1.0, seed=1, **SMALL)
+        b = make_family_set(4, [3, 3, 3, 3], 0.25, 1.0, seed=1, **SMALL)
+        pd.testing.assert_frame_equal(a.returns, b.returns, rtol=0, atol=0)
+        pd.testing.assert_series_equal(a.family, b.family)
+        pd.testing.assert_series_equal(a.truth, b.truth)
+
+    def test_each_family_gets_its_own_count(self):
+        fs = make_family_set(3, (2, 5, 1), 0.0, 0.0, seed=2, **SMALL)
+        assert fs.returns.shape[1] == 8
+        assert fs.family.value_counts().sort_index().tolist() == [2, 5, 1]
+        assert list(fs.returns.columns[:3]) == ["cand_0000_v0", "cand_0000_v1", "cand_0001_v0"]
+
+    @pytest.mark.parametrize("k", [[2, 2], [2, 0, 2], 0])
+    def test_bad_counts_are_refused(self, k):
+        with pytest.raises(ValueError, match="k"):
+            make_family_set(3, k, 0.0, 0.0, seed=0, **SMALL)
+
+
 class TestFamilyStatistics:
     def test_designs_and_columns(self):
         fs, stats = _stats(0.1, 1.0, seed=0)

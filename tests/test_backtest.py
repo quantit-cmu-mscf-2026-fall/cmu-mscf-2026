@@ -8,8 +8,11 @@ import pytest
 
 from capstone.backtest import (
     BacktestSummary,
+    backtest_frame,
+    band_book,
     candidate_returns,
     run_backtest,
+    sharpe_ratio,
     summarize,
     sweep,
     to_weights,
@@ -167,6 +170,30 @@ def test_summarize_zero_vol_gives_nan_sharpe_not_error():
     assert np.isnan(summary.sharpe)
 
 
+def test_sharpe_ratio_is_mean_over_sample_sd_annualised():
+    r = pd.Series([0.01, -0.02, 0.03, np.nan, 0.005])
+    clean = r.dropna()
+    expected = clean.mean() / clean.std(ddof=1) * np.sqrt(252)
+    assert sharpe_ratio(r, 252) == pytest.approx(expected, rel=1e-15)
+    assert np.isnan(sharpe_ratio(pd.Series([0.0] * 5), 252))  # no variance
+    assert np.isnan(sharpe_ratio(pd.Series([0.01]), 252))  # one period
+    series = pd.Series(np.random.default_rng(0).normal(0.001, 0.01, 500))
+    for freq, periods in (("daily", 252), ("monthly", 12)):
+        summary = summarize(series, freq=freq)
+        assert summary.sharpe == sharpe_ratio(series, periods)
+        # Exactly the ratio summarize reports, as it was before sharpe_ratio existed.
+        assert summary.sharpe == summary.mean / summary.vol
+
+
+@pytest.mark.parametrize("level", [0.01, -0.002, 0.1, 0.003, 1e-4])
+def test_sharpe_ratio_is_nan_for_a_constant_series(level):
+    # Rounding leaves some constant series with an sd near 1e-18, not 0; a
+    # Sharpe ratio of 1e17 would pass into a p-value as near-certain skill.
+    constant = pd.Series([level] * 100)
+    assert np.isnan(sharpe_ratio(constant, 252))
+    assert np.isnan(summarize(constant, freq="daily").sharpe)
+
+
 def test_cost_bps_reduces_mean_return():
     rng = np.random.default_rng(3)
     dates = pd.bdate_range("2020-01-01", periods=150)
@@ -204,3 +231,265 @@ class TestCandidateReturns:
         swept = sweep(panel)["sharpe"]
         # sweep keeps the zero first row; the difference is one observation.
         np.testing.assert_allclose(sharpe.to_numpy(), swept.to_numpy(), rtol=0.05)
+
+
+# ---------------------------------------------------------------------------
+# Per-asset costs and holding periods (backtest_frame)
+
+
+def _panel(n_dates=60, n_assets=4, seed=0):
+    rng = np.random.default_rng(seed)
+    dates = pd.bdate_range("2015-01-02", periods=n_dates)
+    cols = [f"a{j}" for j in range(n_assets)]
+    signal = pd.DataFrame(rng.standard_normal((n_dates, n_assets)), dates, cols)
+    returns = pd.DataFrame(rng.normal(0, 0.01, (n_dates, n_assets)), dates, cols)
+    return signal, returns
+
+
+def test_a_table_of_one_rate_matches_the_flat_rate():
+    signal, returns = _panel()
+    flat = backtest_frame(signal, returns, cost_bps=7.0, demean=True, gross=1.0)
+    table = pd.DataFrame(7.0, index=signal.index, columns=signal.columns)
+    per_asset = backtest_frame(signal, returns, cost_bps=table, demean=True, gross=1.0)
+    pd.testing.assert_frame_equal(flat, per_asset)
+
+
+def test_each_asset_pays_its_own_rate_on_the_trade_date():
+    signal, returns = _panel(n_dates=5, n_assets=2)
+    signal.loc[:] = [1.0, -1.0]  # one fixed book: the only trade builds it
+    rate = pd.DataFrame([[10.0, 30.0]] * 5, index=signal.index, columns=signal.columns)
+    rate.iloc[0] = [20.0, 40.0]  # the book is built at the first close
+    frame = backtest_frame(signal, returns, cost_bps=rate, demean=True, gross=1.0)
+    # Weights +0.5 / -0.5, bought at the first date's rates, charged on the second.
+    assert frame["cost"].iloc[1] == pytest.approx(0.5 * 20e-4 + 0.5 * 40e-4)
+    assert (frame["cost"].iloc[2:] == 0.0).all()
+    np.testing.assert_allclose(frame["net"], frame["gross"] - frame["cost"])
+
+
+def test_a_missing_rate_pays_that_days_median():
+    signal, returns = _panel(n_dates=5, n_assets=3)
+    signal.loc[:] = [1.0, 0.0, -1.0]
+    rate = pd.DataFrame(10.0, index=signal.index, columns=signal.columns)
+    rate.iloc[0] = [np.nan, 20.0, 40.0]
+    frame = backtest_frame(signal, returns, cost_bps=rate, demean=True, gross=1.0)
+    assert frame["cost"].iloc[1] == pytest.approx(0.5 * 30e-4 + 0.5 * 40e-4)
+
+
+@pytest.mark.parametrize(
+    "break_table",
+    [
+        pytest.param(lambda r: r.drop(r.index[2]), id="a date missing from the table"),
+        pytest.param(lambda r: r.iloc[:3], id="a table that ends early"),
+        pytest.param(lambda r: r.set_axis(r.index.strftime("%Y-%m-%d")), id="string dates"),
+    ],
+)
+def test_a_trade_with_no_rate_at_all_raises_instead_of_trading_free(break_table):
+    # With every asset missing, the day's median is NaN too, and `.sum` used to
+    # charge those trades nothing: a string-dated table cost 0.0 in total.
+    signal, returns = _panel(n_dates=6, n_assets=3)
+    rate = pd.DataFrame(10.0, index=signal.index, columns=signal.columns)
+    with pytest.raises(ValueError, match="no rate for trades"):
+        backtest_frame(signal, returns, cost_bps=break_table(rate), demean=True, gross=1.0)
+
+
+def test_an_untraded_date_needs_no_rate():
+    # Only trades need a price: a held book on a date with no rates is fine.
+    signal, returns = _panel(n_dates=6, n_assets=3)
+    signal.loc[:] = [1.0, 0.0, -1.0]  # one book, built on day 0 and never changed
+    rate = pd.DataFrame(10.0, index=signal.index, columns=signal.columns)
+    rate.iloc[2:] = np.nan
+    frame = backtest_frame(signal, returns, cost_bps=rate, demean=True, gross=1.0)
+    assert frame["cost"].iloc[1] == pytest.approx(10e-4)
+    assert (frame["cost"].iloc[2:] == 0).all()
+
+
+def test_holding_trades_only_on_rebalance_dates():
+    signal, returns = _panel(n_dates=60)
+    daily = backtest_frame(signal, returns, cost_bps=10.0, demean=True, gross=1.0)
+    held = backtest_frame(signal, returns, cost_bps=10.0, demean=True, gross=1.0, hold=10)
+    traded = held["turnover"].fillna(0) > 0
+    # A rebalance at date t (every 10th from the first) is charged at t + 1.
+    assert set(np.flatnonzero(traded)) <= {1, 11, 21, 31, 41, 51}
+    assert held["turnover"].sum() < daily["turnover"].sum()
+    with pytest.raises(ValueError, match="hold"):
+        backtest_frame(signal, returns, cost_bps=10.0, demean=True, gross=1.0, hold=0)
+
+
+def test_a_warm_up_is_left_out_when_holding_too():
+    signal, returns = _panel(n_dates=40)
+    signal.iloc[:12] = np.nan  # no signal for 12 dates
+    held = backtest_frame(signal, returns, cost_bps=10.0, demean=True, gross=1.0, hold=5)
+    # The first rebalance with a signal is date 15; its book is held from 16.
+    assert held["net"].iloc[:16].isna().all()
+    assert held["net"].iloc[16:].notna().all()
+
+
+# ---------------------------------------------------------------------------
+# No-trade band (backtest_frame's band=, band_book)
+
+
+@pytest.mark.parametrize("hold", [1, 3])
+def test_band_zero_is_the_backtest_without_one(hold):
+    signal, returns = _panel(n_dates=80, n_assets=6, seed=7)
+    signal.iloc[:5] = np.nan  # a warm-up, so the idle rule is exercised too
+    rate = pd.DataFrame(
+        np.random.default_rng(8).uniform(2, 20, signal.shape), signal.index, signal.columns
+    )
+    kwargs = dict(cost_bps=rate, demean=True, gross=1.0, hold=hold)
+    pd.testing.assert_frame_equal(
+        backtest_frame(signal, returns, band=0.0, **kwargs),
+        backtest_frame(signal, returns, **kwargs),
+        check_exact=True,
+    )
+
+
+def _small_book():
+    dates = pd.bdate_range("2015-01-05", periods=4)
+    return pd.DataFrame(
+        [
+            [0.5, -0.5, 0.0, 0.0],
+            [0.45, -0.35, 0.1, -0.1],  # names 1-3 move, name 0 stays (0.05 <= band)
+            [0.47, -0.37, 0.08, -0.08],  # every name inside the band: nothing trades
+            [np.nan, -0.5, 0.25, 0.25],  # name 0 has no signal: closed
+        ],
+        index=dates,
+        columns=["a", "b", "c", "d"],
+    )
+
+
+def test_the_band_rule_on_a_small_book():
+    signal = _small_book()
+    weights = signal.fillna(0.0)  # rows already sum to gross 1 in absolute value
+    book = band_book(weights, signal.isna(), band=0.06)
+    row1 = np.array([0.5, -0.35, 0.1, -0.1])  # not rescaled: the kept name stays where it was
+    expected = np.vstack([[0.5, -0.5, 0.0, 0.0], row1, row1, [0.0, -0.5, 0.25, 0.25]])
+    np.testing.assert_allclose(book.to_numpy(), expected, rtol=0, atol=1e-15)
+
+    frame = backtest_frame(signal, signal * 0.0, cost_bps=10.0, demean=False, gross=1.0, band=0.06)
+    # turnover on date t is |book[t-1] - book[t-2]|, the trade made at t-1's close
+    turnover = np.abs(np.diff(np.vstack([np.zeros(4), expected[:-1]]), axis=0)).sum(axis=1)
+    np.testing.assert_allclose(frame["turnover"].to_numpy()[1:], turnover, atol=1e-15)
+    np.testing.assert_allclose(frame["cost"], frame["turnover"] * 10e-4, atol=1e-18)
+    assert frame["turnover"].iloc[3] == 0.0  # the day after the all-inside-band day
+
+
+def test_the_band_holds_between_rebalances():
+    signal = _small_book()
+    book = band_book(signal.fillna(0.0), signal.isna(), band=0.06, hold=2)
+    np.testing.assert_array_equal(book.iloc[1].to_numpy(), book.iloc[0].to_numpy())
+    # Against the book held since row 0: name a stays (0.03 <= band), the rest move.
+    expected = np.array([0.5, -0.37, 0.08, -0.08])
+    np.testing.assert_allclose(book.iloc[2].to_numpy(), expected, rtol=0, atol=1e-15)
+    np.testing.assert_array_equal(book.iloc[3].to_numpy(), book.iloc[2].to_numpy())
+
+
+def test_an_empty_target_book_goes_flat_inside_a_band():
+    dates = pd.bdate_range("2015-01-05", periods=2)
+    weights = pd.DataFrame([[0.5, -0.5], [0.0, 0.0]], index=dates, columns=["a", "b"])
+    book = band_book(weights, weights.isna(), band=0.9)
+    assert (book.iloc[1] == 0.0).all()
+
+
+@pytest.mark.parametrize("band", [-0.001, float("nan"), float("inf")])
+def test_an_invalid_band_is_refused(band):
+    signal, returns = _panel(n_dates=10)
+    with pytest.raises(ValueError, match="band"):
+        backtest_frame(signal, returns, cost_bps=10.0, demean=True, gross=1.0, band=band)
+    with pytest.raises(ValueError, match="band"):
+        band_book(signal, signal.isna(), band=band)
+
+
+def test_a_banded_backtest_keeps_the_idle_rule_and_each_assets_rate():
+    signal, returns = _panel(n_dates=40, n_assets=5, seed=3)
+    signal.iloc[:12] = np.nan  # no signal for 12 dates
+    rate = pd.DataFrame(
+        np.random.default_rng(4).uniform(2, 20, signal.shape), signal.index, signal.columns
+    )
+    frame = backtest_frame(
+        signal, returns, cost_bps=rate, demean=True, gross=1.0, hold=5, band=0.05
+    )
+    # As without a band: the first rebalance with a signal is date 15, held from 16.
+    assert frame["net"].iloc[:16].isna().all()
+    assert frame["net"].iloc[16:].notna().all()
+    book = band_book(to_weights(signal), signal.isna(), band=0.05, hold=5)
+    trades = book.shift(1).fillna(0.0).diff().abs()
+    cost = (trades * rate.shift(1) / 10000.0).sum(axis=1)
+    np.testing.assert_allclose(frame["cost"].iloc[16:], cost.iloc[16:], rtol=1e-12)
+
+
+BANDS = (0.0, 0.0025, 0.005, 0.01, 0.02, 0.04)
+
+
+@pytest.fixture(scope="module")
+def synth_market():
+    panel = make_panel(n_dates=500, n_assets=30, n_candidates=1, n_real=1, effect_size=0.1, seed=0)
+    return panel.signals["cand_0000"], panel.returns
+
+
+@pytest.mark.parametrize(("window", "hold"), [(1, 1), (1, 5), (10, 1), (10, 5)])
+def test_turnover_and_cost_fall_as_the_band_widens(synth_market, window, hold):
+    # A raw synth signal is new every day; its 10-day mean is persistent.
+    signal, returns = synth_market
+    signal = signal.rolling(window).mean()
+    frames = [
+        backtest_frame(signal, returns, cost_bps=10.0, demean=True, gross=1.0, hold=hold, band=b)
+        for b in BANDS
+    ]
+    turnover = np.array([f["turnover"].mean() for f in frames])
+    cost = np.array([f["cost"].mean() for f in frames])
+    assert (np.diff(turnover) <= 1e-12).all()
+    assert (np.diff(cost) <= 1e-12).all()
+    assert turnover[-1] < 0.85 * turnover[0]
+    target = to_weights(signal)
+    for b in BANDS[1:]:
+        book = band_book(target, signal.isna(), band=b, hold=hold)
+        rebalance = np.arange(len(book)) % hold == 0
+        off = (book - target).abs().to_numpy()[rebalance]
+        assert (off <= b + 1e-12).all()  # every name within the band of its target
+
+
+def _assert_banded(book, target, band, hold=1):
+    """Every rebalance: each name within `band` of its target, and a live
+    target is never left flat or levered onto a few names."""
+    rebalance = np.arange(len(book)) % hold == 0
+    b, w = book.to_numpy()[rebalance], target.to_numpy()[rebalance]
+    assert (np.abs(b - w) <= band + 1e-12).all()
+    live = np.abs(w).sum(axis=1) > 0
+    assert (np.abs(b[live]).sum(axis=1) > 0).all()
+    assert np.abs(b).max() <= np.abs(w).max() + band + 1e-12
+    # Demeaned targets net to zero, so the net is at most the kept names' slack.
+    kept = (np.abs(b - w) > 0).sum(axis=1)
+    assert (np.abs(b.sum(axis=1)) <= kept * band + 1e-12).all()
+
+
+@pytest.mark.parametrize("hold", [1, 5])
+@pytest.mark.parametrize("band", [0.005, 0.02, 0.06])
+def test_a_band_wider_than_one_over_n_stays_near_its_target(band, hold):
+    # 200 names: 1/N is 0.005 and the largest target weight is about 0.02, so
+    # most names sit inside a 0.02 band of zero. The book must stay within the
+    # band of its target, not concentrate gross on the few names that trade.
+    panel = make_panel(n_dates=250, n_assets=200, n_candidates=1, n_real=1, effect_size=0.1, seed=0)
+    signal = panel.signals["cand_0000"].rolling(10).mean()
+    target = to_weights(signal)
+    book = band_book(target, signal.isna(), band=band, hold=hold)
+    _assert_banded(book, target, band, hold)
+    # The first rebalance with a signal opens the whole target book.
+    live = target.abs().sum(axis=1).to_numpy() > 0
+    first = int(np.argmax(live & (np.arange(len(target)) % hold == 0)))
+    np.testing.assert_array_equal(book.iloc[first].to_numpy(), target.iloc[first].to_numpy())
+
+
+def test_a_wide_band_on_one_small_book_keeps_names_not_gross():
+    dates = pd.bdate_range("2015-01-05", periods=2)
+    first = np.array([0.30, 0.05, -0.05, -0.30, 0.04, -0.04, 0.03, -0.03, 0.08, -0.08])
+    second = np.array([0.20, 0.09, -0.01, -0.36, 0.0, -0.08, 0.06, 0.0, 0.10, 0.0])
+    second = second - second.mean()
+    target = pd.DataFrame([first / np.abs(first).sum(), second / np.abs(second).sum()], dates)
+    book = band_book(target, target.isna(), band=0.06)
+    _assert_banded(book, target, 0.06)
+    # A flat book opens at its target; then only the names more than 0.06 off move.
+    np.testing.assert_array_equal(book.iloc[0].to_numpy(), target.iloc[0].to_numpy())
+    w0, w1 = target.to_numpy()
+    expected = np.where(np.abs(w1 - w0) > 0.06, w1, w0)
+    np.testing.assert_array_equal(book.iloc[1].to_numpy(), expected)
+    assert (expected != w0).any() and (expected == w0).any()  # both rules exercised
