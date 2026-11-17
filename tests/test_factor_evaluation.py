@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 
 from capstone import shared_data as sd
-from capstone.backtest import backtest_components, backtest_frame
+from capstone.backtest import backtest_components, backtest_frame, sharpe_ratio, summarize
 from capstone.factors import evaluation as ev
 from capstone.factors.evaluation import (
     HoldoutError,
@@ -186,6 +186,56 @@ def test_every_variant_is_a_logged_trial_and_a_column(tmp_path, monkeypatch):
     assert isinstance(panel, Panel)
 
 
+def test_a_caller_can_tag_its_variants_on_the_ledger(tmp_path, monkeypatch):
+    # The end-to-end driver scopes a run's trial count by a run tag.
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    panel = build_panel(fake_rows(n_stocks=6, n_days=40))
+    evaluate_factors({"f1": parse("volume")}, panel, tags=["e2e-run:x"])
+    evaluate_factors({"f1": parse("volume")}, panel)
+    entries = [json.loads(line) for line in (tmp_path / "runs.jsonl").read_text().splitlines()]
+    assert [e["tags"] for e in entries] == [["evaluation", "e2e-run:x"], ["evaluation"]]
+
+
+def test_a_tag_is_on_a_factor_that_cannot_be_computed_too(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    panel = build_panel(fake_rows(n_stocks=6, n_days=40))
+
+    def failing(tree, fields):
+        raise ValueError("cannot compute")
+
+    monkeypatch.setattr(ev, "evaluate", failing)
+    evaluate_factors({"f1": parse("volume")}, panel, tags=["e2e-run:x"])
+    entries = [json.loads(line) for line in (tmp_path / "runs.jsonl").read_text().splitlines()]
+    assert [e["tags"] for e in entries] == [["evaluation", "e2e-run:x"]]
+    assert entries[0]["metrics"] == {"error": "cannot compute"}
+
+
+def test_evaluation_logs_the_panels_own_period(tmp_path, monkeypatch):
+    from capstone.runlog import read_entries
+
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    rows = fake_rows(n_stocks=9, n_days=60, start="2016-03-01")
+    evaluate_factors({"f": parse("volume")}, build_panel(rows))
+    (entry,) = read_entries()
+    assert entry["params"]["period"] == ["2016-03-01", "2016-05-23"]
+
+
+def test_evaluate_factors_refuses_a_panel_that_holds_the_holdout(tmp_path, monkeypatch):
+    # build_panel refuses holdout dates; a panel assembled by hand must be
+    # refused at the evaluator too, before any trial is logged.
+    import dataclasses
+
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    panel = build_panel(fake_rows(n_stocks=6, n_days=40))
+    late = panel.universe.copy()
+    late.index = pd.bdate_range("2020-12-01", periods=len(late))
+    late.index = late.index[:-1].append(pd.DatetimeIndex(["2021-02-01"]))
+    held = dataclasses.replace(panel, universe=late)
+    with pytest.raises(HoldoutError):
+        evaluate_factors({"f1": parse("volume")}, held)
+    assert not (tmp_path / "runs.jsonl").exists()
+
+
 def test_variants_are_recorded_in_the_store(tmp_path, monkeypatch):
     from capstone.factors import store
 
@@ -340,6 +390,61 @@ def test_a_correction_excludes_entries_without_deleting_them(tmp_path, monkeypat
     assert len(read_entries()) == 5  # nothing deleted
 
 
+# ---------------------------------------------------------------------------
+# The screen statistic
+
+
+def test_the_screen_pvalue_is_one_sided():
+    panel = build_panel(fake_rows(n_days=500, planted=0.004))
+    assert ev.screen_pvalue(factor_returns(parse("volume"), panel).net) < 0.01
+    assert ev.screen_pvalue(factor_returns(parse("-volume"), panel).net) > 0.99
+
+
+@pytest.mark.parametrize("ar1", [0.0, 0.3])
+def test_the_screen_pvalue_holds_its_size_on_signal_free_returns(ar1):
+    # 400 zero-mean series of 1,000 days: about 5% should fall below 0.05, with
+    # autocorrelated returns too, since the variance is HAC.
+    rng = np.random.default_rng(7)
+    shocks = rng.standard_t(5, (1000, 400)) * 0.01
+    returns = np.empty_like(shocks)
+    returns[0] = shocks[0]
+    for t in range(1, len(shocks)):
+        returns[t] = ar1 * returns[t - 1] + shocks[t]
+    p = np.array([ev.screen_pvalue(pd.Series(returns[:, j])) for j in range(400)])
+    assert 0.02 <= np.mean(p < 0.05) <= 0.09
+    assert 0.4 <= np.median(p) <= 0.6
+
+
+def test_the_screen_pvalue_is_nan_without_variance():
+    assert np.isnan(ev.screen_pvalue(pd.Series([0.0] * 50)))
+    assert np.isnan(ev.screen_pvalue(pd.Series([np.nan, 0.01])))
+
+
+def test_each_variant_logs_its_screen_pvalue_and_names_its_family(tmp_path, monkeypatch):
+    from capstone.factors import store
+
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    con = store.connect(tmp_path / "factors.db")
+    store.add_paper(con, "p", "Paper")
+    h1 = store.add_hypothesis(con, store.Hypothesis("p", "volume", "k", "j", "s", "f"))
+    h2 = store.add_hypothesis(con, store.Hypothesis("p", "reversal", "k", "j", "s", "f"))
+    f1, _ = store.add_factor(con, parse("volume"), h1)
+    f2, _ = store.add_factor(con, parse("ts_mean(returns, 5)"), h2)
+    store.add_factor(con, parse("volume"), h2)  # proposed again: a duplicate, stays in h1
+    families = {fid: ev.hypothesis_of(con, fid) for fid in (f1, f2)}
+    assert families == {f1: h1, f2: h2}
+
+    panel = build_panel(fake_rows(n_stocks=12, n_days=80))
+    trees = {f1: parse("volume"), f2: parse("ts_mean(returns, 5)")}
+    matrix, summary = evaluate_factors(trees, panel, families=families)
+    entries = [json.loads(line) for line in (tmp_path / "runs.jsonl").read_text().splitlines()]
+    for entry, vid in zip(entries, matrix.columns, strict=True):
+        p = entry["metrics"]["pvalue_screen"]
+        assert p == pytest.approx(ev.screen_pvalue(matrix[vid]))
+        assert summary.loc[vid, "pvalue_screen"] == pytest.approx(p)
+    assert list(summary["hypothesis_id"]) == [h1, h2]
+
+
 def test_a_lookback_warming_up_is_not_counted_as_flat_days():
     # Before ts_mean(returns, 63) has a value there is no position: those days
     # are NaN, not 0.0, so they don't pad the series and pull its Sharpe to 0.
@@ -456,3 +561,32 @@ def test_a_day_with_signals_but_no_sectors_is_flat_not_missing():
     result = factor_returns(parse("volume"), panel, ev.TradingSpec(neutral="sector"))
     assert result.net.iloc[1:].notna().all()
     assert (result.gross.iloc[22:24] == 0.0).all()
+
+
+def test_factor_sharpe_is_the_backtest_summary_sharpe():
+    # One Sharpe ratio, `backtest.sharpe_ratio`, for returns, summaries and the
+    # full-spread metric alike.
+    result = factor_returns(parse("volume"), build_panel(fake_rows(n_days=300, planted=0.002)))
+    for which in ("net", "gross", "net_full_spread"):
+        series = getattr(result, which)
+        assert result.sharpe(which) == sharpe_ratio(series, ev.PERIODS_PER_YEAR)
+        assert abs(result.sharpe(which) - summarize(series).sharpe) < 1e-12
+
+
+def test_the_logged_full_spread_sharpe_is_the_shared_sharpe(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    panel = build_panel(fake_rows(n_days=300, planted=0.002), data_version="v-test")
+    _, summary = evaluate_factors({"f1": parse("volume")}, panel)
+    net_full = factor_returns(parse("volume"), panel).net_full_spread
+    expected = sharpe_ratio(net_full, ev.PERIODS_PER_YEAR)
+    assert summary["sharpe_net_full_spread"].iloc[0] == expected
+
+
+@pytest.mark.parametrize("level", [0.001, 0.0007])
+def test_a_constant_return_series_has_no_sharpe(level):
+    # The shared Sharpe is NaN without spread; a mean over a rounding-error sd is not a Sharpe.
+    # 0.001 has an sd of exactly 0; 0.0007 leaves one of about 1e-19, where a plain
+    # `sd > 0` test reports a Sharpe of about 1e17.
+    flat = pd.Series(level, index=pd.date_range("2020-01-01", periods=50))
+    result = ev.FactorReturns(flat, flat, flat, flat)
+    assert np.isnan(result.sharpe("net"))

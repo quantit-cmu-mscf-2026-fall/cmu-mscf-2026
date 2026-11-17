@@ -13,6 +13,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+intake = ["pypdf==6.19.0"]  # optional PDF text extraction; tests importorskip it
 dev = ["pytest>=7.0", "ruff==0.15.5"]  # pinned: an unpinned linter reds CI on its own schedule
 agents = ["anthropic>=1.0"]  # capstone.factors model calls; tests use a fake client
 
