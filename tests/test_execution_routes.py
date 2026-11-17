@@ -49,6 +49,12 @@ def absent(monkeypatch):
     """Every lazily registered module is missing, whatever the build contains."""
     for name in LAZY_MODULES:
         monkeypatch.setitem(sys.modules, name, None)
+    # The module-level version tables were read at import; a build without the benchmark
+    # module has no full-window benchmark versions.
+    monkeypatch.setattr(contracts, "FULL_WINDOW_BENCHMARK_VERSIONS", ())
+    monkeypatch.setattr(
+        contracts, "BENCHMARK_VERSIONS", tuple(prefix_protocol.BENCHMARK_PREFIX_VERSIONS)
+    )
     contracts._kind.cache_clear()
 
 
