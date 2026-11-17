@@ -14,19 +14,22 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "ruff==0.15.5"]  # pinned: an unpinned linter reds CI on its own schedule
+agents = ["anthropic>=1.0"]  # capstone.factors model calls; tests use a fake client
+intake = ["pypdf==6.19.0"]  # optional PDF text extraction; tests importorskip it
 
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["capstone", "capstone.incubation", "capstone.pipeline"]
+packages = ["capstone", "capstone.incubation", "capstone.pipeline", "capstone.pipeline.autopilot", "capstone.pipeline.autopilot.ops", "capstone.factors", "capstone.strategy"]  # list every subpackage (tests check)
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
     "network: requires internet access (skips cleanly if unavailable)",
     "data: requires the team's shared data locally (skips cleanly if absent)",
+    "report: writes a checkpoint report; runs only with --report",
 ]
 
 [tool.ruff]
