@@ -1,8 +1,8 @@
 """Annual fundamentals known at the time (QUANTIT-118).
 
-Synthetic frames only: a business-day calendar, hand-made accounting rows and
-fake Compustat/link frames. The shared-data loader is checked with a fake
-`sd.load`; nothing reads CRSP or Compustat.
+Synthetic frames only: a business-day calendar, hand-made accounting rows,
+fake Compustat/link frames and `fake_rows` for the daily file. The shared-data
+loader is checked with a fake `sd.load`; nothing reads CRSP or Compustat.
 """
 
 from __future__ import annotations
@@ -10,11 +10,25 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
+from test_factor_evaluation import fake_rows
 
 from capstone import shared_data as sd
+from capstone.factors import evaluation as ev
 from capstone.factors import fundamentals as fu
 from capstone.factors import tree
-from capstone.factors.tree import FIELDS, FUNDAMENTAL_FIELDS, ParseError, parse
+from capstone.factors.evaluation import build_panel, evaluate_factors, factor_returns
+from capstone.factors.interpret import EvaluationError, evaluate
+from capstone.factors.tree import (
+    FIELDS,
+    FUNDAMENTAL_FIELDS,
+    STOCK_FIELDS,
+    ParseError,
+    factor_id,
+    features_used,
+    identity_key,
+    parse,
+    unparse,
+)
 
 DATES = pd.bdate_range("2015-01-02", periods=320)
 PERMNOS = pd.Index([10000, 10001, 10002])
@@ -33,14 +47,42 @@ def field(rows, name, permno=10000) -> pd.Series:
 # The field set
 
 
-def test_the_fundamental_fields_are_a_small_standard_set_outside_the_grammar():
+def test_the_fundamental_fields_are_a_small_standard_set():
     assert FUNDAMENTAL_FIELDS == ("book", "earnings", "sales", "assets")
     assert fu.FUNDAMENTAL_COLUMNS == ("permno", "datadate", *FUNDAMENTAL_FIELDS)
-    # Not grammar fields yet: no tree can name one, and existing fields are unchanged.
-    assert not set(FUNDAMENTAL_FIELDS) & set(FIELDS)
-    assert FIELDS == (*tree.OHLCV, "returns", "shares", "cap")
+    assert set(FUNDAMENTAL_FIELDS) <= set(FIELDS)
+    # The daily stock fields (what edits draw from) are unchanged.
+    assert STOCK_FIELDS == (*tree.OHLCV, "returns", "shares", "cap")
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "rank(book / cap)",
+        "earnings / cap",
+        "-delta(assets, 252) / shift(assets, 252)",
+        "rank(earnings / book) + rank(sales / assets)",
+        "rank(book)",  # a fundamental alone is a per-stock field
+    ],
+)
+def test_a_tree_using_a_fundamental_parses_and_round_trips(expression):
+    node = parse(expression)
+    assert features_used(node) & set(FUNDAMENTAL_FIELDS)
+    again = parse(unparse(node))
+    assert again == node
+    assert identity_key(again) == identity_key(node)
+    assert factor_id(again) == factor_id(node)
+
+
+@pytest.mark.parametrize("expression", ["rank(bookx)", "ebitda / cap", "rank(ceq)", "book(close)"])
+def test_unknown_fields_still_raise(expression):
     with pytest.raises(ParseError):
-        parse("rank(book / cap)")
+        parse(expression)
+
+
+def test_a_factor_from_market_fields_alone_is_still_rejected():
+    with pytest.raises(ParseError, match="no stock field"):
+        parse("ts_mean(mkt_return, 5)")
 
 
 # ---------------------------------------------------------------------------
@@ -308,3 +350,120 @@ def test_loading_goes_through_shared_data_and_keeps_nothing_after_end(monkeypatc
     assert asked == ["comp_funda", "ccm_link"]
     assert list(out["datadate"]) == [pd.Timestamp("2013-12-31")]
     assert set(out["permno"]) == {10000}
+
+
+# ---------------------------------------------------------------------------
+# Evaluation
+
+ROWS = fake_rows(n_stocks=6, n_days=320, start="2015-01-02")
+CALENDAR = pd.DatetimeIndex(sorted(ROWS["date"].unique()))
+
+
+def fake_fundamentals(rows: pd.DataFrame, *, seed=0) -> pd.DataFrame:
+    """Annual accounting rows for `fake_rows`' permnos: one row per permno and
+    December fiscal year end, from two years before the first date to the
+    last, deterministic from `seed`."""
+    rng = np.random.default_rng([seed, 7])
+    dates = pd.DatetimeIndex(rows["date"])
+    out = []
+    for permno in sorted(rows["permno"].unique()):
+        assets = float(np.exp(rng.normal(8.0, 0.5)))
+        for year in range(dates.min().year - 2, dates.max().year + 1):
+            assets *= float(np.exp(rng.normal(0.05, 0.1)))
+            out.append(
+                {
+                    "permno": permno,
+                    "datadate": pd.Timestamp(year, 12, 31),
+                    "book": assets * rng.uniform(0.2, 0.6),
+                    "earnings": assets * rng.normal(0.05, 0.03),
+                    "sales": assets * rng.uniform(0.5, 1.5),
+                    "assets": assets,
+                }
+            )
+    return pd.DataFrame(out)
+
+
+EXISTING = [
+    "volume / shares",
+    "rank(volume) - rank(ts_mean(volume, 10))",
+    "-ts_sum(returns, 5)",
+    "ts_corr(returns, mkt_return, 10)",
+    "rank(ts_mean(volume, 5)) - rank(delta(close, 3))",
+]
+
+
+def test_a_fundamentals_frame_without_its_columns_is_refused():
+    frame = pd.DataFrame([one_row(10000, "2014-12-31")]).drop(columns="earnings")
+    with pytest.raises(ValueError, match="earnings"):
+        build_panel(ROWS, fundamentals=frame)
+
+
+def test_existing_trees_evaluate_bit_identically_with_and_without_fundamentals():
+    plain = build_panel(ROWS, "v")
+    rich = build_panel(ROWS, "v", fundamentals=fake_fundamentals(ROWS))
+    assert set(rich.fields) == set(plain.fields) | set(FUNDAMENTAL_FIELDS)
+    for name, value in plain.fields.items():
+        if isinstance(value, pd.Series):
+            pd.testing.assert_series_equal(value, rich.fields[name], check_exact=True)
+        else:
+            pd.testing.assert_frame_equal(value, rich.fields[name], check_exact=True)
+    for expression in EXISTING:
+        node = parse(expression)
+        pd.testing.assert_frame_equal(
+            evaluate(node, plain.fields), evaluate(node, rich.fields), check_exact=True
+        )
+        for hold in (1, 5):
+            a, b = factor_returns(node, plain, hold), factor_returns(node, rich, hold)
+            pd.testing.assert_series_equal(a.net, b.net, check_exact=True)
+            pd.testing.assert_series_equal(a.turnover, b.turnover, check_exact=True)
+
+
+def test_a_fundamental_tree_evaluates_to_its_formula():
+    fund = fake_fundamentals(ROWS)
+    panel = build_panel(ROWS, fundamentals=fund)
+    got = evaluate(parse("rank(book / cap)"), panel.fields)
+    expected = (panel.fields["book"] / panel.fields["cap"]).rank(axis=1, pct=True)
+    pd.testing.assert_frame_equal(got, expected, check_exact=True)
+    # December year ends: the first visible value is 90 days later, in April.
+    first = got.dropna(how="all").index[0]
+    assert first == sd.available_from(fund, CALENDAR, report_col=None).dropna().min()
+    returns = factor_returns(parse("rank(book / cap)"), panel)
+    assert returns.net.notna().sum() > 0
+
+
+def test_a_fundamental_tree_on_a_panel_without_fundamentals_is_a_logged_error(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    panel = build_panel(ROWS, "v")
+    with pytest.raises(EvaluationError, match="book"):
+        evaluate(parse("rank(book / cap)"), panel.fields)
+    matrix, summary = evaluate_factors({"f": parse("rank(book / cap)")}, panel)
+    assert matrix.empty and summary.empty
+    lines = (tmp_path / "runs.jsonl").read_text().splitlines()
+    assert len(lines) == 1 and "book" in lines[0]
+
+
+def test_load_panel_wires_fundamentals_through_shared_data(monkeypatch):
+    asked = []
+
+    def fake_load(name, columns=None, start=None, end=None, **kwargs):
+        asked.append(name)
+        if name == ev.DAILY_FILE:
+            return fake_rows(n_stocks=3, n_days=300, start="2015-01-02")
+        frame = {"comp_funda": fake_funda(), "ccm_link": fake_link()}[name]
+        assert set(columns) <= set(frame.columns)
+        return frame[columns]
+
+    monkeypatch.setattr(sd, "load", fake_load)
+    monkeypatch.setattr(sd, "data_version", lambda: "test-version")
+    plain = ev.load_panel()
+    assert asked == [ev.DAILY_FILE]
+    assert not set(FUNDAMENTAL_FIELDS) & set(plain.fields)
+    panel = ev.load_panel(fundamentals=True)
+    assert set(asked[1:]) == {ev.DAILY_FILE, "comp_funda", "ccm_link"}
+    book = panel.fields["book"][10000]
+    switch = pd.Timestamp("2015-04-01")  # FY2014: 2014-12-31 + 90 days, then the next day
+    np.testing.assert_allclose(book.loc[book.index < switch], 10.5)  # FY2013 from day one
+    np.testing.assert_allclose(book.loc[book.index >= switch], 10.0)
+    assert panel.fields["book"][10001].isna().all()  # its year ended before its link began

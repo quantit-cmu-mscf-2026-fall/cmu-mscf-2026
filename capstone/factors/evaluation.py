@@ -11,7 +11,9 @@ validation stack), one column per `factor_id`.
   volume multiplied by its share factor, so a split moves nothing. Returns
   come from every row through `sd.daily_returns` (delistings included);
   holdings only from `in_universe`. `mkt_return` is the universe's
-  value-weighted return, weighted by the previous day's cap.
+  value-weighted return, weighted by the previous day's cap. Optionally the
+  annual accounting fields too (`capstone.factors.fundamentals`), each value
+  visible only from its `sd.available_from` date.
 - **Holdout guard**: the discovery period ends `DISCOVERY_END`; nothing after
   it is loaded, and a panel holding a later date is refused.
 - **Factor to returns** (`factor_returns`): the factor's value on universe
@@ -54,6 +56,7 @@ from capstone import shared_data as sd
 from capstone.backtest import backtest_frame, sharpe_ratio, to_weights
 from capstone.evaluate import sharpe_test
 from capstone.factors import store
+from capstone.factors.fundamentals import fundamental_fields, load_fundamentals
 from capstone.factors.interpret import evaluate
 from capstone.factors.tree import Node, unparse
 from capstone.runlog import log_run
@@ -123,8 +126,17 @@ def require_discovery(panel: Panel) -> None:
     _check_dates(pd.Index(panel.universe.index))
 
 
-def build_panel(daily: pd.DataFrame, data_version: str = "") -> Panel:
-    """The panel from daily rows (the `COLUMNS` of the shared daily file)."""
+def build_panel(
+    daily: pd.DataFrame, data_version: str = "", *, fundamentals: pd.DataFrame | None = None
+) -> Panel:
+    """The panel from daily rows (the `COLUMNS` of the shared daily file).
+
+    With `fundamentals` (`fundamentals.FUNDAMENTAL_COLUMNS` rows: permno,
+    fiscal year end `datadate`, one column per accounting field), the panel
+    also has the grammar's `FUNDAMENTAL_FIELDS`, each value visible from its
+    `sd.available_from` date (annual rule) and held until the next year's.
+    The daily fields are the same with or without them.
+    """
     _check_dates(pd.Index(daily["date"]))
     rows = daily.assign(
         returns=sd.daily_returns(daily),
@@ -150,6 +162,9 @@ def build_panel(daily: pd.DataFrame, data_version: str = "") -> Panel:
     }
     universe = wide("universe").fillna(False).astype(bool)
     fields["mkt_return"] = _market_return(fields["returns"], fields["cap"], universe)
+    if fundamentals is not None:
+        close = fields["close"]
+        fields.update(fundamental_fields(fundamentals, close.index, close.columns))
     half_spread = wide("spread") / 2
     sic = wide("siccd") if "siccd" in rows else None
     return Panel(fields, universe, half_spread, sic, data_version)
@@ -169,13 +184,18 @@ def _market_return(returns: pd.DataFrame, cap: pd.DataFrame, universe: pd.DataFr
     return out.rename("mkt_return")
 
 
-def load_panel(start: str = DISCOVERY_START, end: str = DISCOVERY_END) -> Panel:
+def load_panel(
+    start: str = DISCOVERY_START, end: str = DISCOVERY_END, *, fundamentals: bool = False
+) -> Panel:
     """The discovery-period panel from the shared data. An `end` after the
-    discovery period raises: the holdout is never loaded here."""
+    discovery period raises: the holdout is never loaded here. `fundamentals`
+    adds the accounting fields (`fundamentals.load_fundamentals`: fiscal
+    years ending by `end`, each visible from its availability date)."""
     if pd.Timestamp(end) > pd.Timestamp(DISCOVERY_END):
         raise HoldoutError(f"end {end} is after the discovery period, which ends {DISCOVERY_END}")
     daily = sd.load(DAILY_FILE, columns=COLUMNS, start=start, end=end)
-    return build_panel(daily, sd.data_version())
+    fund = load_fundamentals(end) if fundamentals else None
+    return build_panel(daily, sd.data_version(), fundamentals=fund)
 
 
 @dataclass(frozen=True)

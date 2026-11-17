@@ -6,6 +6,7 @@ import pytest
 
 from capstone.factors.tree import (
     FIELDS,
+    FUNDAMENTAL_FIELDS,
     OHLCV,
     BinOp,
     Const,
@@ -168,7 +169,7 @@ def test_a_verbatim_alpha101_member_is_not_original(verbatim):
 def test_new_fields_parse_and_turnover_is_expressible():
     node = parse("rank(ts_mean(volume / shares, 21)) * -ts_sum(returns, 5) / log(cap)")
     assert features_used(node) == {"volume", "shares", "returns", "cap"}
-    assert set(FIELDS) == {*OHLCV, "returns", "shares", "cap", "mkt_return"}
+    assert set(FIELDS) == {*OHLCV, "returns", "shares", "cap", "mkt_return", *FUNDAMENTAL_FIELDS}
 
 
 def test_market_return_writes_beta_and_idiosyncratic_volatility():
