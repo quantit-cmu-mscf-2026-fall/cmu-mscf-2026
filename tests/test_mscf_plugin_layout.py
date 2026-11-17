@@ -119,8 +119,9 @@ def _capstone_names() -> set[str]:
     return names
 
 
-# Backticked words that are ledger columns or other libraries' names.
-NOT_CAPSTONE = {"bh", "by", "q", "lfdr", "Path", "Series", "DataFrame"}
+# Backticked words that are ledger columns or other libraries' names, and the Claude Code
+# tool a command's `allowed-tools: Bash(...)` frontmatter names.
+NOT_CAPSTONE = {"bh", "by", "q", "lfdr", "Path", "Series", "DataFrame", "Bash"}
 CALL = re.compile(r"(?<![\w.])([A-Za-z_]\w*)\((?!s\))")  # not the prose "seed(s)"
 SPAN = re.compile(r"`([^`\n]+)`")
 
