@@ -68,3 +68,13 @@ memory_kappa = 5.0
 memory_epsilon = 1e-6
 memory_veto_confidence = 0.3
 memory_veto_failure_rate = 0.7
+# The deepen move's pool of parents (AlphaMemo Sec. 4.5, App. C): a child
+# enters with |ICIR| at least memory_min_quality, at most max_nodes nodes and
+# |corr| at most memory_max_correlation with every member; a full pool swaps
+# out its weakest member only for a better child. memory_high_quality marks
+# the best. Each deepen round asks Opus for memory_children_per_parent edits.
+memory_min_quality = 0.10
+memory_high_quality = 0.20
+memory_max_correlation = 0.70
+memory_pool_capacity = 50
+memory_children_per_parent = 5
