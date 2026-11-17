@@ -282,8 +282,8 @@ is a count: 0, 1 or 2 real families, at an annual Sharpe of 0.5, 1.0 or 1.5.
 | Decision rule (Q5) | **Baseline: BH at q = 0.05** on the bootstrap family p-values |
 | Funnel, reported alongside | stage 1 BH at **q₁ = 0.10** on bootstrap family p-values; stage 2 no gate; stage 4 BH across survivors at **q₄ = 0.50** |
 | Stage 1's p-value | `stage1 = "bootstrap"`, 1,999 draws |
-| α₃ | not registered: stage 3 isn't built |
-| Registered config | `scripts/gate_crsp_v1.json`: the `GateConfig` above, hash `299a2f42f3d3c562ef0e24b772ed3fd0b51b3b458106b135adc4e3e1bc7de361` |
+| α₃ | not registered: stage 3 isn't built, so the config has no `factors_digest` |
+| Registered config | `scripts/gate_crsp_v1.json`: the `GateConfig` above, hash `5e89d78ae00e9537af3db3aa20810c5804c1d6c3ae892cf91600ce962e179009` |
 
 `GateConfig` has no field for the decision rule, so its hash covers the
 funnel only. The rule and its q (baseline, BH at 0.05) are fixed here and in
