@@ -31,7 +31,8 @@ validation stack), one column per `factor_id`.
   spread is reported alongside as a robustness view, not a separate trial.
 - **Ledger** (`evaluate_factors`): every evaluated variant is logged with
   `log_run` as soon as its series exists, before anything uses it, with
-  `sd.data_version()` in its params.
+  `sd.data_version()` and the panel's own first and last dates in its params;
+  a caller's `tags` ride on each entry's "evaluation" tag.
 - **Screen statistic** (`screen_pvalue`): each variant's one-sided HAC
   p-value against a Sharpe ratio of zero, on its net returns. It is the
   per-variant input to the validation funnel's stage 1 and the deepen move's
@@ -116,9 +117,24 @@ class Panel:
     provenance: object | None = field(default=None, repr=False, compare=False)
 
 
+def panel_period(panel: Panel) -> list[str]:
+    """The panel's first and last dates, as logged in a trial's `period` param.
+
+    The panel's own dates, not `DISCOVERY_START`/`DISCOVERY_END`: a synthetic
+    or shortened panel is not 1990-2020, and the ledger records what was used.
+    """
+    dates = pd.DatetimeIndex(panel.universe.index)
+    return [str(dates.min().date()), str(dates.max().date())]
+
+
 def _check_dates(dates: pd.Index) -> None:
     if len(dates) and pd.Timestamp(dates.max()) > pd.Timestamp(DISCOVERY_END):
         raise HoldoutError(f"dates after {DISCOVERY_END} are the holdout; they are not loaded here")
+
+
+def require_discovery(panel: Panel) -> None:
+    """Raise `HoldoutError` if `panel` holds a date after `DISCOVERY_END`."""
+    _check_dates(pd.Index(panel.universe.index))
 
 
 def build_panel(daily: pd.DataFrame, data_version: str = "") -> Panel:
@@ -394,6 +410,7 @@ def evaluate_factors(
     con: sqlite3.Connection | None = None,
     families: Mapping[str, str | None] | None = None,
     extra_params: dict | None = None,
+    tags: Sequence[str] = (),
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Every variant's net returns, side by side: each factor traded by each spec.
 
@@ -406,9 +423,12 @@ def evaluate_factors(
     alongside as a robustness view, not a separate candidate. Each variant's
     screen p-value (`screen_pvalue`) is logged with its metrics, and the
     summary names its hypothesis family from `families` (factor id ->
-    hypothesis id, as `hypothesis_of` gives). Returns
+    hypothesis id, as `hypothesis_of` gives). `tags` are added to each
+    entry's "evaluation" tag (a run's tag, to scope its trial count). Returns
     (matrix: dates x variant net returns, summary: one row per variant).
+    A panel holding a date after `DISCOVERY_END` raises `HoldoutError`.
     """
+    require_discovery(panel)
     columns, summary = {}, []
     for fid, tree in trees.items():
         family = (families or {}).get(fid)
@@ -429,12 +449,14 @@ def evaluate_factors(
                 "spec": spec.as_dict(),
                 "expression": unparse(tree),
                 "data_version": panel.data_version,
-                "period": [DISCOVERY_START, DISCOVERY_END],
+                "period": panel_period(panel),
                 "costs": "half quoted spread per unit traded",
                 **(extra_params or {}),
             }
             if signal is None:
-                log_run(LEDGER_NAME, params=params, metrics={"error": error}, tags=["evaluation"])
+                log_run(
+                    LEDGER_NAME, params=params, metrics={"error": error}, tags=["evaluation", *tags]
+                )
                 continue
             if spec.neutral not in traded:
                 traded[spec.neutral] = trading_signal(signal, panel, spec.neutral)
@@ -444,7 +466,10 @@ def evaluate_factors(
                 # The backtest refused (no cost rate on a trading day): the trial
                 # was run, so it is counted, and the refusal is not swallowed.
                 log_run(
-                    LEDGER_NAME, params=params, metrics={"error": str(exc)}, tags=["evaluation"]
+                    LEDGER_NAME,
+                    params=params,
+                    metrics={"error": str(exc)},
+                    tags=["evaluation", *tags],
                 )
                 raise
             metrics = {
@@ -456,7 +481,7 @@ def evaluate_factors(
                 "days": int(result.net.notna().sum()),
                 "pvalue_screen": screen_pvalue(result.net),
             }
-            log_run(LEDGER_NAME, params=params, metrics=metrics, tags=["evaluation"])
+            log_run(LEDGER_NAME, params=params, metrics=metrics, tags=["evaluation", *tags])
             columns[vid] = result.net
             summary.append(
                 {
