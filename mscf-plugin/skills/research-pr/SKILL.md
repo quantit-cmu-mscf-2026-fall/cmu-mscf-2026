@@ -18,8 +18,8 @@ Full workflow: `CONTRIBUTING.md`. Template: `.github/PULL_REQUEST_TEMPLATE.md`.
      `.sessions/`, notebook outputs, images over a few hundred KB, or course material.
    - `git diff origin/main... | grep -iE "token|secret|password|api[_-]?key|wrds"` finds
      nothing that is a value.
-5. Experiments: seeds fixed in a parameter file; every trial in the ledger;
-   `python -m capstone.runlog stats` run for the count.
+5. Experiments: seeds fixed in a parameter file; every trial in the ledger; the count from
+   `runlog.trial_count(name=... or include_tags=[...], exclude_tags=["synthetic"])`.
 
 ## The description
 
@@ -39,7 +39,7 @@ Fill every section of the template:
 - Series: <returns net of quoted_spread | rank IC>, period <start>-<end> (search only)
 - Data version: <sd.data_version()>
 - Seeds: <list>
-- Trial count: <n> runs under <names> (`python -m capstone.runlog stats`), <m> total in ledger
+- Trial count: <n> from `trial_count(<name or tags>, exclude_tags=["synthetic"])`, <m> total in ledger
 - Correction: <method> because <dependence>; evidence profile of the top candidates
 - <key numbers or one small plot>
 
@@ -60,6 +60,7 @@ Results live in the description, not in committed files.
 
 ## Reviewing someone else's PR
 
-Use the `validation-reviewer` agent for a first pass, then read the diff yourself. Check:
+Run `/review-pr` (it launches the `pr-reviewer` agents, see `REVIEW.md`) for a first pass,
+then read the diff yourself. Check:
 ledger before results, trial count sourced from the ledger, `shared_data` rules, holdout
 untouched, correction chosen for the dependence, null and power tests for any new method.

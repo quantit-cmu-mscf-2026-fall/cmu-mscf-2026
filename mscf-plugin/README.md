@@ -20,7 +20,7 @@ For development: `claude --plugin-dir ./mscf-plugin`. The hook runs `python`, so
 |---|---|---|
 | Skill | `pipeline-boundaries` | Sealed holdout, ledger before results, one-way validation, pre-registered thresholds, public-repo hygiene |
 | Skill | `shared-data` | Loading CRSP/Compustat through `capstone.shared_data` and the returns/costs/fundamentals rules |
-| Skill | `run-ledger` | `log_run` before looking, what counts as a trial, stage tags, trial counts |
+| Skill | `run-ledger` | `log_run` before looking, what counts as a trial, stage tags, trial counts scoped to the family |
 | Skill | `validate-candidates` | Performance matrix, one-sided HAC Sharpe tests, choosing a correction, the five-stage funnel |
 | Skill | `null-calibration` | Null and power tests every new validation method ships with |
 | Skill | `research-pr` | Branch, checks, PR template with seeds and trial count, review and merge |
@@ -47,8 +47,9 @@ The guard never grants anything; it denies or warns. Two rules are off until you
 
 ## Adding a team member's skill
 
-Knowledge skills from the `kb-<name>` repositories (exercise Part 8) go in `skills/<name>/`
-by PR, with a description that says when to use it. `tests/test_mscf_plugin_layout.py` checks
+Knowledge skills from the `kb-<name>` repositories: exercise Part 8 puts them in
+`.claude/skills/<name>/`, which stays the default; use `skills/<name>/` here only if the team
+agrees. Either way by PR, with a description that says when to use it. `tests/test_mscf_plugin_layout.py` checks
 that every skill has frontmatter and that every `capstone.<module>.<function>` it names exists.
 
 ## Tests

@@ -8,6 +8,7 @@ look-ahead.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -46,6 +47,57 @@ def to_weights(signal: pd.DataFrame, *, demean: bool = True, gross: float = 1.0)
     return values.mul(scale, axis=0)
 
 
+def _check_band(band: float) -> None:
+    if not (math.isfinite(band) and band >= 0):
+        raise ValueError(f"band must be a finite number >= 0, got {band!r}")
+
+
+def band_book(
+    weights: pd.DataFrame,
+    missing: pd.DataFrame,
+    *,
+    band: float,
+    hold: int = 1,
+) -> pd.DataFrame:
+    """The book held after each date's close under a no-trade band.
+
+    `weights` is the target book on each date (`to_weights`), `missing` marks
+    the names with no signal that date. On every `hold`-th date counted from
+    the first (a rebalance):
+
+    - a name trades to its target only when |target - held| > `band`, or when
+      it has no signal (it is closed, whatever its weight); otherwise it keeps
+      its held weight;
+    - a flat book opens at its target in full, so the band never keeps a book
+      flat while there is a signal;
+    - a target with no position at all (no signal anywhere) is taken as is:
+      the book goes flat.
+
+    Between rebalances the book is held. `band` is in units of target weight.
+    The book is not rescaled: every name is within `band` of its target on
+    each rebalance, so the book is never levered onto the names that traded.
+    It is therefore not exactly dollar-neutral, and its gross can differ from
+    the target's, by at most `band` per kept name.
+    """
+    _check_band(band)
+    if hold < 1:
+        raise ValueError("hold must be at least 1 period")
+    target = weights.to_numpy(dtype="float64")
+    closed = missing.reindex_like(weights).fillna(True).to_numpy(dtype=bool)
+    out = np.empty_like(target)
+    held = np.zeros(target.shape[1])
+    for t in range(len(target)):
+        if t % hold == 0:
+            row = target[t]
+            if np.abs(row).sum() > 0 and np.abs(held).sum() > 0:
+                move = (np.abs(row - held) > band) | closed[t]
+                held = np.where(move, row, held)
+            else:
+                held = row.copy()
+        out[t] = held
+    return pd.DataFrame(out, index=weights.index, columns=weights.columns)
+
+
 def backtest_frame(
     signal: pd.DataFrame,
     returns: pd.DataFrame,
@@ -54,6 +106,7 @@ def backtest_frame(
     demean: bool,
     gross: float,
     hold: int = 1,
+    band: float = 0.0,
 ) -> pd.DataFrame:
     """Per-period net and gross returns, cost and turnover for one signal.
 
@@ -72,10 +125,15 @@ def backtest_frame(
     rebalances the weights are held fixed, so the trades that would keep them
     fixed as prices drift are not charged.
 
+    `band` > 0 is a no-trade band on each rebalance (`band_book`: a name
+    trades only when its target is more than `band` from its held weight).
+    `band=0` is the backtest without one, computed exactly as before.
+
     Returns a frame with columns `net`, `gross`, `cost` and `turnover`.
     """
     if hold < 1:
         raise ValueError("hold must be at least 1 period")
+    _check_band(band)
     dates = signal.index.intersection(returns.index)
     assets = signal.columns.intersection(returns.columns)
     signal = signal.loc[dates, assets]
@@ -85,8 +143,11 @@ def backtest_frame(
     no_signal = signal.isna().all(axis=1)
     if hold > 1:
         rebalance = pd.Series(np.arange(len(dates)) % hold == 0, index=dates)
-        weights = weights.where(rebalance, axis=0).ffill()
         no_signal = no_signal.astype(float).where(rebalance).ffill().astype(bool)
+    if band > 0:
+        weights = band_book(weights, signal.isna(), band=band, hold=hold)
+    elif hold > 1:
+        weights = weights.where(rebalance, axis=0).ffill()
     positions = weights.shift(1)
 
     # Diff against a flat book, not against the NaN first row: otherwise the
