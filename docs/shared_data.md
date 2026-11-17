@@ -110,6 +110,24 @@ signals that need them.
 Known limitation: Compustat values may include later restatements rather than
 the figures first reported.
 
+## Optional discovery-row cache
+
+`capstone.pipeline.search_cache.CachedRows(file_name, columns)` is the S-15d
+exception for a local derived copy: it fills only through `sd.load`, syncs
+the shared manifest on each call, and keys the copy by `sd.data_version()`,
+file, selected columns (including their order), and period. For example,
+`CachedRows("sp500_daily_1990_2025", ["date", "permno", "dlyret"])("2010-01-01", "2020-12-31")`.
+The copy lives in gitignored `data_cache/search_rows/`; a
+`CAPSTONE_SEARCH_CACHE` override must also be a local, gitignored directory.
+Never commit or share derived rows outside the licensed data arrangement.
+
+The cache refuses an unbounded end or one after 2020-12-31 before I/O, checks
+loaded and cached row dates, and never caches a frame whose parquet round-trip
+changes its values or dtypes. The previous arbitrary loader/version-string
+constructor is unsupported: callers must supply the shared file name and
+explicit columns, so a custom loader cannot bypass the shared-data contract.
+This cache is optional; ordinary `sd.load` callers do not change.
+
 ## Checks
 
 `pytest -m data` runs checks against the real files on your machine: checksums,
