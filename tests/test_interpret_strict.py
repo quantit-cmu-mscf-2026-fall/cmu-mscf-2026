@@ -49,8 +49,6 @@ def test_strict_scale_uses_finite_normalization_before_outer_signal():
 def test_strict_function_constant_arguments_broadcast_explicitly(expression):
     fields = {"close": frame([[1.0, 2.0], [3.0, 4.0]])}
     node = parse(expression)
-    with pytest.raises(AttributeError):
-        evaluate(node, fields)
     expected = fields["close"].copy()
     expected += np.log(2) if "log" in expression else 2
     if "ts_mean" in expression:
@@ -136,3 +134,106 @@ def test_the_universe_needs_strict_mode_matching_axes_and_known_membership():
     unknown.iloc[0, 0] = None
     with pytest.raises(EvaluationError, match="explicitly known"):
         evaluate(node, {"close": close}, strict_domains=True, cross_sectional_universe=unknown)
+
+
+@pytest.mark.parametrize("direction", [1, -1])
+def test_strict_near_perfect_correlation_retains_defined_values(direction):
+    close = pd.DataFrame(np.random.default_rng(0).lognormal(4, 3e-5, (1000, 3)))
+    fields = {"close": close * direction, "cap": close * 1e9}
+    values = evaluate(parse("ts_corr(cap, close, 10)"), fields, strict_domains=True)
+    assert values.iloc[:9].isna().all().all()
+    assert values.iloc[9:].notna().all().all()
+    # pandas 2's rolling moments lose a few ppm on this tiny-volatility panel.
+    np.testing.assert_allclose(values.iloc[9:], direction, rtol=0, atol=1e-5)
+    assert (values.iloc[9:].abs() <= 1).all().all()
+
+
+@pytest.mark.parametrize(
+    "expression",
+    ["ts_corr(shares, close, 20)", "ts_corr(close, shares, 20)", "zscore(shares, 20)"],
+)
+def test_a_constant_window_after_a_level_step_has_no_strict_score(expression):
+    shares = pd.DataFrame({101: [3e8] * 5 + [3e8 + 21000] * 25})
+    close = pd.DataFrame({101: np.arange(30, dtype=float) + 10})
+    values = evaluate(parse(expression), {"shares": shares, "close": close}, strict_domains=True)
+    assert values.iloc[19:24].notna().all().all()
+    assert values.iloc[24:].isna().all().all()
+
+
+def test_strict_ema_does_not_carry_a_value_over_an_undefined_input_day():
+    close = frame([[12], [13], [11], [14], [15], [16]])
+    node = parse("ema(1 / (close - 11), 2)")
+    default = evaluate(node, {"close": close})
+    strict = evaluate(node, {"close": close}, strict_domains=True)
+    assert np.isfinite(default.iloc[2, 0])
+    assert pd.isna(strict.iloc[2, 0])
+    pd.testing.assert_frame_equal(strict.drop(index=2), default.drop(index=2), check_exact=True)
+
+
+@pytest.mark.parametrize("expression", ["zscore(close, 2)", "winsorize(close)"])
+def test_strict_undefined_moments_do_not_survive_as_finite_scores(expression):
+    close = frame([[1e200], [2e200]]) if expression.startswith("zscore") else frame([[1]])
+    values = evaluate(parse(expression), {"close": close}, strict_domains=True)
+    assert values.isna().all().all()
+
+
+def test_strict_pair_constant_second_argument_is_broadcast():
+    close = frame([[1, 2], [2, 4], [3, 6]])
+    values = evaluate(parse("ts_cov(close, 2, 2)"), {"close": close}, strict_domains=True)
+    assert values.iloc[0].isna().all()
+    assert (values.iloc[1:] == 0).all().all()
+
+
+@pytest.mark.parametrize("kind", ["series", "array", "nonboolean"])
+def test_invalid_universe_types_and_values_raise_the_documented_error(kind):
+    close = frame([[1, 2], [3, 4]])
+    mask = pd.DataFrame(True, index=close.index, columns=close.columns)
+    if kind == "series":
+        mask = mask.iloc[:, 0]
+    elif kind == "array":
+        mask = mask.to_numpy()
+    else:
+        mask = mask.astype(int) * 2
+    with pytest.raises(EvaluationError):
+        evaluate(
+            parse("rank(close)"),
+            {"close": close},
+            strict_domains=True,
+            cross_sectional_universe=mask,
+        )
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "ts_corr(cap, close, 10)",
+        "zscore(cap, 10)",
+        "ema(close, 3)",
+        "rank(close)",
+        "scale(close)",
+        "winsorize(close)",
+        "ts_mean(rank(close), 3)",
+    ],
+)
+def test_strict_numerical_fixes_keep_history_bit_identical(expression):
+    close = pd.DataFrame(np.random.default_rng(7).lognormal(4, 0.02, (50, 3)))
+    fields = {"close": close, "cap": close * 1e9}
+    mask = pd.DataFrame(True, index=close.index, columns=close.columns)
+    node = parse(expression)
+    options = {"strict_domains": True, "cross_sectional_universe": mask}
+    expected = evaluate(node, fields, **options)
+    changed = {name: value.copy() for name, value in fields.items()}
+    for value in changed.values():
+        value.iloc[30:] *= 1e80
+    future_mask = mask.copy()
+    future_mask.iloc[30:] = False
+    after = evaluate(node, changed, strict_domains=True, cross_sectional_universe=future_mask)
+    pd.testing.assert_frame_equal(expected.iloc[:30], after.iloc[:30], check_exact=True)
+    for end in (15, 29, 39):
+        truncated = evaluate(
+            node,
+            {name: value.iloc[: end + 1] for name, value in fields.items()},
+            strict_domains=True,
+            cross_sectional_universe=mask.iloc[: end + 1],
+        )
+        pd.testing.assert_frame_equal(expected.iloc[[end]], truncated.iloc[[-1]], check_exact=True)

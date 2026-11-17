@@ -2,17 +2,40 @@
 
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 from capstone import shared_data as sd
-from capstone.factors.evaluation import Panel, _market_return, build_panel
+from capstone.factors.evaluation import COLUMNS, DAILY_FILE, Panel, _market_return, build_panel
+from capstone.pipeline.study import file_digest
 from capstone.strategy import input_memo
+from capstone.strategy.research import digest
 
 CUTOFF = pd.Timestamp("2020-12-31")
 EVENT_COLUMNS = ("event_id", "event_date", "permno", "kind")
+REQUIREMENTS = {
+    "calendar": {"actual_exchange_sessions"},
+    "events": {"complete_event_coverage", "authoritative_cash_and_conversions"},
+    "fundamentals": {
+        "as_reported_vintages",
+        "publication_times",
+        "company_links",
+        "complete_share_class_coverage",
+        "usd_millions",
+    },
+    "factors": {"publication_times", "qualified_historical_vintage"},
+}
+
+
+class DataBlocked(ValueError):
+    def __init__(self, report):
+        self.report = report
+        super().__init__("historical inputs blocked: " + ", ".join(report["global_blockers"]))
 
 
 @dataclass
@@ -32,6 +55,133 @@ class HistoricalInputs:
         # frozen plans) checks eligibility against the raw closes the planner sizes with.
         if self.panel is not None and self.panel.sizing_prices is None:
             self.panel.sizing_prices = self.closes
+
+
+def source_status(descriptor=None, *, root=None, verify=True):
+    """Which declared sources are present, manifest-bound and qualified.
+
+    A source file is only hashed here (its bytes streamed through SHA-256 and compared with the
+    manifest); no row is parsed. Observations reach the process only through `sd.load`.
+    """
+    root = Path(root or sd.cache_dir())
+    descriptor = descriptor or {}
+    manifest = root / "SHA256SUMS"
+    hashes = {}
+    if manifest.exists():
+        for line in manifest.read_text().splitlines():
+            if line.strip():
+                sha, name = line.split(maxsplit=1)
+                hashes[name.lstrip("*")] = sha
+    result = {
+        "schema_version": 1,
+        "source_hashes": {},
+        "sources": {},
+        "global_blockers": [],
+        "method_blockers": {},
+    }
+    if descriptor.get("schema_version") != 1:
+        result["global_blockers"].append("source_descriptor_schema_missing_or_unsupported")
+    daily_name = DAILY_FILE + ".parquet"
+    if daily_name not in hashes or not (root / daily_name).exists():
+        result["global_blockers"].append("daily_source_missing")
+    elif verify and file_digest(root / daily_name) != hashes[daily_name]:
+        result["global_blockers"].append("daily_checksum_mismatch")
+    else:
+        result["source_hashes"]["daily"] = hashes[daily_name]
+    for role, required in REQUIREMENTS.items():
+        item = descriptor.get("sources", {}).get(role, {})
+        name = item.get("dataset", "")
+        reasons = []
+        if not re.fullmatch(r"[A-Za-z0-9_]+", name):
+            reasons.append(f"{role}_source_missing")
+        else:
+            filename = name + ".parquet"
+            expected = hashes.get(filename)
+            if not expected or expected != item.get("sha256"):
+                reasons.append(f"{role}_manifest_unbound")
+            elif not (root / filename).exists():
+                reasons.append(f"{role}_file_missing")
+            elif verify and file_digest(root / filename) != expected:
+                reasons.append(f"{role}_checksum_mismatch")
+            else:
+                result["source_hashes"][role] = expected
+        if not required <= set(item.get("qualifications", [])):
+            reasons.append(f"{role}_qualification_missing")
+        try:
+            first, last = pd.Timestamp(item["start"]), pd.Timestamp(item["end"])
+            needed = pd.Timestamp(
+                {
+                    "calendar": "1990-01-01",
+                    "events": "1996-01-01",
+                    "fundamentals": "1994-01-01",
+                    "factors": "1995-01-01",
+                }[role]
+            )
+            if pd.isna(first) or pd.isna(last) or first > needed or last < CUTOFF:
+                reasons.append(f"{role}_coverage_incomplete")
+            if role == "calendar" and last <= CUTOFF:
+                reasons.append("calendar_next_session_missing")
+        except (KeyError, ValueError, TypeError):
+            reasons.append(f"{role}_coverage_missing")
+        result["sources"][role] = {"dataset": name, "qualified": not reasons, "blockers": reasons}
+        if role in {"calendar", "events"}:
+            result["global_blockers"] += reasons
+        else:
+            methods = (
+                ("value", "profitability")
+                if role == "fundamentals"
+                else ("ff3_idiosyncratic_volatility",)
+            )
+            for method in methods:
+                result["method_blockers"][method] = reasons
+    result["descriptor_hash"] = digest(descriptor)
+    result["historical_observations_loaded"] = False
+    result["holdout_opened"] = False
+    return result
+
+
+def preflight(descriptor_path=None):
+    path = Path(descriptor_path) if descriptor_path else sd.cache_dir() / "historical-sources.json"
+    descriptor = json.loads(path.read_text()) if path.exists() else {}
+    report = source_status(descriptor)
+    report["descriptor_present"] = path.exists()
+    return report, descriptor
+
+
+def discovery_read(
+    name,
+    columns=None,
+    *,
+    start="1990-01-01",
+    end="2020-12-31",
+    date_column="date",
+    knowledge_columns=(),
+):
+    if pd.Timestamp(end) > CUTOFF or pd.Timestamp(start) > pd.Timestamp(end):
+        raise ValueError("historical loader cannot read the sealed holdout")
+    kwargs = {"knowledge_columns": tuple(knowledge_columns)} if knowledge_columns else {}
+    return sd.load(
+        name,
+        columns=columns,
+        start=start,
+        end=end,
+        auto_sync=False,
+        date_column=date_column,
+        **kwargs,
+    )
+
+
+def read_calendar(name):
+    """Only session dates may cross the boundary, never a market observation."""
+    frame = sd.load(name, columns=["date"], start="1990-01-01", end="2021-01-31", auto_sync=False)
+    # The verified daily CRSP file can supply dates for many securities per session.
+    dates = pd.DatetimeIndex(pd.to_datetime(frame.date)).drop_duplicates().sort_values()
+    if dates.hasnans or dates.tz is not None:
+        raise ValueError("calendar session dates must be nonmissing and timezone naive")
+    future = dates[dates > CUTOFF]
+    if future.empty:
+        raise ValueError("calendar needs the first following session date")
+    return dates[dates <= future.min()]
 
 
 # Kinds written only by valued corporate-action handling (valued distributions, terminal values).
@@ -183,4 +333,49 @@ def build_inputs(
     )
     if "ticker" in daily:
         result.symbols = daily.pivot(index="date", columns="permno", values="ticker").sort_index()
+    return result
+
+
+def load_inputs(descriptor_path=None):
+    report, descriptor = preflight(descriptor_path)
+    if report["global_blockers"]:
+        raise DataBlocked(report)
+    sources = descriptor["sources"]
+    daily = discovery_read(DAILY_FILE, sorted(set(COLUMNS + ["permco", "ticker"])))
+    calendar = read_calendar(sources["calendar"]["dataset"])
+    if (
+        pd.Timestamp(daily.date.min()) != calendar[0]
+        or pd.Timestamp(daily.date.max()) != calendar[calendar <= CUTOFF][-1]
+    ):
+        raise ValueError("historical daily coverage must include full 1990–2020 sessions")
+    events = discovery_read(sources["events"]["dataset"], date_column="event_date")
+    fundamentals = factors = None
+    if report["sources"]["fundamentals"]["qualified"]:
+        fundamentals = discovery_read(
+            sources["fundamentals"]["dataset"],
+            date_column="datadate",
+            knowledge_columns=("published_at", "vintage_at"),
+        )
+    if report["sources"]["factors"]["qualified"]:
+        factors = discovery_read(
+            sources["factors"]["dataset"], knowledge_columns=("published_at", "vintage_at")
+        ).set_index("date")
+    result = build_inputs(
+        daily,
+        calendar,
+        events,
+        data_version=sd.data_version(),
+        qualification=report,
+        fundamentals=fundamentals,
+        factors=factors,
+    )
+    from capstone.pipeline.event_checks import verify_event_returns
+
+    result.qualification["event_return_identities"] = verify_event_returns(result)
+    after, _ = preflight(descriptor_path)
+    if (
+        after["source_hashes"] != report["source_hashes"]
+        or after["descriptor_hash"] != report["descriptor_hash"]
+    ):
+        raise ValueError("historical sources changed while they were being loaded")
     return result
