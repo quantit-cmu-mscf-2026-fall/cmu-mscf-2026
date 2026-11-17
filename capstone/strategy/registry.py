@@ -12,6 +12,9 @@ defaults. Rules:
 - A file that is read and rendered again is byte for byte what it was. The
   optional keys are never written at their defaults, so a file without them
   reads and writes exactly as before.
+- `module` is one of `MODULES` (a legacy `StrategySpec`, a typed program, a saved program
+  portfolio); `registry_spec` reads an entry's spec file, `deploy/strategies/<id>.toml`
+  (`SPEC_DIR`), with that module's `from_toml`.
 - `role`: "deploy" (the default), "incubation-only" for a family the gate
   labelled incubate, or "plumbing-test" for an entry that tests plumbing and
   claims no edge. Reading never changes a role.
@@ -50,8 +53,11 @@ from capstone.artifacts import canonical, digest
 from capstone.faults import maybe_fault
 
 MODULE = "capstone.strategy.contract"
-MODULES = (MODULE,)
+PROGRAM_MODULE = "capstone.strategy.program"
+SAVED_PORTFOLIO_MODULE = "capstone.strategy.saved_portfolio"
+MODULES = (MODULE, PROGRAM_MODULE, SAVED_PORTFOLIO_MODULE)
 REGISTRY_FILE = Path("deploy") / "strategies.yml"
+SPEC_DIR = Path("deploy") / "strategies"  # one spec file per registry entry: <id>.toml
 LIFECYCLE_FILE = Path("deploy") / "lifecycle.jsonl"
 KEYS = ("id", "module", "gate_report", "enabled", "role", "state", "version")
 Role = Literal["deploy", "incubation-only", "plumbing-test"]
@@ -202,6 +208,42 @@ def _read(root: Path, path: Path) -> str:
 def _lifecycle_text(root: Path) -> str:
     path = Path(root) / LIFECYCLE_FILE
     return path.read_bytes().decode("utf-8") if path.exists() else ""
+
+
+def spec_from_toml(module: str, text: str):
+    """A spec file's content, read with its registry module's `from_toml`."""
+    if module == MODULE:
+        from capstone.strategy.contract import StrategySpec
+
+        return StrategySpec.from_toml(text)
+    if module == PROGRAM_MODULE:
+        from capstone.strategy.program import ProgramStrategySpec
+
+        return ProgramStrategySpec.from_toml(text)
+    if module == SAVED_PORTFOLIO_MODULE:
+        from capstone.strategy.saved_portfolio import SavedProgramPortfolioSpec
+
+        return SavedProgramPortfolioSpec.from_toml(text)
+    raise ValueError(f"module must be one of {MODULES}: {module!r}")
+
+
+def registry_spec(root: Path, strategy_id: str, module: str | None = None):
+    """The spec file of a registered strategy, read with its entry's module
+    (`module` if given; the contract for an id not in the registry); refused
+    if its content is not its id."""
+    if module is None:
+        entries = _parse(_read(root, REGISTRY_FILE))[1]
+        module = next((e.module for e in entries if e.id == strategy_id), MODULE)
+    path = Path(root) / SPEC_DIR / f"{strategy_id}.toml"
+    if module == MODULE:
+        from capstone.strategy.contract import load_spec
+
+        spec = load_spec(path)
+    else:
+        spec = spec_from_toml(module, _read(root, path))
+    if spec.id != strategy_id:
+        raise ValueError(f"spec file {strategy_id}.toml holds spec id {spec.id}")
+    return spec
 
 
 def read_lifecycle(root: Path) -> tuple[dict[str, Any], ...]:
