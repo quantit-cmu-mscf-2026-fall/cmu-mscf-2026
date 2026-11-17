@@ -22,7 +22,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["capstone", "capstone.factors", "capstone.pipeline"]  # list every subpackage (tests check)
+packages = ["capstone", "capstone.incubation", "capstone.pipeline", "capstone.factors"]  # list every subpackage (tests check)
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
