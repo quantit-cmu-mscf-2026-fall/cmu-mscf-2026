@@ -29,6 +29,7 @@ testpaths = ["tests"]
 markers = [
     "network: requires internet access (skips cleanly if unavailable)",
     "data: requires the team's shared data locally (skips cleanly if absent)",
+    "slow: end-to-end fixture runs that take several seconds (still part of the default suite)",
     "report: writes a checkpoint report; runs only with --report",
 ]
 
