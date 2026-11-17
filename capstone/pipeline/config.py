@@ -22,6 +22,7 @@ from capstone.factors.evaluation import TradingSpec, grid
 from capstone.factors.llm import FactorConfig
 from capstone.funnel import Thresholds
 from capstone.pipeline.executor import AUTO
+from capstone.pipeline.placebo import METHODS as PLACEBO_METHODS
 from capstone.pipeline.rows import REPO
 
 DEFAULT_CONFIG = REPO / "config" / "e2e_synthetic.toml"
@@ -121,6 +122,10 @@ class E2EConfig:
     # Papers in flight at once in "isolated" mode; AUTO sizes it from the machine. A
     # runtime knob, never in the digest: the results are the same at every value.
     concurrency: int = AUTO
+    # A placebo search (`capstone.pipeline.placebo`): the method and its seed. Both enter
+    # the digest only when set; a placebo run's ledger tag ends in ":placebo".
+    placebo: str | None = None
+    placebo_seed: int | None = None
 
     def __post_init__(self) -> None:
         names = ("search_end", "holdout_start", "holdout_end")
@@ -143,10 +148,19 @@ class E2EConfig:
         if not self.run_id or not self.data_label or not self.specs:
             raise ValueError("run_id, data_label and at least one spec are required")
         object.__setattr__(self, "specs", tuple(self.specs))
+        if self.placebo is not None or self.placebo_seed is not None:
+            if self.placebo not in PLACEBO_METHODS:
+                raise ValueError(
+                    f"placebo must be one of {PLACEBO_METHODS} when placebo_seed is set"
+                )
+            seed = self.placebo_seed
+            if seed is None or isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
+                raise ValueError("a placebo search needs placebo_seed, a non-negative integer")
 
     @property
     def run_tag(self) -> str:
-        return f"e2e-run:{self.run_id}"
+        tag = f"e2e-run:{self.run_id}"
+        return f"{tag}:placebo" if self.placebo is not None else tag
 
 
 _SECTIONS = {
@@ -158,6 +172,8 @@ _SECTIONS = {
         "papers",
         "paper_mode",
         "concurrency",
+        "placebo",
+        "placebo_seed",
     },
     "periods": {"search_start", "search_end", "holdout_start", "holdout_end"},
     "factors": {f.name for f in fields(FactorConfig)},
@@ -197,6 +213,8 @@ def load_config(path: str | Path | None = None) -> E2EConfig:
         max_model_calls=int(run.get("max_model_calls", DEFAULT_MAX_MODEL_CALLS)),
         paper_mode=run.get("paper_mode", "sequential"),
         concurrency=int(run.get("concurrency", AUTO)),
+        placebo=run.get("placebo"),
+        placebo_seed=run.get("placebo_seed"),
         **values["periods"],
         papers=str(papers),
         factors=FactorConfig(**values.get("factors", {})),

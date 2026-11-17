@@ -24,7 +24,13 @@ def _digest_without_optional_fields(config):
         "thresholds": thresholds_dict(config.thresholds),
         "papers": f"sha256:{papers}",
     }
-    for name, default in (("deepen_on_budget", "raise"), ("paper_mode", "sequential")):
+    optional = (
+        ("deepen_on_budget", "raise"),
+        ("paper_mode", "sequential"),
+        ("placebo", None),
+        ("placebo_seed", None),
+    )
+    for name, default in optional:
         if content[name] == default:
             del content[name]
     del content["concurrency"]
