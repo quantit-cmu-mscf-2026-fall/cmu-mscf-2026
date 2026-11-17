@@ -5,8 +5,11 @@
   source), `from_returns` and `stage_inputs`, the one hand-off any generator
   (factor trees, Alpha-GPT, a strategy grid) uses to give candidates to the
   funnel. Tests: `tests/test_intake.py`.
-- Not included: `from_evaluation` (factor evaluation's adapter, the next PR),
-  thresholds, the gate or the scorecard.
+- Not included: thresholds, the gate or the scorecard.
+- Also: `from_evaluation`, the adapter for factor evaluation's `(matrix,
+  summary)`: one family per hypothesis (`summary["hypothesis_id"]`), a variant
+  without one raises naming it. It reads the two plain frames and imports
+  nothing from `capstone.factors`.
 
 ## 2. Contract
 - Input: dates x candidate net returns (NaN = no position) and one hypothesis
@@ -36,8 +39,7 @@
 | Full suite and lint | CI commands | green | `pytest -q -m "not network"`; `ruff check . && ruff format --check .` |
 
 ## 4. Provenance
-- Ported from Cal's development sandbox; the factor-evaluation adapter was cut
-  (next PR). Builds on `funnel.family_statistics` (QUANTIT-34, the base PR).
+- Ported from Cal's development sandbox. Builds on `funnel.family_statistics` (QUANTIT-34, the base PR).
 
 ## 5. Known limits and areas to improve
 - `source` is a free-form dict; the gate decides what it must hold.
