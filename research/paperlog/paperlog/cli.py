@@ -236,7 +236,11 @@ def candidates(con, cfg, fresh_keys, log=print):
     queue = list(dict.fromkeys(fresh_keys))
     backlog = [
         r["key"]
-        for r in con.execute("SELECT key FROM papers WHERE status='new' ORDER BY first_seen DESC")
+        for r in con.execute(
+            # a paper a human adopted or read before it was scored still needs its score
+            "SELECT key FROM papers WHERE status='new' "
+            "OR (status IN ('adopted', 'read') AND relevance IS NULL) ORDER BY first_seen DESC"
+        )
     ]
     queue += [k for k in backlog if k not in set(queue)]
     if len(queue) < budget and sc.get("rescreen_when_rubric_changes", True):
