@@ -3,7 +3,8 @@
 `write(config, names)` writes `<run>/autopilot/ops/status.json` and `status.md` once the run
 root exists (it never creates the run root); the operations hook writes the same files at
 the end of every tick. `ok` is false when any stage is blocked or stopped. `alert` is the
-newest `<run>/ALERT.json` (alerts are history: a clean tick keeps it). A broken journal
+newest `<run>/ALERT.json` (alerts are history: a clean tick keeps it); `warnings` are the
+run's current typed early warnings (`early_warnings`). A broken journal
 makes `aggregate` raise; the hook turns that into the typed problem `ops_status_failed`.
 """
 
@@ -13,6 +14,7 @@ from collections import Counter
 
 from capstone.pipeline.autopilot.journal import Journal
 from capstone.pipeline.autopilot.ops import alert as alerts
+from capstone.pipeline.autopilot.ops import early_warnings, paper_monitor
 from capstone.pipeline.autopilot.ops.common import (
     ops_dir,
     read_json,
@@ -52,7 +54,8 @@ def aggregate(config, names, *, journal=None):
         "stages": rows,
         "alert": read_json(root / alerts.JSON_FILE),
         "alerts_total": len(read_lines(ops_dir(root) / alerts.HISTORY)),
-    }
+        "warnings": (read_json(ops_dir(root) / early_warnings.FILE) or {}).get("warnings", []),
+    } | paper_monitor.status_fields(config)  # only with [paper_monitor] root
 
 
 def markdown(doc):
@@ -80,6 +83,12 @@ def markdown(doc):
     if doc["alert"]:
         last = doc["alert"]
         lines += ["", f"Last alert ({last['severity']}, {last['at']}): {last['line']}"]
+    if doc.get("paper_alert"):
+        paper = doc["paper_alert"]
+        lines += ["", f"Last paper alert ({paper['severity']}, {paper['at']}): {paper['line']}"]
+    for row in doc.get("warnings", []):
+        reason = row["reason"]
+        lines += ["", f"Warning ({reason['code']}): {reason['detail']}"]
     return "\n".join(lines) + "\n"
 
 
