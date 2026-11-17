@@ -30,7 +30,7 @@ def _digest_without_optional_fields(config):
         ("placebo", None),
         ("placebo_seed", None),
     )
-    for name, default in optional:
+    for name, default in (*optional, ("regime_operators", False)):
         if content[name] == default:
             del content[name]
     del content["concurrency"]

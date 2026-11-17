@@ -126,8 +126,13 @@ class E2EConfig:
     # the digest only when set; a placebo run's ledger tag ends in ":placebo".
     placebo: str | None = None
     placebo_seed: int | None = None
+    # `[factors] regime_operators`: admits the grammar's market-regime operators
+    # (`tree.REGIME_FUNCS`). Off by default; enters the digest only when set.
+    regime_operators: bool = False
 
     def __post_init__(self) -> None:
+        if not isinstance(self.regime_operators, bool):
+            raise ValueError("[factors] regime_operators must be true or false")
         names = ("search_end", "holdout_start", "holdout_end")
         for name in (*names, "search_start") if self.search_start else names:
             object.__setattr__(self, name, pd.Timestamp(getattr(self, name)).date().isoformat())
@@ -176,7 +181,7 @@ _SECTIONS = {
         "placebo_seed",
     },
     "periods": {"search_start", "search_end", "holdout_start", "holdout_end"},
-    "factors": {f.name for f in fields(FactorConfig)},
+    "factors": {f.name for f in fields(FactorConfig)} | {"regime_operators"},
     "deepen": {"rounds", "max_calls", "hold", "neutral", "selector", "on_budget"},
     "evaluation": {"holds", "neutral"},
     "gate": {"generator", "n_boot", "thresholds"},
@@ -217,7 +222,10 @@ def load_config(path: str | Path | None = None) -> E2EConfig:
         placebo_seed=run.get("placebo_seed"),
         **values["periods"],
         papers=str(papers),
-        factors=FactorConfig(**values.get("factors", {})),
+        factors=FactorConfig(
+            **{k: v for k, v in values.get("factors", {}).items() if k != "regime_operators"}
+        ),
+        regime_operators=values.get("factors", {}).get("regime_operators", False),
         deepen_rounds=int(deepen["rounds"]),
         deepen_max_calls=int(deepen.get("max_calls", 10)),
         deepen_selector=deepen.get("selector", "memory"),
