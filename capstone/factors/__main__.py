@@ -23,7 +23,7 @@ import argparse
 import sqlite3
 import sys
 
-from capstone.factors import store
+from capstone.factors import paper_pool, store
 from capstone.factors.llm import load_config, make_client
 from capstone.factors.pipeline import run
 from capstone.factors.sources import FileSource, PaperlogSource
@@ -36,6 +36,9 @@ def _run(args, con) -> int:
             print("--source file needs a path to a papers .toml file", file=sys.stderr)
             return 2
         source = FileSource(args.path, keys=args.key)
+    if args.concurrency is not None and args.paper_mode != "isolated":
+        print("--concurrency needs --paper-mode isolated", file=sys.stderr)
+        return 2
     try:
         if args.source == "paperlog":
             source = PaperlogSource(args.paperlog_db, args.min_relevance, args.limit, keys=args.key)
@@ -43,7 +46,11 @@ def _run(args, con) -> int:
     except (RuntimeError, ImportError) as exc:
         print(exc, file=sys.stderr)
         return 2
-    summary = run(con, source, client, config)
+    if args.paper_mode == "isolated":
+        concurrency = args.concurrency or 0  # 0: size from the machine
+        summary = paper_pool.run_isolated(con, source, client, config, concurrency)
+    else:
+        summary = run(con, source, client, config)
     print(summary)
     return 1 if summary.papers_failed else 0
 
@@ -136,6 +143,17 @@ def main(argv: list[str] | None = None) -> int:
         "--key", action="append", help="run only this paper (e.g. arxiv:2502.16789); repeatable"
     )
     run_cmd.add_argument("--config", help="parameters file (default: config/factors.toml)")
+    run_cmd.add_argument(
+        "--paper-mode",
+        choices=("sequential", "isolated"),
+        default="sequential",
+        help="isolated: every paper sees the store as the run found it, papers run side by side",
+    )
+    run_cmd.add_argument(
+        "--concurrency",
+        type=int,
+        help="papers in flight with --paper-mode isolated (default 0: from the machine's cores)",
+    )
 
     commands.add_parser("list", help="stored factors")
     lineage_cmd = commands.add_parser("lineage", help="paper and hypothesis behind a factor")
