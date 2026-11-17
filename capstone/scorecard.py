@@ -48,6 +48,7 @@ from pathlib import Path
 import pandas as pd
 
 from capstone.funnel import Thresholds, thresholds_dict
+from capstone.power import MinDetectableSharpe
 
 SCORECARD_COLUMNS: tuple[str, ...] = (
     "best",
@@ -121,7 +122,11 @@ class GateHeader:
     (NaN when nothing passed stage 1); `pbo` is CSCV on the search period's
     variants (NaN when infeasible); `avg_correlation` is across every
     variant on the search period. `registered_utc` is when the config went
-    on the ledger.
+    on the ledger. `min_detectable_sharpe` is, per stage and end to end, the
+    annualised Sharpe a real family needs to pass at 50% and 80% power under
+    this gate's own configuration (`capstone.power`, `power_sims` simulated
+    worlds); reported only, never read by a decision, and None (with
+    `power_sims` 0) when no power budget was run.
     """
 
     config_hash: str
@@ -144,6 +149,8 @@ class GateHeader:
     search_fdr_estimate: float
     pbo: float
     avg_correlation: float
+    min_detectable_sharpe: tuple[MinDetectableSharpe, ...] | None = None
+    power_sims: int = 0
 
 
 HEADER_FIELDS: tuple[str, ...] = tuple(f.name for f in dataclasses.fields(GateHeader))
@@ -265,6 +272,10 @@ def read_report(path: str | Path) -> GateResult:
     h["trial_scope"] = TrialScope(**h["trial_scope"])
     for name in ("search_fdr_estimate", "pbo", "avg_correlation"):
         h[name] = _number(h[name])
+    if h.get("min_detectable_sharpe") is not None:
+        h["min_detectable_sharpe"] = tuple(
+            MinDetectableSharpe(**m) for m in h["min_detectable_sharpe"]
+        )
     accepted = tuple(card.index[card["accepted"]])
     if list(accepted) != [str(a) for a in report["accepted"]]:
         raise ValueError(f"{path}: the accepted families disagree with the scorecard")
