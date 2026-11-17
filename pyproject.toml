@@ -14,13 +14,14 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "ruff==0.15.5"]  # pinned: an unpinned linter reds CI on its own schedule
+agents = ["anthropic>=1.0"]  # capstone.factors model calls; tests use a fake client
 
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["capstone", "capstone.incubation", "capstone.pipeline"]
+packages = ["capstone", "capstone.incubation", "capstone.pipeline", "capstone.strategy", "capstone.execution", "capstone.factors"]  # list every subpackage (tests check)
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
