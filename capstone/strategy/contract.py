@@ -344,6 +344,15 @@ def _target_weights(spec: StrategySpec, panel: Panel, as_of) -> pd.Series:
 
     if isinstance(spec, ResearchStrategySpec):
         return research_weights(spec, panel, as_of)
+    if hasattr(spec, "specs"):
+        from capstone.strategy.portfolio import PortfolioSpec, allocation, portfolio_target
+
+        if not isinstance(spec, PortfolioSpec):
+            raise ValueError("unsupported portfolio specification")
+        if hasattr(spec, "members"):
+            return spec.weights(panel, as_of)
+        allocated = allocation(spec.specs, spec.returns, as_of, mode=spec.mode)
+        return portfolio_target(spec.specs, panel, as_of, allocated)[0]
     if isinstance(spec, BenchmarkSpec):
         return benchmark_target(spec, panel, as_of)
     if isinstance(spec, ReferenceStrategySpec):

@@ -11,12 +11,14 @@ from capstone.factors.research_contracts import canonical
 from capstone.strategy.compiled import COMMON, RULES, CompiledStrategySpec
 from capstone.strategy.contract import StrategySpec
 from capstone.strategy.diversified import DiversifiedStrategySpec
+from capstone.strategy.portfolio import PortfolioSpec
 from capstone.strategy.program import ProgramStrategySpec
 from capstone.strategy.program_schedule import ProgramSchedule
 from capstone.strategy.reference import BenchmarkSpec, ReferenceStrategySpec
 from capstone.strategy.research import contracts
 from capstone.strategy.research_spec import ResearchStrategySpec
 from capstone.strategy.schedule_dispatch import decision_due
+from capstone.strategy.selected_portfolio import SelectedPortfolioSpec
 
 
 @pytest.fixture
@@ -100,10 +102,36 @@ def test_reference_research_and_benchmark_known_types(panel):
     assert not decision_due(momentum, panel, "2020-06-24")
 
 
-def test_unknown_types_fail_closed(panel):
+def test_portfolio_and_cash_selection_transition(panel):
+    pool = PortfolioSpec((program(), compiled("weekly_reversal")), pd.DataFrame())
+    assert decision_due(pool, panel, "2020-06-26")
+    assert not decision_due(pool, panel, "2020-06-24")
+    empty = SelectedPortfolioSpec(
+        pool.specs,
+        pool.returns,
+        schedule=({"decision_session": "2020-06-24", "start": "2020-06-25", "selected": []},),
+    )
+    assert decision_due(empty, panel, "2020-06-24")
+    assert not decision_due(empty, panel, "2020-06-25")
+
+
+def test_unknown_types_and_unknown_portfolio_members_fail_closed(panel):
     unknown = SimpleNamespace(method="weekly_reversal", specs=())
     with pytest.raises(ValueError, match="unsupported strategy schedule type"):
         decision_due(unknown, panel, "2020-06-23")
+    # A due known member cannot short-circuit validation of an unknown member.
+    with pytest.raises(ValueError, match="unsupported strategy schedule type"):
+        decision_due(PortfolioSpec((program(), unknown), pd.DataFrame()), panel, "2020-06-23")
+
+
+def test_empty_selection_boundary_cannot_execute_on_a_non_session(panel):
+    empty = SelectedPortfolioSpec(
+        (program(),),
+        pd.DataFrame(),
+        schedule=({"decision_session": "2020-06-27", "start": "2020-06-29", "selected": []},),
+    )
+    with pytest.raises(ValueError, match="observed session"):
+        decision_due(empty, panel, "2020-06-27")
 
 
 def test_all_recognized_leaves_reject_pre_anchor_and_non_session_decisions(panel):
