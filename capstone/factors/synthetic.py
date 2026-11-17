@@ -4,7 +4,8 @@ Learned memory search is checked here before it sees real data: the planted
 factor is known, so "did the deepen move find it?" is a measurement.
 
 `make_panel` draws every field of the factor grammar for a set of stocks and
-days. Returns are noise plus the planted part: the planted factor's
+days (the annual accounting fields last, so the daily draws do not depend on
+them). Returns are noise plus the planted part: the planted factor's
 cross-sectional z-score on day t, times `beta`, is added to day t+1's
 return. The planted factor is short-term reversal, -ts_sum(returns, 5),
 computed day by day from the returns drawn so far. With beta = 0 the panel is
@@ -27,7 +28,7 @@ import pandas as pd
 
 from capstone.factors.deepen import Scored
 from capstone.factors.interpret import evaluate
-from capstone.factors.tree import Node, identity_key
+from capstone.factors.tree import FUNDAMENTAL_FIELDS, Node, identity_key
 
 PLANTED = "-ts_sum(returns, 5)"
 
@@ -79,6 +80,9 @@ def make_panel(spec: PanelSpec) -> dict[str, pd.DataFrame | pd.Series]:
     prev_cap = np.vstack([price0 * shares, cap[:-1]])
     mkt = (prev_cap * returns).sum(axis=1) / prev_cap.sum(axis=1)
 
+    # Drawn last, so every daily field is what it was before fundamentals existed.
+    fundamentals = _fundamentals(rng, t_max, n)
+
     dates = pd.bdate_range("2000-01-03", periods=t_max)
     stocks = [f"S{i:03d}" for i in range(n)]
 
@@ -95,7 +99,33 @@ def make_panel(spec: PanelSpec) -> dict[str, pd.DataFrame | pd.Series]:
         "shares": frame(shares_panel),
         "cap": frame(cap),
         "mkt_return": pd.Series(mkt, index=dates),
+        **{name: frame(values) for name, values in fundamentals.items()},
     }
+
+
+# A synthetic fiscal year is 252 rows; its values are visible 63 rows (about
+# 90 calendar days) after it ends, as `sd.available_from`'s annual rule.
+FISCAL_YEAR, REPORT_LAG = 252, 63
+
+
+def _fundamentals(rng: np.random.Generator, t_max: int, n: int) -> dict[str, np.ndarray]:
+    """Annual book, earnings, sales and assets: the year ending at row 252k - 1
+    is visible from row 252k - 1 + 63 to the next year's, NaN before the first.
+    No planted signal."""
+    visible = np.arange(REPORT_LAG - 1, t_max, FISCAL_YEAR)
+    assets = np.exp(rng.normal(8.0, 0.5, n))
+    out = {name: np.full((t_max, n), np.nan) for name in FUNDAMENTAL_FIELDS}
+    for start in visible:
+        assets = assets * np.exp(rng.normal(0.05, 0.1, n))
+        year = {
+            "book": assets * rng.uniform(0.2, 0.6, n),
+            "earnings": assets * rng.normal(0.05, 0.03, n),
+            "sales": assets * rng.uniform(0.5, 1.5, n),
+            "assets": assets,
+        }
+        for name in FUNDAMENTAL_FIELDS:
+            out[name][start:] = year[name]
+    return out
 
 
 def forward_returns(returns: pd.DataFrame, horizon: int) -> pd.DataFrame:

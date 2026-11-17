@@ -61,6 +61,10 @@ FIELD_GROUPS = {
     "returns": "returns",
     "cap": "size",
     "mkt_return": "market",
+    "book": "fundamental",
+    "earnings": "fundamental",
+    "sales": "fundamental",
+    "assets": "fundamental",
 }
 # q0..q3: Q < 0.05, 0.05 <= Q < 0.10, 0.10 <= Q < 0.20, Q >= 0.20.
 QUALITY_EDGES = (0.05, 0.10, 0.20)
