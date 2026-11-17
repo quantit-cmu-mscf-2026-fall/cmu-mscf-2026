@@ -26,6 +26,7 @@ def _due(spec, panel, as_of):
     from capstone.strategy.contract import StrategySpec
     from capstone.strategy.diversified import DiversifiedStrategySpec
     from capstone.strategy.diversified import decision_due as diversified_due
+    from capstone.strategy.portfolio import PortfolioSpec
     from capstone.strategy.program import ProgramStrategySpec
     from capstone.strategy.program import decision_due as program_due
     from capstone.strategy.program_schedule import session_date
@@ -33,6 +34,7 @@ def _due(spec, panel, as_of):
     from capstone.strategy.reference import BenchmarkSpec, ReferenceStrategySpec
     from capstone.strategy.reference import decision_due as reference_due
     from capstone.strategy.research_spec import ResearchStrategySpec
+    from capstone.strategy.selected_portfolio import SelectedPortfolioSpec
 
     require_current_implementation(spec)
     at = session_date(as_of, "decision")
@@ -52,6 +54,12 @@ def _due(spec, panel, as_of):
     if isinstance(spec, leaf_types):
         if at < session_date(spec.anchor, "anchor"):
             raise ValueError("formation decision must be on or after anchor")
+    if isinstance(spec, SelectedPortfolioSpec):
+        boundary = any(pd.Timestamp(row["decision_session"]) == at for row in spec.schedule)
+        member_due = [decision_due(member, panel, at) for member in spec.members(at)]
+        return boundary or any(member_due)
+    if isinstance(spec, PortfolioSpec):
+        return any([decision_due(member, panel, at) for member in spec.specs])
     if isinstance(spec, ProgramStrategySpec):
         return program_due(spec, panel, at)
     if isinstance(spec, CompiledStrategySpec):

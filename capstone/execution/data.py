@@ -64,6 +64,19 @@ class FrozenSnapshotSource:
             cut(source.half_spread),
             cut(source.sic),
             source.data_version,
+            source.calendar,
+            None
+            if source.availability is None
+            else {n: cut(a) for n, a in source.availability.items()},
+            cut(source.company),
+            None
+            if source.fundamentals is None
+            else source.fundamentals[
+                pd.to_datetime(source.fundamentals.published_at).dt.normalize() < as_of
+            ].copy(),
+            source.target_cache,
+            # Kept as is: a cut current panel no longer matches it and is refused.
+            provenance=source.provenance,
         )
 
 
