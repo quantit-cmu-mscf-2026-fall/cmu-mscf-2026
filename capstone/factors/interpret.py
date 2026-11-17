@@ -27,7 +27,8 @@ it defines them:
 Three are not in Alpha101 and are defined here:
 
 - `ema(x, d)`: exponential moving average with span d (smoothing 2 / (d + 1)),
-  NaN until d days have been seen.
+  NaN until d days have been seen. In strict mode an undefined input day is
+  also NaN; later defined days resume the same moving-average state.
 - `zscore(x, d)`: (x - ts_mean(x, d)) / ts_std(x, d), per stock over time.
 - `winsorize(x)`: each day, clipped to the cross-sectional mean plus or minus
   three standard deviations.
@@ -94,6 +95,7 @@ def evaluate(
         mask = cross_sectional_universe
         if (
             not strict_domains
+            or not isinstance(mask, pd.DataFrame)
             or not mask.index.equals(template.index)
             or not mask.columns.equals(template.columns)
         ):
@@ -203,7 +205,8 @@ def _windowed(func: str, x: pd.DataFrame, d: int, *, strict_domains=False) -> pd
     if func == "delta":
         return x - x.shift(d)
     if func == "ema":
-        return x.ewm(span=d, adjust=False, min_periods=d).mean()
+        result = x.ewm(span=d, adjust=False, min_periods=d).mean()
+        return result.where(x.notna()) if strict_domains else result
     roll = x.rolling(d, min_periods=d)
     if func == "ts_mean":
         return roll.mean()
@@ -231,7 +234,13 @@ def _windowed(func: str, x: pd.DataFrame, d: int, *, strict_domains=False) -> pd
         with np.errstate(divide="ignore", invalid="ignore"):
             mean, std = roll.mean(), roll.std()
             result = (x - mean) / std
-            return result.where(np.isfinite(mean) & np.isfinite(std)) if strict_domains else result
+            return (
+                result.where(
+                    np.isfinite(mean) & np.isfinite(std) & (std > 0) & (roll.max() > roll.min())
+                )
+                if strict_domains
+                else result
+            )
     raise EvaluationError(f"no implementation for {func}")
 
 
@@ -275,10 +284,19 @@ def _pair(
     roll = x.rolling(d, min_periods=d)
     if strict_domains and func == "ts_corr":
         cov, var_x = roll.cov(y), roll.var()
-        var_y = y.rolling(d, min_periods=d).var()
+        other = y.rolling(d, min_periods=d)
+        var_y = other.var()
         valid = (
-            np.isfinite(cov) & np.isfinite(var_x) & np.isfinite(var_y) & (var_x > 0) & (var_y > 0)
+            np.isfinite(cov)
+            & np.isfinite(var_x)
+            & np.isfinite(var_y)
+            & (var_x > 0)
+            & (var_y > 0)
+            & (roll.max() > roll.min())
+            & (other.max() > other.min())
         )
         result = cov / np.sqrt(var_x) / np.sqrt(var_y)
-        return result.where(valid & (result.abs() <= 1 + 1e-10))
+        # The moment accumulators round independently near +/-1. Keep defined
+        # correlations bounded without letting a non-finite ratio become a value.
+        return result.clip(-1, 1).where(valid & np.isfinite(result))
     return roll.corr(y) if func == "ts_corr" else roll.cov(y)
