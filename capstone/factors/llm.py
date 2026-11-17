@@ -163,10 +163,22 @@ def call_tool(
         usage["calls"] += 1
         usage["input_tokens"] += getattr(tokens, "input_tokens", 0) or 0
         usage["output_tokens"] += getattr(tokens, "output_tokens", 0) or 0
-    for block in response.content:
-        if getattr(block, "type", None) == "tool_use" and block.name == tool["name"]:
+    return tool_input(response, tool["name"])
+
+
+def tool_input(response, tool_name, *, exact=False):
+    content = getattr(response, "content", None)
+    if not isinstance(content, (tuple, list)):
+        raise ValueError("response content must be a sequence of blocks")
+    blocks = [block for block in content if getattr(block, "type", None) == "tool_use"]
+    if exact and (len(blocks) != 1 or getattr(blocks[0], "name", None) != tool_name):
+        raise ValueError("response must contain exactly one expected tool call")
+    for block in blocks:
+        if block.name == tool_name:
+            if exact and not isinstance(getattr(block, "input", None), dict):
+                raise ValueError("tool input must be an object")
             return dict(block.input)
-    raise ValueError(f"the model did not call {tool['name']}")
+    raise ValueError(f"the model did not call {tool_name}")
 
 
 def grammar_help() -> str:
