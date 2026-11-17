@@ -462,12 +462,44 @@ def test_one_entry_cannot_both_retract_and_exclude(tmp_path, monkeypatch):
         runlog.trial_count("sweep")
 
 
-def test_excluding_seen_runs_warns_and_can_be_counted(tmp_path, monkeypatch):
+def test_seen_runs_always_count_including_the_gate_caller(tmp_path, monkeypatch):
+    from capstone import gate
+    from capstone.scorecard import TrialScope
+
     monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
     _exclude_nine_losers(_ten_seen_runs())
-    with pytest.warns(UserWarning, match="9 run"):
-        assert runlog.trial_count("mom") == 1
+    assert runlog.trial_count("mom") == 10
     assert runlog.trial_count("mom", count_seen_exclusions=True) == 10
+    assert gate._trial_count(TrialScope(name="mom")) == 10
+
+
+def test_the_legacy_seen_opt_out_cannot_return_an_inferential_count(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    _exclude_nine_losers(_ten_seen_runs())
+    with pytest.raises(ValueError, match="seen.*always count"):
+        runlog.trial_count("mom", count_seen_exclusions=False)
+
+
+def test_seen_corrections_preserve_family_and_tag_scope(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    run = runlog.log_run("mom", metrics={"sharpe": 0}, tags=["real"])
+    runlog.log_run("mom", metrics={"sharpe": 1}, tags=["synthetic"])
+    runlog.log_run("other", metrics={"sharpe": 2}, tags=["real"])
+    _correction("mom", [{"ts_utc": run["ts_utc"]}])
+    assert runlog.trial_count("mom", include_tags=["real"]) == 1
+    assert runlog.trial_count("mom", exclude_tags=["synthetic"]) == 1
+    assert runlog.trial_count("other") == 1
+
+
+def test_seen_trials_survive_corrections_and_retractions(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    runs = _ten_seen_runs()
+    correction = _correction("mom", [{"ts_utc": r["ts_utc"]} for r in runs])
+    assert runlog.trial_count("mom") == 10
+    undo = _retraction(correction)
+    assert runlog.trial_count("mom") == 10
+    _retraction(undo)
+    assert runlog.trial_count("mom") == 10
 
 
 def test_excluding_unseen_runs_does_not_warn(tmp_path, monkeypatch, recwarn):
@@ -480,7 +512,7 @@ def test_excluding_unseen_runs_does_not_warn(tmp_path, monkeypatch, recwarn):
     assert not [w for w in recwarn if issubclass(w.category, UserWarning)]
 
 
-def test_the_seen_warning_is_scoped_to_the_counted_family(tmp_path, monkeypatch, recwarn):
+def test_seen_corrections_do_not_affect_another_family(tmp_path, monkeypatch, recwarn):
     monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
     seen = runlog.log_run("loud", metrics={"sharpe": 1.0})
     runlog.log_run("loud", metrics={"sharpe": 0.5})
@@ -500,14 +532,38 @@ def test_stats_shows_what_was_excluded_and_what_was_seen(tmp_path, monkeypatch, 
     _correction("dup", [{"ts_utc": "2001-01-01T00:00:00+00:00"}])  # matches no run
     runlog.main(["stats"])
     out = capsys.readouterr().out
-    assert "trials (corrections applied): 4" in out  # mom 1 + dup 3
-    assert "excluded by corrections: 9" in out
-    assert "of which results already recorded (seen): 9" in out
-    assert "trials if seen exclusions were counted: 13" in out
+    assert f"trials (corrections applied): {runlog.trial_count()}" in out
+    assert runlog.trial_count() == 13  # mom 10 + dup 3
+    assert "targeted by corrections: 9" in out
+    assert "excluded unseen runs: 0" in out
+    assert "seen correction targets retained as trials: 9" in out
     assert "correction entries: 4 (1 retracted)" in out
     assert "correction items matching no earlier run: 1" in out
     assert "  mom: 9 (9)" in out
+    assert "  mom: 10" in out
     assert "  dup: 3" in out and "dup: 0" not in out
+
+
+@pytest.mark.parametrize("items, expected, unmatched", [(1, 2, 0), (2, 1, 0), (3, 1, 1)])
+def test_each_exclusion_item_consumes_one_duplicate_entry(
+    tmp_path, monkeypatch, capsys, items, expected, unmatched
+):
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    duplicate = runlog.log_run("sweep", params={"factor_id": "a"})
+    path = tmp_path / runlog.LEDGER_FILENAME
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(duplicate) + "\n")
+    runlog.log_run("sweep", params={"factor_id": "b"})
+    correction = _correction("sweep", [{"ts_utc": duplicate["ts_utc"], "factor_id": "a"}] * items)
+    assert runlog.trial_count("sweep") == expected
+    runlog.main(["stats"])
+    out = capsys.readouterr().out
+    assert f"trials (corrections applied): {expected}" in out
+    assert f"correction items matching no earlier run: {unmatched}" in out
+    undo = _retraction(correction)
+    assert runlog.trial_count("sweep") == 3
+    _retraction(undo)
+    assert runlog.trial_count("sweep") == expected
 
 
 def test_a_correction_matches_the_exact_json_value(tmp_path, monkeypatch):
