@@ -58,6 +58,7 @@ from capstone.factors.tree import (
     BINARY_WINDOW_FUNCS,
     FUNCS,
     MARKET_FIELDS,
+    REGIME_FUNCS,
     BinOp,
     Call,
     Const,
@@ -193,10 +194,39 @@ def _eval_node(
         if node.func in BINARY_PARAMETER_FUNCS:
             exponent = _eval(node.arg2, panel, template, **mode)
             return np.sign(x) * np.abs(x) ** exponent
+        if node.func in REGIME_FUNCS:
+            return _regime(node.func, x, panel, template)
         if FUNCS.get(node.func):
             return _windowed(node.func, x, node.window, strict_domains=strict_domains)
         return _plain(node.func, x, **mode)
     raise TypeError(f"not a Node: {node!r}")
+
+
+# volscale's target annualised volatility: a source constant, never fitted to our data
+# (Barroso & Santa-Clara 2015 scale momentum to a 12% target). Carried over unchanged;
+# the 0.12 figure has not been re-verified against the paper.
+VOLSCALE_TARGET = 0.12
+
+
+def _regime(func: str, x, panel: Panel, template: pd.DataFrame) -> pd.DataFrame:
+    """`volscale(x)` = x * VOLSCALE_TARGET / rv126; `bear_gate(x)` = x, 0 in a bear
+    market. Both from `mkt_return` through t-1 (`capstone.regimes`); NaN in warm-up."""
+    from capstone import regimes
+
+    if "mkt_return" not in panel:
+        raise EvaluationError(f"{func} needs the panel's mkt_return")
+    market = panel["mkt_return"]
+    if isinstance(market, pd.DataFrame):
+        market = market.iloc[:, 0]
+    market = market.reindex(template.index).astype(float)
+    if np.isscalar(x):
+        x = pd.DataFrame(float(x), index=template.index, columns=template.columns)
+    if func == "volscale":
+        rv = regimes.regime_series(market)["rv126"]
+        return x.mul(VOLSCALE_TARGET / rv.where(rv > 0), axis=0)
+    if func == "bear_gate":
+        return x.mul(1.0 - regimes.regime_series(market)["bear"], axis=0)
+    raise EvaluationError(f"no implementation for {func}")
 
 
 def _windowed(func: str, x: pd.DataFrame, d: int, *, strict_domains=False) -> pd.DataFrame:
