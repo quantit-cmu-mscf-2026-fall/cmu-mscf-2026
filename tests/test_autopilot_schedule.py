@@ -27,6 +27,10 @@ def toy():
     return Stage(name="a", unit="T", run=lambda ctx: StageResult())
 
 
+# `main` validates against every registered stage; the intake stages add these sections.
+INTAKE = '[sources]\ninbox = "inbox"\n[registration]\ntemplate = "t.json"\nauthority_id = "a"\n'
+
+
 def make_config(tmp_path, **sections):
     raw = {"autopilot": {"run_root": str(tmp_path / "run"), "policy_id": "p1"}, **sections}
     return cfg.validate(raw, [toy()], extra=SECTIONS, path=tmp_path / "autopilot.toml")
@@ -80,7 +84,7 @@ def test_rendering_registers_nothing_and_writes_only_under_out(tmp_path):
     ],
 )
 def test_schedule_refuses_a_bad_time_or_name_with_one_line(tmp_path, capsys, line, needle):
-    text = f'[autopilot]\nrun_root = "run"\npolicy_id = "p1"\n[schedule]\n{line}\n'
+    text = f'[autopilot]\nrun_root = "run"\npolicy_id = "p1"\n[schedule]\n{line}\n' + INTAKE
     (tmp_path / "autopilot.toml").write_text(text, encoding="utf-8")
     assert schedule.main(["--config", str(tmp_path / "autopilot.toml")]) == 2
     err = capsys.readouterr().err
@@ -90,7 +94,7 @@ def test_schedule_refuses_a_bad_time_or_name_with_one_line(tmp_path, capsys, lin
 
 def test_main_prints_the_document(tmp_path, capsys):
     (tmp_path / "autopilot.toml").write_text(
-        '[autopilot]\nrun_root = "run"\npolicy_id = "p1"\n', encoding="utf-8"
+        '[autopilot]\nrun_root = "run"\npolicy_id = "p1"\n' + INTAKE, encoding="utf-8"
     )
     out = tmp_path / "out"
     argv = ["--config", str(tmp_path / "autopilot.toml"), "--out", str(out)]

@@ -22,7 +22,17 @@ def _toml(path):
     return tomllib.loads(Path(path).read_text(encoding="utf-8"))
 
 
-def ready(tmp_path, *, edits=()):
+INTAKE = """
+[sources]
+inbox = "inbox"
+
+[registration]
+template = "registration.template.json"
+authority_id = "synthetic-review"
+"""
+
+
+def ready(tmp_path, *, edits=(), intake=False):
     """init's starter set with every marker resolved and the world it names created."""
     folder = tmp_path / "run-config"
     scaffold.init(folder)
@@ -31,8 +41,12 @@ def ready(tmp_path, *, edits=()):
     for old, new in edits:
         assert old in text
         text = text.replace(old, new)
+    text += INTAKE if intake else ""  # the CLI discovers the intake stages, which add sections
     config.write_text(text, encoding="utf-8")
     (folder / "runs").mkdir()
+    if intake:
+        (folder / "inbox").mkdir()
+        (folder / "registration.template.json").write_text("{}", encoding="utf-8")
     registry = folder / "registry"
     (registry / ".git").mkdir(parents=True)
     (registry / "deploy").mkdir()
@@ -127,7 +141,7 @@ def test_a_resolved_world_is_ready(tmp_path):
 
 
 def test_preflight_command_exit_codes_and_report_beside_the_config(tmp_path, capsys):
-    config = ready(tmp_path)
+    config = ready(tmp_path, intake=True)
     assert cli.main(["preflight", "--config", str(config)]) == 0
     report = json.loads((config.parent / "preflight.json").read_text(encoding="utf-8"))
     assert report["schema"] == preflight.SCHEMA and report["ready"] and report["failed"] == []
@@ -143,7 +157,7 @@ def test_preflight_command_exit_codes_and_report_beside_the_config(tmp_path, cap
 
 
 def test_the_report_goes_under_the_run_root_once_it_exists(tmp_path):
-    config = ready(tmp_path)
+    config = ready(tmp_path, intake=True)
     run_root = config.parent / "runs" / "first-run"
     run_root.mkdir(parents=True)
     assert cli.main(["preflight", "--config", str(config)]) == 0
