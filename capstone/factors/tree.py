@@ -1,8 +1,9 @@
 """Factor expressions as syntax trees: a closed grammar, two canonical keys.
 
-A factor is a string in a small grammar over daily stock and market fields (`FIELDS`),
-parsed into an immutable tree. `parse` is the only way in for a string: anything outside
-the grammar raises `ParseError`, and nothing calls eval or exec.
+A factor is a string in a small grammar over daily stock and market fields and
+annual accounting fields (`FIELDS`), parsed into an immutable tree. `parse` is the
+only way in for a string: anything outside the grammar raises `ParseError`, and
+nothing calls eval or exec.
 
 Two canonical keys, for two different questions:
 
@@ -44,7 +45,25 @@ STOCK_FIELDS = (*OHLCV, "returns", "shares", "cap")
 # A factor must still read at least one stock field: one built from market
 # fields alone ranks every stock the same on every date.
 MARKET_FIELDS = ("mkt_return",)
-FIELDS = (*STOCK_FIELDS, *MARKET_FIELDS)
+
+# Annual accounting fields, per stock (QUANTIT-118), as dates x permno frames
+# from `factors.fundamentals`, each dated by when it could have been known, in
+# Compustat's units ($ millions): the four that the standard accounting
+# anomalies are built from.
+#   book: book equity, Fama-French's definition (value: book / cap);
+#   earnings: income before extraordinary items, `ib` (earnings yield, and
+#     with book, profitability);
+#   sales: net sales, `sale` (sales-to-price, margins);
+#   assets: total assets, `at` (investment: asset growth; ROA).
+# A fiscal year's value is visible only from `sd.available_from` with
+# report_col=None (the first trading day after the fiscal year end + 90
+# days) and is held until the next year's is; never before. A panel built
+# without fundamentals has none of these fields, and a tree reading one fails
+# to evaluate there.
+FUNDAMENTAL_FIELDS = ("book", "earnings", "sales", "assets")
+# Fields with a value per stock: an expression must read at least one.
+PER_STOCK_FIELDS = (*STOCK_FIELDS, *FUNDAMENTAL_FIELDS)
+FIELDS = (*STOCK_FIELDS, *MARKET_FIELDS, *FUNDAMENTAL_FIELDS)
 
 # func name -> takes a window argument. Windows must be integer literals.
 FUNCS = {
@@ -306,7 +325,7 @@ def parse(expression: str) -> Node:
         # (a left-leaning chain thousands of nodes deep) must be caught here too.
         if node_count(node) > MAX_EXPRESSION_NODES:
             raise ParseError(f"expression exceeds {MAX_EXPRESSION_NODES} nodes")
-        if not features_used(node) & set(STOCK_FIELDS):
+        if not features_used(node) & set(PER_STOCK_FIELDS):
             raise ParseError("expression references no stock field")
     except RecursionError:
         raise ParseError("expression is nested too deeply") from None
