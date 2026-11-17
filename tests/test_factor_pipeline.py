@@ -251,6 +251,29 @@ def test_cli_run_list_lineage_and_stats(tmp_path, monkeypatch, capsys):
     assert cli.main(["--db", db, "lineage", "0000000000000000"]) == 1
 
 
+def test_cli_isolated_paper_mode_stores_what_sequential_does(tmp_path, monkeypatch, capsys):
+    papers = tmp_path / "papers.toml"
+    papers.write_text('[[papers]]\nkey = "arxiv:1"\ntitle = "Reversal"\nabstract = "A"\n')
+    config = tmp_path / "factors.toml"
+    config.write_text(
+        'model = "test-model"\nhypotheses_per_paper = 1\nfactors_per_hypothesis = 1\n'
+    )
+    monkeypatch.setattr(cli, "make_client", ScriptedClient)
+    base = ["run", "--source", "file", str(papers), "--config", str(config)]
+
+    out = {}
+    for name, extra in (("seq", []), ("iso", ["--paper-mode", "isolated", "--concurrency", "2"])):
+        db = str(tmp_path / f"{name}.db")
+        assert cli.main(["--db", db, *base, *extra]) == 0
+        out[name] = capsys.readouterr().out
+        assert cli.main(["--db", db, "list"]) == 0
+        out[name + "-list"] = capsys.readouterr().out
+    assert out["seq"] == out["iso"] and out["seq-list"] == out["iso-list"]
+
+    assert cli.main(["--db", str(tmp_path / "x.db"), *base, "--concurrency", "2"]) == 2
+    assert "--paper-mode isolated" in capsys.readouterr().err
+
+
 def _fake_paperlog(monkeypatch, rows):
     api = ModuleType("paperlog.api")
     api.pending = lambda **kw: pytest.fail("a keyed source must not read the queue")
