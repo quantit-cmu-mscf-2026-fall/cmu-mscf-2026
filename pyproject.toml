@@ -14,6 +14,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "ruff==0.15.5"]  # pinned: an unpinned linter reds CI on its own schedule
+paper = ["ib_async>=1.0"]  # optional: the paper broker adapter (capstone.execution.adapter)
 
 [build-system]
 requires = ["setuptools>=68"]
