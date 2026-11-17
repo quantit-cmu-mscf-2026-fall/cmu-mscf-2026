@@ -9,11 +9,12 @@ measures that structure: how many variants each hypothesis family searched,
 how correlated variants are within and across families, and how their returns
 behave over time (autocorrelation, tails, volatility clustering).
 
-It reads only the return matrix and each variant's family. It never reads a
-mean, Sharpe ratio or p-value, so nothing it reports says whether any strategy
-works, and the thresholds calibrated from it can't be steered by which real
-candidates look good. The result is logged to the ledger (tag `methodology`,
-outside any strategy's trial scope) before it is printed.
+It reads only the return matrix and each variant's family. It never keeps or
+reports a mean, Sharpe ratio or p-value (returns are only centred), so nothing
+it reports says whether any strategy works, and the thresholds calibrated from
+it can't be steered by which real candidates look good. The result is logged to
+the ledger (tags `synthetic` and `methodology`: bookkeeping, not a trial) before
+it is printed.
 """
 
 from __future__ import annotations
@@ -45,11 +46,22 @@ def _pair_means(corr: pd.DataFrame, family: pd.Series) -> tuple[float, float, fl
     )
 
 
+def _within_by_family(corr: pd.DataFrame, family: pd.Series) -> dict[str, float]:
+    """Mean pairwise correlation within each family, so no one family's pairs dominate."""
+    out = {}
+    for name, members in family.groupby(family).groups.items():
+        c = corr.loc[members, members].to_numpy()
+        upper = np.triu(np.ones_like(c, dtype=bool), k=1) & np.isfinite(c)
+        out[str(name)] = round(float(c[upper].mean()), 4)
+    return out
+
+
 def measure(returns: pd.DataFrame, family: pd.Series) -> dict:
     """Structure of a dates x variants matrix with one family label per variant."""
     returns = returns[family.index]
     corr = returns.corr(min_periods=MIN_OVERLAP)
     within, across, within_factor = _pair_means(corr, family)
+    by_family = _within_by_family(corr, family)
 
     demeaned = returns - returns.mean()  # centred only; the mean itself is never kept
     ar1 = returns.apply(lambda s: s.dropna().autocorr(1))
@@ -72,6 +84,8 @@ def measure(returns: pd.DataFrame, family: pd.Series) -> dict:
         "within_family_corr": round(within, 4),
         "across_family_corr": round(across, 4),
         "within_factor_corr": round(within_factor, 4),
+        "within_family_corr_by_family": by_family,
+        "within_family_corr_family_median": round(float(np.median(list(by_family.values()))), 4),
         "ar1": q(ar1),
         "excess_kurtosis": q(kurt),
         "squared_ar1": q(sq_ar1),
@@ -103,7 +117,7 @@ def main() -> None:
         "generator-structure",
         params=params,
         metrics=structure,
-        tags=["methodology", "calibration"],
+        tags=["synthetic", "methodology", "calibration"],
         notes="structure only: no mean, Sharpe or p-value is read",
     )
     if args.out:

@@ -253,9 +253,20 @@ holdout was not opened.
 p-value read):
 - 15 hypothesis families, 594 variants, from 12 to 300 per family;
 - mean correlation within a family 0.59 (0.90 between one factor's trading
-  specs), across families 0.02;
+  specs), across families 0.02. The pooled 0.59 mostly reflects the
+  300-variant family (94% of the within-family pairs, 0.59 on its own); the
+  families' own means run from 0.21 to 0.95, median 0.84;
 - lag-1 autocorrelation 0.12; excess kurtosis 12; autocorrelation of squared
   returns 0.27.
+
+**K, the variants each family searched.** The matrix holds 99 factors × 6
+trading specs = 594 variants: the 53 factors drawn from papers and 46 the
+deepen agent added, all to one family (the 300-variant one, whose 4 seed
+factors it refined). The run's ledger counts 693 trials and its summary
+reports 73 deepened children judged, so up to 27 children were evaluated but
+are not in the matrix. If they were scored on the search period they are
+trials of that family, and the calibration below is rerun with that family at
+K = 462 (27 × 6 more; the last column of the table below).
 
 These are in `scripts/calibrate_crsp_v1.json`. Tails and volatility
 clustering were matched by simulating with t₅ innovations and GARCH
@@ -272,19 +283,34 @@ is a count: 0, 1 or 2 real families, at an annual Sharpe of 0.5, 1.0 or 1.5.
 | Funnel, reported alongside | stage 1 BH at **q₁ = 0.10** on bootstrap family p-values; stage 2 no gate; stage 4 BH across survivors at **q₄ = 0.50** |
 | Stage 1's p-value | `stage1 = "bootstrap"`, 1,999 draws |
 | α₃ | not registered: stage 3 isn't built |
+| Registered config | `scripts/gate_crsp_v1.json`: the `GateConfig` above, hash `299a2f42f3d3c562ef0e24b772ed3fd0b51b3b458106b135adc4e3e1bc7de361` |
 
-Worst-setting FDR and mean power (the main run, then two sensitivity runs:
-within-family correlation 0.90, and lighter tails with GARCH (0.20, 0.75)):
+`GateConfig` has no field for the decision rule, so its hash covers the
+funnel only. The rule and its q (baseline, BH at 0.05) are fixed here and in
+the same file's `decision_rule`; the gate run takes them from there. The run
+registers the file's config with
+`gate.register(GateConfig.from_dict(json.load(f)["gate_config"]))` on the
+run's ledger before scoring, replacing the crsp-v1 manifest's earlier q₄ = 0.30
+config.
 
-| Rule | Main | Correlation 0.90 | GARCH (0.20, 0.75) |
-|---|---|---|---|
-| Baseline, q = 0.05 | 0.042 / 0.865 | 0.060 / 0.828 | 0.043 / 0.862 |
-| Funnel, q₁ = 0.10, q₄ = 0.50 | 0.047 / 0.850 | 0.058 / 0.814 | 0.049 / 0.845 |
-| Baseline, q = 0.10 | 0.089 / 0.903 | **0.122** / 0.867 | 0.090 / 0.900 |
-| Funnel, q₁ = 0.10, q₄ = 0.30 | 0.032 / 0.791 | 0.042 / 0.763 | 0.032 / 0.781 |
+Worst-setting FDR and mean power. The main run is followed by four
+sensitivity runs: within-family correlation at the highest and lowest family's
+level (0.90, 0.21), lighter tails with GARCH (0.20, 0.75), and the deepened
+family at K = 462:
+
+| Rule | Main | Corr. 0.90 | Corr. 0.21 | GARCH (0.20, 0.75) | K = 462 |
+|---|---|---|---|---|---|
+| Baseline, q = 0.05 | 0.042 / 0.865 | 0.060 / 0.828 | 0.036 / 0.930 | 0.043 / 0.862 | 0.047 / 0.862 |
+| Funnel, q₁ = 0.10, q₄ = 0.50 | 0.047 / 0.850 | 0.058 / 0.814 | 0.050 / 0.896 | 0.049 / 0.845 | 0.049 / 0.836 |
+| Baseline, q = 0.10 | 0.089 / 0.903 | **0.122** / 0.867 | 0.083 / 0.957 | 0.090 / 0.900 | **0.107** / 0.895 |
+| Funnel, q₁ = 0.10, q₄ = 0.30 | 0.032 / 0.791 | 0.042 / 0.763 | 0.028 / 0.827 | 0.032 / 0.781 | 0.032 / 0.783 |
 
 Both registered rules stay below 0.08 (the 10% target less a 2-point margin)
-in every setting. BH at 10% exceeds the target when variants are near-copies.
+in every setting. With 400 seeds, an FDR near 0.05 has a standard error of
+about 0.011, so the worst case (0.060) is 1.8 standard errors under the
+cut. At K = 462 the registered rules' FDR moves by at most 0.005 and their
+power by at most 0.014, so the 27 missing children, if they were scored,
+don't change the registration. BH at 10% exceeds the target when variants are near-copies.
 With 15 families a false discovery is usually the only discovery, so the FDR
 here is close to the chance of any false discovery. The funnel does not beat
 the baseline in simulation, so the baseline decides (Q5); the funnel is

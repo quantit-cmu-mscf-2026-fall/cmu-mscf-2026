@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
+from capstone import gate
 from capstone.calibration import make_family_set
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
@@ -36,6 +38,22 @@ def test_measure_recovers_a_known_structure():
     assert m["within_family_corr"] == pytest.approx(0.64, abs=0.04)
     assert m["across_family_corr"] == pytest.approx(0.10, abs=0.03)
     assert m["ar1"]["median"] == pytest.approx(0.2, abs=0.03)
+
+
+def test_measure_reports_each_familys_correlation_apart_from_the_pooled_mean():
+    # One large tight family and one small loose one: the pooled mean follows
+    # the large family's pairs, the per-family numbers keep the small one visible.
+    parts = []
+    for name, k, w in (("big", 30, 0.8), ("small", 6, 0.2)):
+        fs = make_family_set(1, k, 0.0, 0.0, within_rho=w, n_search=2520, n_holdout=2, seed=3)
+        parts.append(fs.returns.set_axis([f"{name}{i}-v" for i in range(k)], axis=1))
+    returns = pd.concat(parts, axis=1)
+    family = pd.Series([c.rstrip("0123456789-v") for c in returns.columns], index=returns.columns)
+    m = measure_generator.measure(returns, family)
+    by = m["within_family_corr_by_family"]
+    assert by["big"] == pytest.approx(0.8, abs=0.05)
+    assert by["small"] == pytest.approx(0.2, abs=0.05)
+    assert m["within_family_corr"] > 0.7  # pooled: the big family's 435 pairs outweigh 15
 
 
 PARAMS = {
@@ -80,3 +98,22 @@ def test_summarise_marks_a_rule_unsafe_in_its_worst_setting():
     by_rule, _ = calibrate_generator.summarise(rows, target=0.10, margin=0.02)
     assert bool(by_rule.loc["A", "safe"]) and not bool(by_rule.loc["B", "safe"])
     assert by_rule.loc["B", "worst_fdr"] == pytest.approx(1 / 11)
+
+
+def test_the_registered_crsp_v1_config_is_the_one_the_doc_registers(tmp_path, monkeypatch):
+    # The gate run loads this file; its hash must be the one framework.md quotes.
+    registered = json.loads((SCRIPTS / "gate_crsp_v1.json").read_text(encoding="utf-8"))
+    config = gate.GateConfig.from_dict(registered["gate_config"])
+    t = config.thresholds
+    assert (t.stage1, t.q1, t.alpha2, t.final, t.q4) == ("bootstrap", 0.10, 1.0, "bh", 0.50)
+    assert registered["decision_rule"] | {"on": None} == {
+        "rule": "baseline",
+        "method": "bh",
+        "q": 0.05,
+        "on": None,
+    }
+    doc = (SCRIPTS.parent / "docs" / "validation" / "framework.md").read_text(encoding="utf-8")
+    assert f"`{config.config_hash}`" in doc
+
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path / "ledger"))
+    assert gate.register(config)["params"]["config_hash"] == config.config_hash
