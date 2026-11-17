@@ -24,7 +24,7 @@
       ],
       "exclude_tags": []
     },
-    "factors_digest": "d5c99ccca39bbfdeb8cdce69af65f039ca1910f32c093690470d1da03f60506a"
+    "factors_digest": null
   },
   "decision_rule": {
     "rule": "baseline",
