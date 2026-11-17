@@ -11,6 +11,7 @@ import pytest
 
 from capstone.funnel import Thresholds, thresholds_dict
 from capstone.pipeline.config import load_config
+from capstone.pipeline.executor import Resources
 from capstone.pipeline.rows import REPO
 from capstone.pipeline.search_identity import config_digest
 
@@ -33,7 +34,7 @@ def _digest_without_optional_fields(config):
     for name, default in (*optional, ("regime_operators", False)):
         if content[name] == default:
             del content[name]
-    del content["concurrency"]
+    del content["concurrency"], content["resources"]
     text = json.dumps(content, sort_keys=True, default=str, separators=(",", ":"))
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -52,6 +53,7 @@ def test_concurrency_never_enters_the_digest_but_paper_mode_does_when_set(name):
     assert config.paper_mode == "sequential"
     digest = config_digest(config)
     assert config_digest(replace(config, concurrency=7)) == digest
+    assert config_digest(replace(config, resources=Resources(3, 512))) == digest
     assert config_digest(replace(config, paper_mode="isolated")) != digest
     assert config_digest(replace(config, deepen_on_budget="stop")) != config_digest(
         replace(config, deepen_on_budget="raise")

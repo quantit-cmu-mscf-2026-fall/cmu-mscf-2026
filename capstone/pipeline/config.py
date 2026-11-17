@@ -21,7 +21,7 @@ import pandas as pd
 from capstone.factors.evaluation import TradingSpec, grid
 from capstone.factors.llm import FactorConfig
 from capstone.funnel import Thresholds
-from capstone.pipeline.executor import AUTO
+from capstone.pipeline.executor import AUTO, Resources
 from capstone.pipeline.placebo import METHODS as PLACEBO_METHODS
 from capstone.pipeline.rows import REPO
 
@@ -129,6 +129,9 @@ class E2EConfig:
     # `[factors] regime_operators`: admits the grammar's market-regime operators
     # (`tree.REGIME_FUNCS`). Off by default; enters the digest only when set.
     regime_operators: bool = False
+    # `[resources]` caps on the evaluation pool (`pipeline.panel_pool`), with
+    # `CAPSTONE_MAX_WORKERS`. Runtime only, never in the digest.
+    resources: Resources = Resources()
 
     def __post_init__(self) -> None:
         if not isinstance(self.regime_operators, bool):
@@ -189,6 +192,7 @@ _SECTIONS = {
     "incubation": {f.name for f in fields(IncubationSettings)},
     "stage3": {f.name for f in fields(Stage3Settings)},
     "papers": None,  # FileSource checks its own entries
+    "resources": {"max_workers", "memory_budget_mb"},
 }
 
 
@@ -220,6 +224,7 @@ def load_config(path: str | Path | None = None) -> E2EConfig:
         concurrency=int(run.get("concurrency", AUTO)),
         placebo=run.get("placebo"),
         placebo_seed=run.get("placebo_seed"),
+        resources=Resources.from_section(values.get("resources")),
         **values["periods"],
         papers=str(papers),
         factors=FactorConfig(
