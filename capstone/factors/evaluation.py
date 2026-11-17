@@ -26,7 +26,8 @@ validation stack), one column per `factor_id`.
   holding period and sector neutrality; a (factor, spec) is a variant,
   recorded in the store's `variants` table with lineage to its factor. Each
   variant evaluated is a trial with its own matrix column, so a grid of
-  specs is counted, not hidden. Costs are half the quoted spread; the full
+  specs is counted, not hidden. A spec may add a no-trade band (`band`),
+  traded by the same backtest. Costs are half the quoted spread; the full
   spread is reported alongside as a robustness view, not a separate trial.
 - **Ledger** (`evaluate_factors`): every evaluated variant is logged with
   `log_run` as soon as its series exists, before anything uses it, with
@@ -42,9 +43,10 @@ validation stack), one column per `factor_id`.
 
 from __future__ import annotations
 
+import math
 import sqlite3
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, get_args
 
 import numpy as np
@@ -101,6 +103,18 @@ class Panel:
     half_spread: pd.DataFrame  # cost of trading one unit of weight, as a fraction
     sic: pd.DataFrame | None = None  # SIC code, for sector neutrality
     data_version: str = ""
+    calendar: pd.DatetimeIndex | None = None
+    availability: dict[str, pd.Series] | None = None
+    company: pd.DataFrame | None = None
+    fundamentals: pd.DataFrame | None = None
+    # Opt-in, execution-scoped cache only for checksum-frozen research inputs.
+    target_cache: dict | None = field(default=None, repr=False, compare=False)
+    # Raw execution closes the share planner sizes with; bound by replay for formation
+    # eligibility. None outside replay.
+    sizing_prices: pd.DataFrame | None = field(default=None, repr=False, compare=False)
+    # Provenance of a post-discovery panel read under authorized access. None for every
+    # discovery panel.
+    provenance: object | None = field(default=None, repr=False, compare=False)
 
 
 def panel_period(panel: Panel) -> list[str]:
@@ -224,24 +238,45 @@ _DIVISIONS = (  # SIC divisions by 2-digit major group
 class TradingSpec:
     """How a factor is traded: rebalance every `hold` trading days; `neutral`
     "sector" demeans the signal within sector each day. Weights are always
-    proportional to the (demeaned) signal, dollar-neutral, gross exposure 1."""
+    proportional to the (demeaned) signal, dollar-neutral, gross exposure 1.
+
+    `band` is a no-trade band, in units of weight of the gross-1 book: on a
+    rebalance a name trades to its target only when |target - held| > band
+    (`backtest.band_book`). 0, the default, is no band; a spec without one
+    has the dict and variant id it had before bands existed."""
 
     hold: int = 1
     neutral: Neutral = "none"
+    band: float = 0.0
 
     def __post_init__(self) -> None:
         if self.hold < 1:
             raise ValueError("hold must be at least 1 day")
         if self.neutral not in NEUTRALITY:
             raise ValueError(f"neutral must be one of {NEUTRALITY}, got {self.neutral!r}")
+        band = self.band
+        if isinstance(band, bool) or not isinstance(band, int | float):
+            raise ValueError(f"band must be a number, got {band!r}")
+        if not (math.isfinite(band) and 0.0 <= band < 1.0):
+            raise ValueError(f"band must be in [0, 1), got {band!r}")
+        object.__setattr__(self, "band", float(band))
 
     def as_dict(self) -> dict:
-        return {"hold": self.hold, "neutral": self.neutral, "weighting": "signal"}
+        spec = {"hold": self.hold, "neutral": self.neutral, "weighting": "signal"}
+        return {**spec, "band": self.band} if self.band > 0 else spec
 
 
-def grid(holds, neutral) -> list[TradingSpec]:
-    """Every combination of the given holding periods and neutralities."""
-    return [TradingSpec(h, n) for n in neutral for h in holds]
+def grid(holds, neutral, bands=(0.0,)) -> list[TradingSpec]:
+    """Every combination of the given holding periods, neutralities and bands
+    (bands innermost; the default is no band)."""
+    return [TradingSpec(h, n, b) for n in neutral for h in holds for b in bands]
+
+
+def spec_from_summary(row) -> TradingSpec:
+    """The spec of one `evaluate_factors` summary row (no "band", or NaN: none)."""
+    band = row.get("band", 0.0)
+    band = 0.0 if band is None or pd.isna(band) else float(band)
+    return TradingSpec(int(row["hold"]), row["neutral"], band)
 
 
 def _division(sic2: float) -> str:
@@ -331,6 +366,7 @@ def _backtest(traded: pd.DataFrame, panel: Panel, spec: TradingSpec) -> FactorRe
         demean=spec.neutral == "none",
         gross=1.0,
         hold=spec.hold,
+        band=spec.band,
     )
     return FactorReturns(frame["net"], frame["gross"], frame["cost"], frame["turnover"])
 
@@ -454,6 +490,7 @@ def evaluate_factors(
                     "hypothesis_id": family,
                     "hold": spec.hold,
                     "neutral": spec.neutral,
+                    **({"band": spec.band} if spec.band > 0 else {}),
                     "expression": params["expression"],
                     **metrics,
                 }
