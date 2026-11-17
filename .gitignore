@@ -9,3 +9,9 @@ __pycache__/
 .sessions/
 experiments/runs.jsonl
 experiments/factors.db*
+
+# paperlog working data (keep it out of this public repo; see research/paperlog/README.md)
+papers.db
+papers.csv
+digests/
+research/paperlog/learned_queries.yaml
