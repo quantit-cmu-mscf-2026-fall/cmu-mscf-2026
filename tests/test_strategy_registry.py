@@ -8,7 +8,11 @@ from pathlib import Path
 import pytest
 
 from capstone.strategy.registry import (
+    INCUBATION_ONLY,
     MODULE,
+    PLUMBING_TEST,
+    ROLES,
+    STATES,
     RegistryEntry,
     _parse,
     _render,
@@ -84,7 +88,7 @@ def test_quoted_scalars_read_as_their_content():
 
 def test_an_unknown_key_is_refused():
     with pytest.raises(ValueError, match="expected one of"):
-        parse_registry(ENTRY + "    role: incubation-only\n")
+        parse_registry(ENTRY + "    owner: someone\n")
 
 
 def test_a_repeated_key_is_refused():
@@ -146,3 +150,62 @@ def test_the_committed_registry_parses_and_round_trips():
     assert _render(header, entries) == text
     assert read_registry(REPO) == tuple(entries)
     assert all(entry.gate_report for entry in entries)
+
+
+# --- optional keys: role, state, version -----------------------------------------------
+
+
+def test_roles_and_states_are_closed_sets_with_safe_defaults():
+    assert ROLES == ("deploy", INCUBATION_ONLY, PLUMBING_TEST)
+    assert STATES == ("active", "suspended", "retired")
+    entry = RegistryEntry(id="abc", module=MODULE, gate_report="r.md")
+    assert (entry.role, entry.state, entry.version) == ("deploy", "active", "")
+    assert entry.enabled is False
+    with pytest.raises(ValueError, match="role"):
+        RegistryEntry(id="abc", module=MODULE, gate_report="r.md", role="live")
+    with pytest.raises(ValueError, match="state"):
+        RegistryEntry(id="abc", module=MODULE, gate_report="r.md", state="paused")
+    with pytest.raises(ValueError, match="version must be a string"):
+        RegistryEntry(id="abc", module=MODULE, gate_report="r.md", version=3)
+
+
+def test_an_entry_with_a_role_still_needs_a_gate_report():
+    with pytest.raises(ValueError, match="gate report"):
+        RegistryEntry(id="abc", module=MODULE, gate_report="", role=INCUBATION_ONLY)
+
+
+def test_a_default_entry_renders_byte_for_byte_as_before():
+    entry = RegistryEntry("abc", MODULE, "r.md")
+    assert _render("# h\n", [entry]) == (
+        "# h\nstrategies:\n"
+        f'  - id: "abc"\n    module: "{MODULE}"\n'
+        '    gate_report: "r.md"\n    enabled: false\n'
+    )
+
+
+def test_non_default_role_state_and_version_are_written_and_round_trip():
+    entry = RegistryEntry(
+        "abc", MODULE, "r.md", role=INCUBATION_ONLY, state="suspended", version="v2"
+    )
+    text = _render("", [entry])
+    assert '    role: "incubation-only"\n' in text
+    assert '    state: "suspended"\n' in text
+    assert '    version: "v2"\n' in text
+    assert parse_registry(text) == (entry,)
+    assert _render(*_parse(text)) == text
+    only_role = _render("", [RegistryEntry("abc", MODULE, "r.md", role=PLUMBING_TEST)])
+    assert "state:" not in only_role and "version:" not in only_role
+
+
+def test_a_hand_written_role_reads_and_an_unknown_one_is_refused(root):
+    for role in ROLES:
+        write(root, ENTRY + f"    role: {role}\n")
+        assert read_registry(root)[0].role == role
+    write(root, ENTRY + "    role: live\n")
+    with pytest.raises(ValueError, match="role"):
+        read_registry(root)
+    write(root, ENTRY + "    state: paused\n")
+    with pytest.raises(ValueError, match="state"):
+        read_registry(root)
+    with pytest.raises(ValueError, match="once each"):
+        parse_registry(ENTRY + "    role: deploy\n    role: deploy\n")

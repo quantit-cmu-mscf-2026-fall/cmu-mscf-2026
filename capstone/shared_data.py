@@ -267,11 +267,16 @@ def load(
     start: str | None = None,
     end: str | None = None,
     auto_sync: bool = True,
+    date_column: str = "date",
+    knowledge_columns: tuple[str, ...] = (),
 ) -> pd.DataFrame:
     """Read one shared file (name without `.parquet`), synced and verified first.
 
-    `start`/`end` filter on `date` (CRSP daily file) inside the parquet read, so
-    unneeded rows never reach memory. Text columns load as pyarrow strings,
+    `start`/`end` filter on `date_column` (default `date`, the CRSP daily file; one of
+    `date`, `datadate`, `event_date`, `linkdt`) inside the parquet read, so unneeded
+    rows never reach memory. `knowledge_columns` (`published_at`, `vintage_at`) are
+    also bounded by `end`: a row is read only if everything it was known by is on or
+    before the cut, whatever its own date says. Text columns load as pyarrow strings,
     about 4x smaller than Python objects; numeric columns stay numpy.
 
     Rows are deliberately NOT filtered on `in_universe`: use that column to pick
@@ -293,10 +298,15 @@ def load(
         raise SharedDataError(f"{name}.parquet is not in the shared data")
 
     filters = []
+    if date_column not in {"date", "datadate", "event_date", "linkdt"}:
+        raise ValueError("unsupported shared-data date column")
     if start:
-        filters.append(("date", ">=", pd.Timestamp(start)))
+        filters.append((date_column, ">=", pd.Timestamp(start)))
     if end:
-        filters.append(("date", "<=", pd.Timestamp(end)))
+        filters.append((date_column, "<=", pd.Timestamp(end)))
+    if knowledge_columns and (not end or set(knowledge_columns) - {"published_at", "vintage_at"}):
+        raise ValueError("knowledge-time filters need explicit supported columns and an end date")
+    filters.extend((column, "<=", pd.Timestamp(end)) for column in sorted(set(knowledge_columns)))
 
     table = pq.read_table(path, columns=columns, filters=filters or None)
     strings = {pa.string(): pd.StringDtype("pyarrow"), pa.large_string(): pd.StringDtype("pyarrow")}
