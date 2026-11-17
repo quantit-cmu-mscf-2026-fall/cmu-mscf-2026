@@ -32,11 +32,21 @@ class ResearchController:
         self.inputs = frozenset(qualified_inputs)
         catalogue = catalogue_rows(catalogue)
         self.catalogue = {}
+        self._source_excerpts = {}
         methods = {}
         for entry in catalogue:
             brief = AssignedBrief(**entry["brief"])
             idea = IdeaCatalogueEntry.from_dict(entry) if entry.get("version") == 2 else None
             claim = idea if idea is not None else SourceClaim(**entry["claim"])
+            if "method_excerpt" in entry:
+                excerpt = entry["method_excerpt"]
+                if (
+                    not isinstance(claim, SourceClaim)
+                    or type(excerpt) is not str
+                    or not excerpt.strip()
+                ):
+                    raise ValueError("source excerpt requires nonempty curator text")
+                self._source_excerpts[brief.packet_id] = excerpt
             if brief.packet_id in self.catalogue:
                 raise ValueError("duplicate packet")
             if brief.method_key in methods and methods[brief.method_key] != brief.family:
@@ -220,18 +230,35 @@ class ResearchController:
             )
             state, missing = qualify(effective, self.inputs)
             claim_id = self._artifact("source_claim", asdict(effective))
+            payload = {
+                "claim_id": claim_id,
+                "missing": missing,
+                "agent_declared": asdict(proposal),
+                "effective": asdict(effective),
+            }
+            if packet in self._source_excerpts:
+                payload["method_excerpt"] = self._source_excerpts[packet]
             self._event(
                 packet,
                 state,
                 "source and capability inventory",
-                {
-                    "claim_id": claim_id,
-                    "missing": missing,
-                    "agent_declared": asdict(proposal),
-                    "effective": asdict(effective),
-                },
+                payload,
             )
             return state
+
+    def source_evidence(self, packet):
+        """Read curator and grounded evidence; caller packet metadata is not an authority."""
+        inventory = self.catalogue[packet][1]
+        if not isinstance(inventory, SourceClaim):
+            raise ValueError("grounded source evidence requires a source-claim catalogue")
+        try:
+            grounded = self._latest(packet, "effective")
+        except ValueError as error:
+            raise ValueError("missing grounded source evidence") from error
+        evidence = {"catalogue": asdict(inventory), "grounded": grounded}
+        if packet in self._source_excerpts:
+            evidence["method_excerpt"] = self._latest(packet, "method_excerpt")
+        return evidence
 
     def claim_id(self, packet):
         """Identity to bind into a proposed or frozen MethodSpec."""

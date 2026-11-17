@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import operator
 import threading
 
 from capstone.factors.deepen import BudgetExhausted
@@ -12,11 +13,25 @@ class CallBudgetExceeded(BudgetExhausted):
 
 
 class BudgetedClient:
-    """Count every sent call, or replay its durable checkpoint when a journal is supplied."""
+    """Count outbound attempts, or delegate replay-aware accounting to a journal.
+
+    Clients must not retry invisibly. The journal owns its frozen bucket ceiling,
+    so completed responses can still replay after that ceiling is exhausted.
+    Ordinals are reserved under a lock; this does not make a thread-affine journal
+    concurrent (the supplied RequestJournal remains single-owner).
+    """
 
     def __init__(self, client, max_calls: int, *, journal=None, bucket=None, task_id=None):
+        if isinstance(max_calls, bool):
+            raise ValueError("max_calls must be a positive integer, at least 1")
+        try:
+            max_calls = operator.index(max_calls)
+        except TypeError as error:
+            raise ValueError("max_calls must be a positive integer, at least 1") from error
         if max_calls < 1:
-            raise ValueError("max_calls must be at least 1")
+            raise ValueError("max_calls must be a positive integer, at least 1")
+        if getattr(client, "max_retries", 0) != 0:
+            raise ValueError("disable hidden SDK retries before using a call budget")
         if journal is not None and (
             bucket not in journal.limits or journal.limits[bucket] != max_calls or not task_id
         ):
@@ -36,16 +51,18 @@ class BudgetedClient:
 
     def create(self, **kwargs):
         if self.journal is not None:
+            with self._lock:
+                ordinal = self.ordinal
+                self.ordinal += 1
             try:
-                result = self.journal.call(
-                    self.client, self.bucket, self.task_id, self.ordinal, kwargs
-                )
+                result = self.journal.call(self.client, self.bucket, self.task_id, ordinal, kwargs)
             except CallBudgetExceeded:
-                self.refused += 1
+                with self._lock:
+                    self.refused += 1
                 raise
             finally:
-                self.calls = self.journal.count(self.bucket)
-            self.ordinal += 1
+                with self._lock:
+                    self.calls = self.journal.count(self.bucket)
             return result
         with self._lock:
             if self.calls >= self.max_calls:
