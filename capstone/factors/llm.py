@@ -114,6 +114,9 @@ def load_config(path: str | Path | None = None) -> FactorConfig:
 def make_client():
     """A real Anthropic client; the SDK finds the credentials.
 
+    Hidden SDK retries are disabled: a retry must pass through the caller's
+    budget/journal as another counted attempt. API failures propagate to callers.
+
     In order: ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, an `ant auth login`
     profile, or workload identity federation (short-lived tokens in CI or a
     cloud). None of them belongs in a file in this repository.
@@ -122,7 +125,7 @@ def make_client():
         import anthropic
     except ImportError as exc:  # pragma: no cover - depends on the environment
         raise ImportError('install the agents extra: pip install -e ".[agents]"') from exc
-    return anthropic.Anthropic()
+    return anthropic.Anthropic(max_retries=0)
 
 
 def call_tool(
