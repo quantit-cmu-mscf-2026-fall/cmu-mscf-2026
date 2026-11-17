@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import os
+import tomllib
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from capstone.pipeline import blocker_glossary
+from capstone.pipeline.autopilot import config as cfg
 from capstone.pipeline.autopilot import reasons as reasons_module
+from capstone.pipeline.autopilot.config import Key
 from capstone.pipeline.autopilot.journal import (
     EVENTS,
     GENESIS,
@@ -226,3 +230,110 @@ def test_sha256_file_hashes_the_bytes(tmp_path):
     path = tmp_path / "f.txt"
     path.write_bytes(b"abc")
     assert sha256_file(path) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+
+
+# --- config --------------------------------------------------------------------------
+
+EXAMPLE = Path(__file__).resolve().parents[1] / "docs/examples/autopilot.example.toml"
+
+
+def make_config(tmp_path, toys, **sections):
+    core = {"run_root": str(tmp_path / "run"), "policy_id": "p1"}
+    return cfg.validate({"autopilot": core, **sections}, toys, path=tmp_path / "autopilot.toml")
+
+
+def test_config_validates_types_defaults_and_paths(tmp_path):
+    schema = {"inbox": Key("path"), "n": Key("int", 3), "ok": Key("bool", False)}
+    stage = toy("a", schema=schema)
+    config = make_config(tmp_path, [stage], a={"inbox": "in"})
+    assert config.sections["a"] == {"inbox": str((tmp_path / "in").resolve()), "n": 3, "ok": False}
+    assert config.run_root == tmp_path / "run"
+    assert config.core["max_crashes"] == 3 and config.core["input_archive"] is None
+    other = make_config(tmp_path, [stage], a={"inbox": "in", "n": 4})
+    assert config.section_sha256("a") != other.section_sha256("a")
+    assert config.section_of == {"a": "a"}
+
+
+def test_config_refuses_unknown_missing_and_mistyped_keys_all_at_once(tmp_path):
+    stage = toy("a", schema={"inbox": Key("path"), "n": Key("int", 3), "ok": Key("bool", False)})
+    raw = {"autopilot": {"policy_id": "p"}, "a": {"n": True, "ok": 1, "typo": 1}, "ghost": {}}
+    with pytest.raises(cfg.ConfigError) as refused:
+        cfg.validate(raw, [stage])
+    assert str(refused.value).splitlines() == [
+        "unknown section [ghost]",
+        "[autopilot] missing required key 'run_root'",
+        "[a] unknown key 'typo'",
+        "[a] missing required key 'inbox'",
+        "[a] n must be int, got bool",
+        "[a] ok must be bool, got int",
+    ]
+
+
+def test_config_refuses_two_owners_of_one_section_and_an_unreadable_file(tmp_path):
+    with pytest.raises(ValueError, match=r"\[a\] is declared by a and b"):
+        cfg.schemas([toy("a"), toy("b", section="a")])
+    with pytest.raises(ValueError, match=r"\[autopilot\] is declared by core and ops"):
+        cfg.schemas([], {"autopilot": {}})
+    (tmp_path / "bad.toml").write_text("[autopilot\n", encoding="utf-8")
+    with pytest.raises(cfg.ConfigError, match="bad.toml"):
+        cfg.load(tmp_path / "bad.toml", [])
+    with pytest.raises(cfg.ConfigError, match="missing.toml"):
+        cfg.load(tmp_path / "missing.toml", [])
+
+
+def test_the_example_config_loads_covers_every_core_key_and_is_safe_by_default():
+    config = cfg.load(EXAMPLE, [])
+    written = tomllib.loads(EXAMPLE.read_text(encoding="utf-8"))
+    assert set(written) == {"autopilot", "spend", "resources"}
+    for section, schema in (
+        ("autopilot", cfg.CORE),
+        ("spend", cfg.SPEND),
+        ("resources", cfg.RESOURCES),
+    ):
+        assert set(written[section]) <= set(schema)
+    assert config.core["real_model_calls"] is False
+    assert (
+        config.sections["spend"]["run_ceiling"] == config.sections["spend"]["global_ceiling"] == 0
+    )
+
+
+def test_spend_defaults_allow_no_model_calls_and_no_number_is_built_in():
+    spend = cfg.validate({"autopilot": {"run_root": "r", "policy_id": "p"}}, []).sections["spend"]
+    assert spend == {
+        "run_ceiling": 0,
+        "global_ceiling": 0,
+        "runs_dir": None,
+        "accounting_roots": [],
+    }
+
+
+def test_real_model_calls_need_a_runs_dir_so_the_global_ceiling_counts_every_run(tmp_path):
+    core = {"run_root": "r", "policy_id": "p", "real_model_calls": True}
+    with pytest.raises(cfg.ConfigError, match=r"\[spend\] runs_dir is required"):
+        cfg.validate({"autopilot": core}, [])
+    config = cfg.validate(
+        {"autopilot": core, "spend": {"runs_dir": "runs"}}, [], path=tmp_path / "c.toml"
+    )
+    assert config.core["real_model_calls"] is True
+
+
+def test_resource_caps_may_not_be_negative():
+    raw = {"autopilot": {"run_root": "r", "policy_id": "p"}, "resources": {"max_workers": -1}}
+    with pytest.raises(cfg.ConfigError, match=r"\[resources\] max_workers must be >= 0"):
+        cfg.validate(raw, [])
+
+
+def test_a_section_frozen_under_a_legacy_default_still_matches(tmp_path):
+    schema = {"n": Key("int", 5, legacy=3)}
+    config = make_config(tmp_path, [toy("a", schema=schema)])
+    current, legacy = config.section_identities("a")
+    assert current == config.section_sha256("a")
+    old = make_config(tmp_path, [toy("a", schema={"n": Key("int", 3)})])
+    assert legacy == old.section_sha256("a") != current
+    explicit = make_config(tmp_path, [toy("a", schema=schema)], a={"n": 7})
+    assert explicit.section_identities("a") == [explicit.section_sha256("a")]
+
+
+def test_a_key_needs_a_known_kind():
+    with pytest.raises(ValueError, match="unknown config kind"):
+        Key("complex")
