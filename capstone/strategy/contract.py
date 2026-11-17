@@ -220,6 +220,10 @@ def load_spec(path: Path) -> StrategySpec:
     """The spec a file holds (refused if the file is not exactly what its spec writes)."""
     text = Path(path).read_bytes().decode("utf-8")
     schema = tomllib.loads(text).get("schema_version")
+    if schema == 6:
+        from capstone.strategy.program import ProgramStrategySpec
+
+        return ProgramStrategySpec.from_toml(text)
     if schema == 5:
         from capstone.strategy.compiled import CompiledStrategySpec
 
@@ -297,9 +301,12 @@ def target_weights(spec: StrategySpec, panel: Panel, as_of) -> pd.Series:
     A panel holding any date after `DISCOVERY_END` is refused
     (`CURRENT_ROUTE_MISSING`): the holdout is not read through the contract.
     """
+    from capstone.strategy.program import ProgramStrategySpec, require_runtime_capabilities
     from capstone.strategy.recorded import require_current_implementation
 
     require_current_implementation(spec)
+    if isinstance(spec, ProgramStrategySpec):
+        require_runtime_capabilities(spec)
     dates = pd.DatetimeIndex(panel.universe.index)
     if len(dates) and dates.max() > pd.Timestamp(DISCOVERY_END):
         raise HoldoutError(CURRENT_ROUTE_MISSING)
@@ -318,6 +325,10 @@ def _target_weights(spec: StrategySpec, panel: Panel, as_of) -> pd.Series:
     """
     from capstone.strategy.compiled import CompiledStrategySpec, compiled_weights
     from capstone.strategy.diversified import DiversifiedStrategySpec, diversified_weights
+    from capstone.strategy.program import ProgramStrategySpec, program_weights
+
+    if isinstance(spec, ProgramStrategySpec):
+        return program_weights(spec, panel, as_of)
 
     if isinstance(spec, CompiledStrategySpec):
         return compiled_weights(spec, panel, as_of)
