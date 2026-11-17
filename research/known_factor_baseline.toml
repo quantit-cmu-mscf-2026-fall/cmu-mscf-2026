@@ -1,0 +1,25 @@
+# Parameters for research/known_factor_baseline.py.
+#
+# A known factor, 12-1 momentum, for checking the validation funnel: a sanity
+# check, not a target. Chosen before any run; changing them is a new
+# registration.
+
+# 12-1 month momentum: the return from t-251 to t-21 (231 days, skipping the
+# most recent month), Jegadeesh & Titman (1993) as Fama-French's Mom builds it.
+expression = "shift(ts_sum(returns, 231), 21)"
+generator = "known-factor-baseline/momentum-12-1"
+
+# The synthetic market: momentum's premium is earned by its top-minus-bottom
+# tercile book, the portfolio the market's own Mom factor holds.
+[synthetic]
+n_stocks = 40
+n_days = 1500
+premium = 0.001  # daily, added to the top tercile and taken from the bottom
+seed = 7
+start = "2000-01-03"
+
+# CRSP: the discovery period only. The holdout dates are registered, never read.
+[crsp]
+search_end = "2020-12-31"
+holdout_start = "2021-01-04"
+holdout_end = "2025-12-31"

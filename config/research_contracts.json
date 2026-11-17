@@ -1,0 +1,29 @@
+{
+  "schema_version": 2,
+  "universe": "point-in-time S&P 500; adaptation, not original-universe replication",
+  "execution": "completed-session decision, next-session regular-hours execution",
+  "claims": [
+    {"id":"1f6143c812601140","paper":"dbt1985","status":"diagnostic","method":"reversal_36m","claim":"Loser versus winner leg asymmetry","check":"Report each cohort leg separately; no new alpha formula."},
+    {"id":"2c119c2ef01bbb47","paper":"dbt1985","status":"diagnostic","method":"reversal_36m","claim":"January returns in previously formed loser cohorts","check":"Measure January returns by cohort age; a January-only trade is a separate adaptation."},
+    {"id":"533148edf022a26e","paper":"dbt1985","status":"executable","method":"reversal_36m","claim":"Long-horizon loser-minus-winner reversal","check":"36 complete months of market-adjusted returns; 35 stocks per tail; annual December formation; 36-month cohorts."},
+    {"id":"8b44455fa35a48b1","paper":"ls2000","status":"executable","method":"volume_momentum_6m","claim":"Momentum conditional on formation-period turnover","check":"Independent return-decile and turnover-tercile sorts; buy low-turnover winners, short high-turnover losers; six-month cohorts."},
+    {"id":"8d573a53f0aa298c","paper":"ls2000","status":"blocked","method":"","claim":"Turnover, glamour and subsequent earnings surprises","check":"Point-in-time earnings surprises and expectation data are unavailable; a turnover-only formula does not establish this compound claim."},
+    {"id":"c661c36c0d7e5514","paper":"ls2000","status":"diagnostic","method":"volume_momentum_6m","claim":"Long-horizon reversal conditional on volume","check":"Track formation cohorts through years one to five; do not substitute a contemporaneous reversal signal."},
+    {"id":"295eb52f7e2e2d40","paper":"jt1993","status":"diagnostic","method":"momentum_6m","claim":"Momentum profits reverse in months 13 through 36","check":"Cohort-age return diagnostic; not a second executable momentum family."},
+    {"id":"2be36217e2180321","paper":"jt1993","status":"executable","method":"momentum_6m_skip_week","claim":"Momentum with a formation-to-entry gap","check":"Six complete calendar months, five trading sessions gap, decile tails, six-month overlapping cohorts; daily gap is an explicit adaptation."},
+    {"id":"716bdaf7915c65be","paper":"jt1993","status":"executable","method":"momentum_6m","claim":"Intermediate-horizon winner-minus-loser momentum","check":"Six complete calendar months, decile tails, monthly formation and six-month overlapping cohorts."},
+    {"id":"3bcdbdb5d717313b","paper":"gh2004","status":"executable","method":"high_52week","claim":"Nearness to the 52-week high","check":"Current split-adjusted close divided by prior-year maximum close; 30 percent tails and six-month cohorts; 252 sessions approximates 52 weeks."},
+    {"id":"5ce22233201426b8","paper":"gh2004","status":"diagnostic","method":"high_52week","claim":"Absence of long-horizon reversal","check":"Evaluate cohort-age returns beyond one year; this is not a new executable factor."},
+    {"id":"d1557e7419d5b986","paper":"gh2004","status":"blocked","method":"","claim":"Incremental predictive value over individual and industry momentum","check":"Requires the paper's industry mapping, industry returns and specified nested regressions; simple factor subtraction is insufficient."},
+    {"id":"5a1f62a8ad52cecd","paper":"ahxz2006","status":"blocked","method":"","claim":"Exposure to innovations in aggregate volatility","check":"Requires point-in-time VIX innovations with market-return controls; rolling market volatility or raw correlation is not equivalent."},
+    {"id":"7db532d3bf1b24ee","paper":"ahxz2006","status":"executable","method":"ff3_idiosyncratic_volatility","claim":"Low idiosyncratic volatility","check":"Previous complete month's daily excess-return FF3 OLS residual standard deviation; value-weighted quintiles held for the next month."},
+    {"id":"8225b66d6b5e5fc1","paper":"ahxz2006","status":"blocked","method":"","claim":"Robustness to the complete set of published controls","check":"Liquidity, analyst dispersion, coskewness and other point-in-time controls are unavailable; do not label a reduced formula as the full finding."}
+  ],
+  "papers": {
+    "dbt1985":{"source":"https://onlinelibrary.wiley.com/doi/full/10.1111/j.1540-6261.1985.tb05004.x","section":"I: Empirical Tests; II and Table I","adaptation":"S&P 500 membership; annual overlapping cohorts; daily execution and costs rather than the original monthly residual-return study."},
+    "ls2000":{"source":"https://www.lsvasset.com/pdf/research-papers/Price-Momentum-Trad-Vol-2000.pdf","section":"I.B and Tables II-III","adaptation":"S&P 500 membership, deterministic tail tie breaks, gross-one asymmetric turnover-conditioned spread; earnings claims remain blocked."},
+    "jt1993":{"source":"https://doi.org/10.1111/j.1540-6261.1993.tb04702.x","doi":"10.1111/j.1540-6261.1993.tb04702.x","section":"I: Trading Strategies, page 68; II and Table I, page 69","adaptation":"S&P 500 membership, daily implementation, fixed 6/6 specification and separately identified five-session-gap variant."},
+    "gh2004":{"source":"https://www.bauer.uh.edu/tgeorge/papers/gh4-paper.pdf","section":"I: Data and Method; Table I","adaptation":"S&P 500 membership; adjusted closing prices; 252 observed sessions rather than exact 52 calendar weeks; delayed open execution."},
+    "ahxz2006":{"source":"https://onlinelibrary.wiley.com/doi/full/10.1111/j.1540-6261.2006.00836.x","section":"II: Idiosyncratic Volatility; portfolio formation","adaptation":"S&P 500 quintiles; excess-return FF3 residuals with at least 17 daily observations; daily delayed-open execution. VIX and full robustness controls excluded."}
+  }
+}
