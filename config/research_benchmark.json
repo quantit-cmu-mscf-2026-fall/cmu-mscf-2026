@@ -1,0 +1,241 @@
+{
+  "schema_version": 1,
+  "seed": 404,
+  "status": "frozen_before_agent_outputs",
+  "automated_review_only": true,
+  "controller_default": false,
+  "qualified_inputs": [],
+  "input_qualification": "none; no historical dataset loaded",
+  "call_limits": {
+    "A": 30,
+    "B": 30,
+    "C": 30,
+    "review": 30
+  },
+  "packets": [
+    {
+      "id": "lehmann",
+      "source_order": 0,
+      "title": "Lehmann weekly reversal",
+      "family": "liquidity_supply",
+      "track": "replication_control",
+      "method_key": "lehmann-primary-v1",
+      "source_url": "https://www.nber.org/system/files/working_papers/w2533/w2533.pdf",
+      "source_sha256": "45ac479977e50a8bcfdfcbee31cfbd49e0a3153679151a9f772f161c93903993",
+      "full_methods": true,
+      "method_location": "working paper PDF pp. 6–7, 17–19",
+      "methods": "The reference portfolio gives each security a signed dollar position opposite its previous-period return minus the cross-sectional equal-weight mean. Positions close after the holding interval. The weekly experiments examine subsequent-week reversals and timing variations. This is a zero-net-investment profit construction, not a funded portfolio CAGR. Restricting securities to the S&P 500, setting gross exposure, or selecting only decile tails changes the construction and needs a disclosed adaptation.",
+      "required_inputs": [
+        "daily_returns",
+        "point_in_time_universe"
+      ],
+      "universe": "sp500",
+      "method_excerpt": "Each position is closed out at the end of each time interval",
+      "constructor": "formula",
+      "expected": {
+        "rubric": "Preserve contrarian direction, weekly timing and return-deviation dollar weights. Distinguish zero-investment profits from funded returns. Flag S&P 500 and gross-one rules as adaptations; do not replace the reference with equal-weight deciles.",
+        "status": "needs_data",
+        "reference_valid": true
+      }
+    },
+    {
+      "id": "jegadeesh",
+      "source_order": 1,
+      "title": "Jegadeesh return forecasting",
+      "family": "liquidity_supply",
+      "track": "discovery",
+      "method_key": "jegadeesh-primary-v1",
+      "source_url": "https://onlinelibrary.wiley.com/doi/pdf/10.1111/j.1540-6261.1990.tb05110.x",
+      "source_sha256": null,
+      "full_methods": false,
+      "method_location": "full methods unavailable: publisher HTTP 403",
+      "methods": "The publisher did not return the full method. This packet intentionally supplies no executable recipe. Retain the named research lead, identify the missing primary-method evidence, and do not infer a one-month reversal strategy solely from the title or abstract.",
+      "required_inputs": [
+        "primary_method_access"
+      ],
+      "universe": "sp500",
+      "method_excerpt": null,
+      "constructor": "unavailable",
+      "expected": {
+        "rubric": "Correct outcome is methods_review_needed. A new executable specification or an asserted faithful replication is unsupported. Preserving a blocked lead is valid research work.",
+        "status": "methods_review_needed",
+        "reference_valid": false
+      }
+    },
+    {
+      "id": "bab",
+      "source_order": 2,
+      "title": "Betting against beta",
+      "family": "constraints_and_defensive",
+      "track": "discovery",
+      "method_key": "bab-primary-v1",
+      "source_url": "https://pages.stern.nyu.edu/~afrazzin/pdf/Betting%20Against%20Beta%20-%20Frazzini%20and%20Pedersen.pdf",
+      "source_sha256": "037989a17e89d3977cc11b7de8d568a66482d92b3505b2644c53a3fb1f699968",
+      "full_methods": true,
+      "method_location": "published PDF pp. 8–9, sections 3.1–3.2, equations 14–17",
+      "methods": "Estimate volatility from one year of daily log returns and correlation from five years of overlapping three-day log returns, with minimum histories. Shrink beta as 0.6 times estimated beta plus 0.4. Split around the median, weight by distance of beta ranks from the mean rank, rebalance monthly, and scale each leg to beta one using excess returns. The reference's leverage and beta neutrality are not equivalent to a dollar-neutral gross-one S&P 500 book.",
+      "required_inputs": [
+        "qualified_beta_estimator",
+        "market_excess_returns",
+        "risk_free_rate",
+        "funding_terms"
+      ],
+      "universe": "sp500",
+      "method_excerpt": "The portfolios are rebalanced every calendar month.",
+      "constructor": "unavailable",
+      "expected": {
+        "rubric": "Preserve distinct estimation windows, rank-distance weights, monthly formation and beta-one leg scaling. A simple low-volatility formula or equal-dollar long/short portfolio is an adaptation, not BAB. Missing estimator/funding qualification blocks construction.",
+        "status": "needs_data",
+        "reference_valid": false
+      }
+    },
+    {
+      "id": "lowvol",
+      "source_order": 3,
+      "title": "Benchmark-constrained low volatility",
+      "family": "constraints_and_defensive",
+      "track": "discovery",
+      "method_key": "lowvol-primary-v1",
+      "source_url": "https://pages.stern.nyu.edu/~jwurgler/papers/wurgler_bradley_baker.pdf",
+      "source_sha256": "37d1d5196bfa91d0b5abfa68349db4a810a4d212b206107d17917893188f0a95",
+      "full_methods": true,
+      "method_location": "March 2010 draft PDF pp. 3–4, Exhibit 1 caption p. 20",
+      "methods": "Sort stocks monthly into quintiles using trailing total volatility or beta estimated from up to sixty months of returns. Examine the full CRSP universe and a top-thousand-capitalization restriction. Portfolios use capitalization weights and monthly rebalancing; the reported illustrations omit transaction costs. Benchmarking and leverage constraints are an explanation, not proof that a newly proposed formula has independent alpha. An S&P 500 restriction is a distinct adaptation.",
+      "required_inputs": [
+        "qualified_monthly_risk_features",
+        "formation_cap",
+        "point_in_time_universe"
+      ],
+      "universe": "sp500",
+      "method_excerpt": "We sort stocks into five groups each month",
+      "constructor": "unavailable",
+      "expected": {
+        "rubric": "Preserve low-risk direction, monthly quintiles, multi-year monthly estimates and cap weights. Do not call daily residual volatility the same feature. State omitted transaction costs and the universe adaptation.",
+        "status": "needs_data",
+        "reference_valid": false
+      }
+    },
+    {
+      "id": "links",
+      "source_order": 4,
+      "title": "Customer-supplier information diffusion",
+      "family": "information_networks",
+      "track": "discovery",
+      "method_key": "links-primary-v1",
+      "source_url": "https://pages.stern.nyu.edu/~afrazzin/pdf/Economic%20Links%20and%20Predictable%20Returns%20-%20Cohen%20and%20Frazzini.pdf",
+      "source_sha256": "2c0bca1025e4b1391c3367088c63e33a8d09b475431892c6e9d8e1d0508a15c0",
+      "full_methods": true,
+      "method_location": "published PDF pp. 8–10, section III, customer-return construction",
+      "methods": "Use the last available disclosed customer-supplier links. For suppliers with multiple principal customers, form an equal-weight customer-return portfolio and update it monthly. At the next month, sort suppliers on lagged customer returns into quintiles; the paper reports value- and equal-weight supplier portfolios. Customer winners predict supplier winners. A supplier's own price momentum does not reproduce this linked-firm signal. Historical publication timing and identifier links are required for an executable adaptation.",
+      "required_inputs": [
+        "dated_customer_supplier_links",
+        "linked_customer_returns",
+        "company_identifiers"
+      ],
+      "universe": "sp500",
+      "method_excerpt": "We rebalance these portfolios every calendar month.",
+      "constructor": "unavailable",
+      "expected": {
+        "rubric": "Require point-in-time links and lagged customer returns. Preserve supplier/customer direction and monthly quintiles. Reject own-stock momentum as an equivalent proxy. Missing link data is a data blocker, not evidence against the economic claim.",
+        "status": "needs_data",
+        "reference_valid": false
+      }
+    },
+    {
+      "id": "flows",
+      "source_order": 5,
+      "title": "Flow-induced fire sales",
+      "family": "forced_flows",
+      "track": "discovery",
+      "method_key": "flows-primary-v1",
+      "source_url": "https://www.nber.org/system/files/working_papers/w11357/w11357.pdf",
+      "source_sha256": "a822a9efe0c4c346aa8d0b554adcc797e814423688857b3f418e63bd1400de98",
+      "full_methods": true,
+      "method_location": "May 2005 working paper PDF pp. 7–14, sections I–II and Table 4",
+      "methods": "Combine fund holdings and capital flows to distinguish widespread selling by distressed funds from voluntary transactions. Quarterly flows aggregate monthly measures; holdings changes require adjacent reports. Pressure measures condition on flow distress and common ownership. Event-time price pressure and later reversal are diagnostics around observed forced transactions, not a daily OHLCV signal. A trading adaptation must use actual report-release dates and distinguish ex-post pressure from a forecast available before trading.",
+      "required_inputs": [
+        "dated_fund_holdings",
+        "fund_capital_flows",
+        "holdings_release_dates"
+      ],
+      "universe": "sp500",
+      "method_excerpt": "we sum monthly flows over the quarter to calculate quarterly flows",
+      "constructor": "unavailable",
+      "expected": {
+        "rubric": "Retain fund flows, holdings and release timing as mandatory dependencies. Price declines or volume spikes cannot certify forced selling. Separate observed pressure/event evidence from any prospective trading recipe.",
+        "status": "needs_data",
+        "reference_valid": false
+      }
+    },
+    {
+      "id": "profits",
+      "source_order": 6,
+      "title": "Gross profitability PMU",
+      "family": "accounting_and_events",
+      "track": "discovery",
+      "method_key": "profits-primary-v1",
+      "source_url": "https://mysimon.rochester.edu/novy-marx/data_lib/OSoV/pmu_details.html",
+      "source_sha256": "f626e019a4b5e91ace611d3e510c98328b9d95d69bcbbb4827e1356d9ec81f80",
+      "full_methods": true,
+      "method_location": "author construction note, Construction and Universe rows",
+      "methods": "Gross profitability is revenue minus cost of goods sold, divided by assets. At June formation, exclude financial firms and use fiscal years ending by the previous December. The reference uses NYSE size and profitability breakpoints: large/small portfolios crossed with high/low thirty-percent tails, value-weighted within cells. PMU averages the two size-specific profitable-minus-unprofitable spreads. An S&P 500-only adaptation lacks the reference universe and must be named separately. Accounting publication dates and unrevised vintages still require qualification.",
+      "required_inputs": [
+        "accounting_publication_dates",
+        "unrevised_accounting_vintages",
+        "revenue_cogs_assets",
+        "nyse_breakpoints"
+      ],
+      "universe": "sp500",
+      "method_excerpt": "Portfolios are rebalanced at the end of June",
+      "constructor": "unavailable",
+      "expected": {
+        "rubric": "Use (REVT-COGS)/AT, nonfinancials, June formation and prior-calendar-year accounting. Preserve size cells and value weights in the reference. Do not replace gross profit with net income or assume a ninety-day lag proves publication availability.",
+        "status": "needs_data",
+        "reference_valid": false
+      }
+    },
+    {
+      "id": "tsmom",
+      "source_order": 7,
+      "title": "Cross-asset time-series momentum",
+      "family": "cross_asset_watchlist",
+      "track": "discovery",
+      "method_key": "tsmom-primary-v1",
+      "source_url": "https://pages.stern.nyu.edu/~lpederse/papers/TimeSeriesMomentum.pdf",
+      "source_sha256": "7682f8e97eb4b77591dc85e36731ff51ed031970cdde81678108734db9478379",
+      "full_methods": true,
+      "method_location": "published PDF p. 9, section 4.1, equation 5",
+      "methods": "Use each futures or forward contract's own prior twelve-month excess return sign, with one-month holding. Scale positions inversely to estimated volatility using a forty-percent per-instrument volatility target, then average across available instruments. The reference covers equity-index, currency, commodity and bond contracts. It is time-series trend, not a stock cross-sectional winner-minus-loser ranking. Futures contract, roll and margin inputs exceed the frozen S&P 500 execution scope.",
+      "required_inputs": [
+        "futures_contracts",
+        "roll_history",
+        "futures_margin",
+        "contract_excess_returns"
+      ],
+      "universe": "futures",
+      "method_excerpt": "properties of the 12-month time series momentum strategy with a 1-month holding period",
+      "constructor": "unavailable",
+      "expected": {
+        "rubric": "Correct routing is outside_scope while retaining the mechanism. Preserve own-return sign, twelve/one-month timing and volatility sizing. Do not silently translate the reference into S&P 500 stock momentum.",
+        "status": "outside_scope",
+        "reference_valid": false
+      }
+    }
+  ],
+  "development_fixtures": [
+    "renamed_copy",
+    "wrong_direction",
+    "wrong_horizon",
+    "january_cohort",
+    "unsupported_proxy",
+    "missing_publication_time"
+  ],
+  "verified_artifact_definition": "both blinded reviews agree that a retained primary-method artifact is complete and faithful, with no unsupported claim; not financial admission",
+  "decision": {
+    "additional_grounded_families": 1,
+    "unsupported_claim_increase": 0,
+    "unwarranted_reference_rejection_increase": 0,
+    "max_relative_call_cost": 2,
+    "incomplete_or_undefined_or_decisive_disagreement": "inconclusive"
+  }
+}
