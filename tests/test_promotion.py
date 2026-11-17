@@ -1,0 +1,131 @@
+"""Incubation as the second filter: the opt-in `incubate` outcome of stage 4.
+
+`Thresholds(promote="incubate", q4_incubate=...)` labels a stage-3 survivor that fails
+stage 4 at `q4` but passes `q4_incubate` on the same statistic (the BH-adjusted holdout
+p) as `incubate`: never accepted. The default, `promote="accept"`, has no such outcome and
+must register, hash and decide exactly as before. Synthetic scorecards only.
+"""
+
+import hashlib
+import json
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from capstone import promotion
+from capstone.funnel import Thresholds, thresholds_dict
+
+INCUBATE = Thresholds(promote="incubate", q4_incubate=0.5)
+
+
+def content_hash(th: Thresholds) -> str:
+    return hashlib.sha256(json.dumps(thresholds_dict(th), sort_keys=True).encode()).hexdigest()
+
+
+def scorecard() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "s1_pass": [True, True, True, True, False],
+            "s2_pass": [True, True, True, True, False],
+            "s3_pass": [True, True, True, False, False],
+            "s4_pass": [True, False, False, False, False],
+            "s4_stat": [0.1, 0.4, 0.7, np.nan, np.nan],
+            "is_mean": [0.002, 0.002, 0.002, 0.002, 0.002],
+        },
+        index=list("abcde"),
+    )
+
+
+class TestThresholds:
+    def test_defaults_are_accept_with_no_incubation_level(self):
+        th = Thresholds()
+        assert th.promote == "accept" and th.q4_incubate is None
+
+    def test_incubate_needs_a_level_looser_than_q4_and_below_1(self):
+        assert Thresholds(promote="incubate", q4_incubate=0.5).q4_incubate == 0.5
+        for bad in (None, 0.30, 0.2, 1.0, 1.2, 0.0, True, "0.5"):
+            with pytest.raises(ValueError, match="q4_incubate"):
+                Thresholds(promote="incubate", q4_incubate=bad)
+        with pytest.raises(ValueError, match="q4_incubate"):
+            Thresholds(promote="incubate", q4=0.6, q4_incubate=0.5)
+
+    def test_the_level_is_stored_as_a_float_so_equal_settings_hash_alike(self):
+        one = Thresholds(promote="incubate", q4_incubate=np.float32(0.5))
+        other = Thresholds(promote="incubate", q4_incubate=0.5)
+        assert content_hash(one) == content_hash(other)
+        assert type(one.q4_incubate) is float
+
+    def test_q4_incubate_is_refused_without_promote_incubate(self):
+        # A level nothing reads would change the hash without changing a decision.
+        with pytest.raises(ValueError, match="q4_incubate"):
+            Thresholds(q4_incubate=0.5)
+
+    def test_unknown_promote_is_refused(self):
+        with pytest.raises(ValueError, match="promote"):
+            Thresholds(promote="maybe", q4_incubate=0.5)
+
+    def test_incubate_needs_the_bh_stage_4(self):
+        # q4_incubate is a level on BH's adjusted p; the DSR gate has no such statistic.
+        with pytest.raises(ValueError, match="bh"):
+            Thresholds(promote="incubate", q4_incubate=0.5, final="dsr")
+
+
+class TestRegisteredContent:
+    def test_the_default_registers_neither_field(self):
+        content = thresholds_dict(Thresholds())
+        assert "promote" not in content and "q4_incubate" not in content
+        assert set(content) == {"q1", "stage1", "alpha2", "final", "d4", "q4", "final_trials"}
+        # Spelled out, the default is the same setting.
+        spelled = Thresholds(promote="accept", q4_incubate=None)
+        assert content_hash(spelled) == content_hash(Thresholds())
+
+    def test_promote_and_q4_incubate_enter_the_content(self):
+        base = Thresholds()
+        incubate = Thresholds(promote="incubate", q4_incubate=0.5)
+        looser = Thresholds(promote="incubate", q4_incubate=0.6)
+        assert len({content_hash(base), content_hash(incubate), content_hash(looser)}) == 3
+        content = thresholds_dict(incubate)
+        assert content["promote"] == "incubate" and content["q4_incubate"] == 0.5
+
+    def test_the_content_reads_back_to_the_same_setting(self):
+        for th in (Thresholds(), INCUBATE):
+            assert Thresholds(**json.loads(json.dumps(thresholds_dict(th)))) == th
+
+
+class TestOutcomes:
+    def test_the_promotion_module_holds_the_rule(self):
+        accepted, incubate = promotion.outcomes(scorecard(), INCUBATE)
+        assert list(accepted) == [True, False, False, False, False]
+        # b is between q4 (0.30) and q4_incubate (0.5); c is above it; d never reached stage 4.
+        assert list(incubate) == [False, True, False, False, False]
+
+    def test_the_default_has_no_incubate_outcome(self):
+        accepted, incubate = promotion.outcomes(scorecard(), Thresholds())
+        assert list(accepted) == [True, False, False, False, False]
+        assert not incubate.any() and incubate.dtype == bool
+
+    def test_incubate_is_never_accepted_and_acceptance_is_unchanged(self):
+        plain, _ = promotion.outcomes(scorecard(), Thresholds())
+        accepted, incubate = promotion.outcomes(scorecard(), INCUBATE)
+        pd.testing.assert_series_equal(accepted, plain)
+        assert not (accepted & incubate).any()
+
+    def test_a_looser_level_incubates_more_and_never_a_stage_3_failure(self):
+        card = scorecard()
+        _, at_half = promotion.outcomes(card, INCUBATE)
+        _, at_eight = promotion.outcomes(card, Thresholds(promote="incubate", q4_incubate=0.8))
+        assert list(at_eight) == [False, True, True, False, False]
+        assert at_half.sum() <= at_eight.sum()
+        assert not at_eight[~card["s3_pass"]].any()
+
+    def test_decide_sets_the_columns_and_prices_both_outcomes(self):
+        def grading(card):
+            return card["is_mean"] / 2
+
+        card = promotion.decide(scorecard(), INCUBATE, expected_mean=grading)
+        promoted = card["accepted"] | card["incubate"]
+        assert list(promoted) == [True, True, False, False, False]
+        assert card.loc[promoted, "expected_mean"].notna().all()
+        assert card.loc[~promoted, "expected_mean"].isna().all()
+        assert "expected_mean" not in promotion.decide(scorecard(), INCUBATE)
