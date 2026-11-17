@@ -111,8 +111,12 @@ def load_config(path: str | Path | None = None) -> FactorConfig:
     return FactorConfig(**values)
 
 
-def make_client():
+def make_client(prompt_caching: bool = False):
     """A real Anthropic client; the SDK finds the credentials.
+
+    `prompt_caching=True` marks each request's system text as a cacheable prefix
+    (`capstone.pipeline.usage.PromptCaching`); off by default, as it changes the
+    request shape.
 
     Hidden SDK retries are disabled: a retry must pass through the caller's
     budget/journal as another counted attempt. API failures propagate to callers.
@@ -125,7 +129,12 @@ def make_client():
         import anthropic
     except ImportError as exc:  # pragma: no cover - depends on the environment
         raise ImportError('install the agents extra: pip install -e ".[agents]"') from exc
-    return anthropic.Anthropic(max_retries=0)
+    client = anthropic.Anthropic(max_retries=0)
+    if prompt_caching:
+        from capstone.pipeline.usage import PromptCaching
+
+        return PromptCaching(client)
+    return client
 
 
 def call_tool(
