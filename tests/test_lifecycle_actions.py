@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from capstone.artifacts import canonical, digest
 from capstone.pipeline import lifecycle_actions as la
 from capstone.strategy.registry import (
     LIFECYCLE_FILE,
@@ -46,11 +47,42 @@ def registry_text(entries):
     return "strategies:\n" + body
 
 
+def registered_events(entries):
+    """The `registered` events `register` would have written: every entry but a legacy
+    contract one needs its own, chained."""
+    lines, previous = [], ""
+    for sid, module, role in entries:
+        if module == MODULE:
+            continue
+        event = {
+            "prev_hash": previous,
+            "field": "registered",
+            "id": sid,
+            "role": role or "deploy",
+            "state": "active",
+            "module": module,
+            "version": "",
+            "reviewer": "reviewer-a",
+            "at": "2020-01-02",
+        }
+        lines.append(canonical(event) + "\n")
+        previous = digest(event)
+    return "".join(lines)
+
+
 def make_root(tmp_path, entries=(("alpha", MODULE, ""), ("book", SAVED_PORTFOLIO_MODULE, ""))):
     (tmp_path / REGISTRY_FILE).parent.mkdir(parents=True)
     (tmp_path / REGISTRY_FILE).write_text(registry_text(entries), encoding="utf-8")
+    events = registered_events(entries)
+    if events:
+        (tmp_path / LIFECYCLE_FILE).write_bytes(events.encode("utf-8"))
     (tmp_path / SPEC_DIR).mkdir(parents=True)
     return tmp_path
+
+
+def lifecycle_text(root):
+    path = root / LIFECYCLE_FILE
+    return path.read_text(encoding="utf-8") if path.exists() else None
 
 
 def args(root, sid="alpha", **kwargs):
@@ -85,15 +117,19 @@ def test_suspend_then_resume_keeps_history(tmp_path):
     result = la.suspend(args(root, resume=True, at="2020-03-03"))
     assert (result["command"], result["state"]) == ("resume", "active")
     events = (root / LIFECYCLE_FILE).read_text(encoding="utf-8").splitlines()
-    assert len(events) == 2
+    assert [json.loads(line)["field"] for line in events if '"alpha"' in line] == [
+        "state",
+        "state",
+    ]
     assert result["lifecycle_head"]
 
 
 def test_an_unregistered_strategy_is_refused_and_nothing_is_written(tmp_path):
     root = make_root(tmp_path)
+    before = lifecycle_text(root)
     with pytest.raises(la.Refused, match="not registered"):
         la.suspend(args(root, sid="ghost"))
-    assert not (root / LIFECYCLE_FILE).exists()
+    assert lifecycle_text(root) == before
 
 
 def test_retire_records_a_departure_in_every_holding_portfolio(tmp_path, portfolios):
@@ -122,11 +158,12 @@ def test_retire_is_terminal_but_completes_unwritten_departures(tmp_path, portfol
 
 def test_a_fixed_pool_portfolio_is_refused_before_any_write(tmp_path, portfolios):
     root = make_root(tmp_path)
+    before = lifecycle_text(root)
     portfolios["book"] = FakePortfolio("book", portfolios["book"].specs, chronological=False)
     with pytest.raises(la.Refused, match="fixed pool"):
         la.retire(args(root))
     assert state_of(root, "alpha") == "active"
-    assert not (root / LIFECYCLE_FILE).exists()
+    assert lifecycle_text(root) == before
 
 
 def test_a_departure_cannot_precede_a_recorded_decision(tmp_path, portfolios):
