@@ -45,7 +45,9 @@ def test_required_columns_survive_even_when_empty():
     assert list(protocol.observed_events(empty)) == ["event_id", "event_date", "permno", "kind"]
 
 
-def test_the_prefix_input_closure_needs_a_module_this_build_lacks():
+def test_the_prefix_input_closure_is_in_this_build_and_still_needs_events():
+    # capstone.pipeline.prefix_inputs ships with the historical inputs, so the closure's
+    # imports resolve and the first refusal is the protocol's own, not an import error.
     panel = SimpleNamespace(fields={}, universe=pd.DataFrame({101: [True]}))
-    with pytest.raises(ImportError):
-        protocol.formation_panel(panel, "2000-01-31")
+    with pytest.raises(ValueError, match="requires supplied events"):
+        protocol.canonical_inputs(panel, None, None, None, None, "2000-01-31")
