@@ -14,7 +14,7 @@ def locked_journal(path, *, message="another process owns this journal"):
     """Open `path` under an exclusive `<path>.lock` (WAL, synchronous=FULL); fail on contention."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with exclusive_file(path.with_suffix(".lock"), message=message):
+    with exclusive_file(path.with_name(path.name + ".lock"), message=message):
         with closing(sqlite3.connect(path)) as db:
             db.execute("PRAGMA journal_mode=WAL")
             db.execute("PRAGMA synchronous=FULL")
