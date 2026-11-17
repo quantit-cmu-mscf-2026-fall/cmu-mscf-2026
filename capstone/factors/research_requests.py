@@ -37,6 +37,38 @@ def _response(payload):
     return SimpleNamespace(**data)
 
 
+def _classify(exc, transient_attempt, resume_transient):
+    """Name a failed send from its status and message only; never store the exception text.
+
+    Returns (category, state, retryable). Credit, authentication and unavailable-model
+    failures pause the study; a definite 429 is retryable once; anything else is an
+    uncertain send that needs an explicit operator decision.
+    """
+    status = getattr(exc, "status_code", None)
+    body = getattr(exc, "body", {}) or {}
+    detail = body.get("error", body) if isinstance(body, dict) else {}
+    message = str(detail.get("message", "")).lower() if isinstance(detail, dict) else ""
+    credit = any(word in message for word in ("credit", "billing", "balance"))
+    category = (
+        "credits_exhausted"
+        if credit
+        else "authentication_failed"
+        if status in (401, 403)
+        else "model_or_request_unavailable"
+        if status in (400, 404)
+        else "rate_limit"
+        if status == 429
+        else "uncertain_send"
+    )
+    retryable = status == 429 and not credit and transient_attempt == 0 and not resume_transient
+    state = (
+        "retryable"
+        if retryable
+        else ("paused" if status in (400, 401, 402, 403, 404, 429) else "uncertain")
+    )
+    return category, state, retryable
+
+
 class RequestJournal:
     """One owner per study, using the shared journal lock and SQLite settings.
 
@@ -123,7 +155,7 @@ class RequestJournal:
 
     def _blocked(self):
         return self.db.execute("""SELECT id,state FROM model_requests r
-            WHERE state IN ('inflight','uncertain')
+            WHERE state IN ('inflight','uncertain','paused','failed')
               AND NOT EXISTS(SELECT 1 FROM request_resolutions s WHERE s.request_id=r.id)
             LIMIT 1""").fetchone()
 
@@ -143,7 +175,7 @@ class RequestJournal:
             row = self.db.execute(
                 "SELECT state FROM model_requests WHERE id=?", (request_id,)
             ).fetchone()
-            if row is None or row[0] not in ("inflight", "uncertain"):
+            if row is None or row[0] not in ("inflight", "uncertain", "paused", "failed"):
                 raise ValueError("request is not awaiting resolution")
             self.db.execute(
                 "INSERT INTO request_resolutions VALUES (?,?,?)",
@@ -167,6 +199,7 @@ class RequestJournal:
             raise ValueError("checkpoint request inputs changed")
         if rows and rows[-1][3] == "completed":
             return self._response_checked(rows[-1][0], rows[-1][2])
+        resume_transient = bool(rows and rows[-1][3] == "retryable")
         if rows:
             resolution = self.db.execute(
                 "SELECT decision FROM request_resolutions WHERE request_id=?",
@@ -174,47 +207,54 @@ class RequestJournal:
             ).fetchone()
             if resolution is not None and resolution[0] == "abandon":
                 raise RequestAbandoned("request explicitly abandoned: " + rows[-1][0])
-            if resolution is None:
+            if not resume_transient and (resolution is None or resolution[0] != "retry"):
                 raise ResearchPaused("request needs explicit resolution: " + rows[-1][0])
         blocked = self._blocked()
         if blocked:
             raise ResearchPaused(f"study paused: {blocked[0]} ({blocked[1]})")
-        if self.count(bucket) >= self.limits[bucket]:
-            from capstone.pipeline.budget import CallBudgetExceeded
+        # Only a definite rate-limit response permits one automatic retry, never a timeout.
+        for transient_attempt in range(1 if resume_transient else 2):
+            if self.count(bucket) >= self.limits[bucket]:
+                from capstone.pipeline.budget import CallBudgetExceeded
 
-            raise CallBudgetExceeded(f"frozen {bucket} allowance exhausted")
-        attempt = len(rows)
-        rid = digest({"logical": logical, "attempt": attempt})
-        with self.db:
-            self.db.execute(
-                "INSERT INTO model_requests VALUES (?,?,?,?,?,NULL,'inflight',NULL)",
-                (rid, logical, bucket, attempt, request),
-            )
-            self._event(rid, "reserved", "outbound request counted before sending")
-        maybe_fault("runner:after_reserve")  # reserved, response not saved
-        try:
-            response = client.messages.create(**kwargs)
-            payload = canonical(_plain(response))
+                raise CallBudgetExceeded(f"frozen {bucket} allowance exhausted")
+            attempt = len(rows) + transient_attempt
+            rid = digest({"logical": logical, "attempt": attempt})
             with self.db:
                 self.db.execute(
-                    "INSERT INTO response_receipts VALUES (?,?)",
-                    (rid, digest(json.loads(payload))),
+                    "INSERT INTO model_requests VALUES (?,?,?,?,?,NULL,'inflight',NULL)",
+                    (rid, logical, bucket, attempt, request),
                 )
-                self.db.execute(
-                    "UPDATE model_requests SET response=?,state='completed' WHERE id=?",
-                    (payload, rid),
-                )
-                self._event(rid, "completed", "raw response saved before parsing")
-        except BaseException as exc:
-            detail = f"uncertain_send:{type(exc).__name__}"
-            with self.db:
-                self.db.execute(
-                    "UPDATE model_requests SET state='uncertain',error=? WHERE id=?",
-                    (detail, rid),
-                )
-                self._event(rid, "uncertain", detail)
-            raise ResearchPaused(f"saved request {rid}: uncertain_send") from None
-        return _response(payload)
+                self._event(rid, "reserved", "outbound request counted before sending")
+            maybe_fault("runner:after_reserve")  # reserved, response not saved
+            try:
+                response = client.messages.create(**kwargs)
+                payload = canonical(_plain(response))
+                with self.db:
+                    self.db.execute(
+                        "INSERT INTO response_receipts VALUES (?,?)",
+                        (rid, digest(json.loads(payload))),
+                    )
+                    self.db.execute(
+                        "UPDATE model_requests SET response=?,state='completed' WHERE id=?",
+                        (payload, rid),
+                    )
+                    self._event(rid, "completed", "raw response saved before parsing")
+            except BaseException as exc:
+                category, state, retryable = _classify(exc, transient_attempt, resume_transient)
+                status = getattr(exc, "status_code", None)
+                detail = f"{category}:{type(exc).__name__}:http={status}"
+                with self.db:
+                    self.db.execute(
+                        "UPDATE model_requests SET state=?,error=? WHERE id=?",
+                        (state, detail, rid),
+                    )
+                    self._event(rid, state, detail)
+                if not retryable:
+                    raise ResearchPaused(f"saved request {rid}: {category}") from None
+                continue
+            return _response(payload)
+        raise AssertionError("bounded retry loop did not terminate")
 
     def report(self):
         rows = self.db.execute(
