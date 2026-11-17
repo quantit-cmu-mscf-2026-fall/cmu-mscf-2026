@@ -5,16 +5,19 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import contextmanager
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 from capstone.factors.idea_routes import IdeaCatalogueEntry, catalogue_rows
 from capstone.factors.research_contracts import (
     AssignedBrief,
+    ConstructionEvidence,
+    MethodSpec,
     ResearchPolicy,
     SourceClaim,
     canonical,
     digest,
+    qualify,
 )
 from capstone.factors.research_records import put_artifact
 
@@ -182,6 +185,141 @@ class ResearchController:
             dict(row) | {"payload": json.loads(row["payload"])}
             for row in self.db.execute("SELECT * FROM research_events ORDER BY seq")
         ]
+
+    def pending_papers(self, source):
+        """Read an existing FileSource/PaperlogSource without changing global ingestion."""
+        papers = list(source.papers())
+        if len({p["key"] for p in papers}) != len(papers):
+            raise ValueError("duplicate source packet")
+        if any(p["key"] not in self.catalogue for p in papers):
+            raise ValueError("source has an unregistered packet; freeze its catalogue first")
+        return [p for p in sorted(papers, key=lambda p: p["key"]) if self.state(p["key"]) is None]
+
+    def ground(self, packet, proposal: SourceClaim):
+        _, inventory, _ = self.catalogue[packet]
+        if isinstance(inventory, IdeaCatalogueEntry):
+            raise ValueError("idea catalogue requires the assess_idea route")
+        with self.transaction():
+            self._require(packet, "assigned")
+            if proposal.source_url != inventory.source_url:
+                self._event(
+                    packet,
+                    "unsupported_claim",
+                    "source identity changed",
+                    asdict(proposal),
+                )
+                return "unsupported_claim"
+            # Agent omissions cannot remove dependencies, improve source access, or expand scope.
+            effective = replace(
+                proposal,
+                full_methods=inventory.full_methods,
+                universe=inventory.universe if inventory.universe != "sp500" else proposal.universe,
+                required_inputs=tuple(
+                    set(proposal.required_inputs) | set(inventory.required_inputs)
+                ),
+            )
+            state, missing = qualify(effective, self.inputs)
+            claim_id = self._artifact("source_claim", asdict(effective))
+            self._event(
+                packet,
+                state,
+                "source and capability inventory",
+                {
+                    "claim_id": claim_id,
+                    "missing": missing,
+                    "agent_declared": asdict(proposal),
+                    "effective": asdict(effective),
+                },
+            )
+            return state
+
+    def claim_id(self, packet):
+        """Identity to bind into a proposed or frozen MethodSpec."""
+        return self._latest(packet, "claim_id")
+
+    def frozen_spec_id(self, packet):
+        """Read the grounded specification binding when resuming a construction."""
+        return self._latest(packet, "spec_id")
+
+    def freeze_spec(self, packet, spec: MethodSpec):
+        with self.transaction():
+            self._require(packet, "specification_ready", "repair_requested")
+            if spec.claim_id != self._latest(packet, "claim_id"):
+                raise ValueError("specification must bind the grounded claim")
+            route = self.catalogue[packet][2]
+            key = self._artifact("method_spec", asdict(spec))
+            state = "specification_frozen" if route != "unavailable" else "constructor_unavailable"
+            self._event(
+                packet,
+                state,
+                "existing constructor binding",
+                {"spec_id": key, "route": route},
+            )
+            return key
+
+    def construct(self, packet, verifier):
+        """A trusted executable verifier, never a tool-call field named `passed`."""
+        with self.transaction():
+            self._require(packet, "specification_frozen")
+            spec_id = self._latest(packet, "spec_id")
+            payload = self.db.execute(
+                "SELECT payload FROM research_artifacts WHERE id=?", (spec_id,)
+            ).fetchone()[0]
+            evidence = verifier(MethodSpec(**json.loads(payload)))
+            if not isinstance(evidence, ConstructionEvidence) or evidence.spec_id != spec_id:
+                raise ValueError("verifier returned unrelated evidence")
+            key = self._artifact("construction_evidence", asdict(evidence))
+            state = "construction_verified" if evidence.passed else "construction_failed"
+            row = self.db.execute(
+                "SELECT repairs FROM research_briefs WHERE id=?", (packet,)
+            ).fetchone()
+            if not evidence.passed and row[0] < self.policy.max_repairs:
+                state = "repair_requested"
+                self.db.execute(
+                    "UPDATE research_briefs SET repairs=repairs+1 WHERE id=?", (packet,)
+                )
+            self._event(
+                packet,
+                state,
+                "deterministic construction verifier",
+                {"evidence_id": key},
+            )
+            return state
+
+    def replay_handoff(self, packet):
+        with self.transaction():
+            self._require(packet, "construction_verified")
+            evidence = {
+                "spec_id": self._latest(packet, "spec_id"),
+                "evidence_id": self._latest(packet, "evidence_id"),
+                "generator_policy": self.identity,
+                "formal_admission": False,
+            }
+            self._event(packet, "replay_ready", "register before common replay", evidence)
+            return evidence
+
+    def record_failure(self, packet, kind, evidence):
+        """Operational/interpretation failures cannot overwrite a data-blocked economic claim."""
+        if kind not in ("interpretation_failed", "infrastructure_failed", "budget_exhausted"):
+            raise ValueError("unknown non-economic failure reason")
+        with self.transaction():
+            self._require(packet, "assigned", "specification_ready", "specification_frozen")
+            self._event(packet, kind, "research process failure, not an economic result", evidence)
+
+    def validation_handoff(self, packet, calibration):
+        """Scope compatibility only; the existing financial funnel still owns admission."""
+        self._require(packet, "replay_ready")
+        if (
+            not isinstance(calibration, dict)
+            or calibration.get("generator_policy") != self.identity
+        ):
+            raise ValueError("financial calibration does not cover this generator/policy")
+        return {
+            "spec_id": self._latest(packet, "spec_id"),
+            "generator_policy": self.identity,
+            "existing_financial_funnel_required": True,
+            "formal_admission": False,
+        }
 
 
 class RecordsController:
