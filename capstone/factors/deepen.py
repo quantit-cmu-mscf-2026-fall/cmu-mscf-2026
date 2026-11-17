@@ -273,6 +273,10 @@ class BudgetExhausted(RuntimeError):
     """The agreed number of model calls has been used."""
 
 
+class FamiliesCapped(RuntimeError):
+    """Every family in the pool has proposed `max_children_per_family` children."""
+
+
 def system_prompt(config: FactorConfig) -> str:
     return (
         "You refine cross-sectional equity factors written in a closed grammar. Each "
@@ -389,6 +393,7 @@ class Candidate:
     evidence: str  # the memory's table for its kind of parent (`memory.evidence_table`)
     allowed: tuple[str, ...]  # edit kinds it may get: applicable and not vetoed
     lineage: tuple[str, ...]  # oldest ancestor through this parent
+    limit: int | None = None  # edits its family may still take this round (None: no cap)
 
 
 @dataclass(frozen=True)
@@ -445,6 +450,8 @@ def decide_prompt(candidates: Sequence[Candidate], n: int) -> str:
             f"  hypothesis: {c.hypothesis}",
             f"  allowed edits: {', '.join(c.allowed)}",
         ]
+        if c.limit is not None and c.limit < n:
+            lines.append(f"  at most {c.limit} edit(s): its family is near its cap")
         if len(c.lineage) > 1:
             lines.append("  Lineage, oldest first: " + " -> ".join(c.lineage))
     lines += ["", "The memory's evidence, by kind of parent:"]
@@ -453,10 +460,12 @@ def decide_prompt(candidates: Sequence[Candidate], n: int) -> str:
         lines += ["", f"Kind {context}:", table]
     lines += ["", "What each kind of edit means:"]
     lines += [f"- {m}: {MOTIF_WORDS[m]}" for m in PRODUCIBLE_MOTIFS]
+    fewer = any(c.limit is not None and c.limit < n for c in candidates)
     lines += [
         "",
         f"Choose one parent and one allowed edit, say why and which evidence you used, "
-        f"and write {n} different edited formulas of that kind.",
+        f"and write {n} different edited formulas of that kind"
+        + (" (no more than the parent's 'at most', where it has one)." if fewer else "."),
     ]
     return "\n".join(lines)
 
@@ -483,7 +492,7 @@ class DeepenAgent(ModelEditor):
                     str(answer.get("evidence_used", "")),
                     self._repaired(
                         answer.get("edits", []),
-                        n,
+                        n if chosen.limit is None else min(n, chosen.limit),
                         parse(chosen.expression),
                         motif,
                         chosen.lineage,
@@ -531,6 +540,13 @@ class Deepener:
     their quality, so the search has somewhere to start); `step` runs one
     deepen round. `editor` writes the edits (a `ModelEditor`, or a fake in
     tests); `seed` fixes every random choice.
+
+    `max_children_per_family` (None: unlimited, the original behaviour) caps
+    the children proposed per family (a parent's hypothesis, the gate's
+    family), every draft counted whatever became of it. A family at the cap
+    offers no parent, so the rounds left go to the other families; a round
+    asks for no more children than its family has left. With every family
+    at the cap, `step` raises `FamiliesCapped` before any call.
     """
 
     con: sqlite3.Connection
@@ -552,11 +568,38 @@ class Deepener:
     selected: Counter = field(default_factory=Counter)
     evaluations: int = 0
     fallbacks: int = 0  # rounds where every pair was vetoed and the pick was random
+    max_children_per_family: int | None = None  # None: unlimited
+    children_by_family: Counter = field(default_factory=Counter)  # hypothesis id -> drafts
 
     def __post_init__(self) -> None:
+        cap = self.max_children_per_family
+        if cap is not None and (isinstance(cap, bool) or not isinstance(cap, int) or cap < 1):
+            raise ValueError(f"max_children_per_family must be None or at least 1, got {cap!r}")
         self.pool = Pool(self.config)
         self.rng = random.Random(self.seed)
         self.trees: dict[str, Node] = {}
+        self._families: dict[str, str] = {}
+
+    # -- the per-family cap -------------------------------------------------
+
+    def family(self, fid: str) -> str:
+        """A pool member's family: the hypothesis of its first proposal."""
+        if fid not in self._families:
+            self._families[fid] = self._hypothesis(fid)["id"]
+        return self._families[fid]
+
+    def children_left(self, fid: str) -> int | None:
+        """Children `fid`'s family may still propose (None: no cap)."""
+        cap = self.max_children_per_family
+        if cap is None:
+            return None
+        return max(cap - self.children_by_family[self.family(fid)], 0)
+
+    def _open(self, views: list[ParentView]) -> list[ParentView]:
+        """`views` whose family is under the cap (all of them with no cap)."""
+        if self.max_children_per_family is None:
+            return views
+        return [v for v in views if self.children_left(v.id) > 0]
 
     # -- the pool and the store -------------------------------------------
 
@@ -641,6 +684,12 @@ class Deepener:
         views = self._views()
         if not views:
             raise RuntimeError("the pool is empty: add parents first")
+        views = self._open(views)
+        if not views:
+            raise FamiliesCapped(
+                f"every family has proposed max_children_per_family="
+                f"{self.max_children_per_family} children"
+            )
         action = select_action(
             views, self.memory, self.evaluations, self.config, self._allowed, self.rng
         )
@@ -657,11 +706,13 @@ class Deepener:
     def candidates(self) -> list[Candidate]:
         """The parents the agent sees, best by S_ledger first, with the memory's evidence."""
         views = sorted(
-            self._views(),
+            self._open(self._views()),
             key=lambda v: (-ledger_score(v.quality, v.rho_max, v.times_selected), v.id),
         )[: self.candidates_shown]
+        n = self.config.memory_children_per_parent
         out = []
         for v in views:
+            left = self.children_left(v.id)
             vetoes = set(self._vetoes(v.context))
             allowed = tuple(m for m in PRODUCIBLE_MOTIFS if self._allowed(v, m) and m not in vetoes)
             if not allowed:
@@ -674,6 +725,7 @@ class Deepener:
                     evidence_table(evidence(self.memory, v.context, self.config)),
                     allowed,
                     tuple(self.lineage(v.id)),
+                    None if left is None else min(n, left),
                 )
             )
         return out
@@ -717,12 +769,17 @@ class Deepener:
             reason=json.dumps(record),
             policy="learned-memory-search",
         )
+        left = self.children_left(parent.id)
+        if left is not None:  # the family's cap: no more children than it has left
+            n = min(n, left)
         if decision is not None:
-            drafts = decision.drafts
+            drafts = decision.drafts if left is None else decision.drafts[:n]
         else:
             drafts = self.editor.drafts(
                 parent_tree, motif, n, self.lineage(parent.id), self._vetoes(parent.context)
             )
+        if left is not None:
+            self.children_by_family[self.family(parent.id)] += len(drafts)
         frequent = frequent_root_genes(
             [tree for _, tree in store.factor_trees(self.con)], self.config.avoid_frequent_subtrees
         )
