@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import builtins
 import importlib
 import json
@@ -123,7 +124,7 @@ def _capstone_names() -> set[str]:
 # Backticked words that are ledger columns or other libraries' names, and the Claude Code
 # tool a command's `allowed-tools: Bash(...)` frontmatter names.
 NOT_CAPSTONE = {"bh", "by", "q", "lfdr", "Path", "Series", "DataFrame", "Bash"}
-CALL = re.compile(r"(?<![\w.])([A-Za-z_]\w*)\((?!s\))")  # not the prose "seed(s)"
+CALL = re.compile(r"(?<![\w.-])([A-Za-z_]\w*)\((?!s\))")  # not "seed(s)" or CSS "cubic-bezier("
 SPAN = re.compile(r"`([^`\n]+)`")
 
 
@@ -138,11 +139,30 @@ def _unqualified_names(text: str, catalog: bool) -> set[str]:
     return {n for n in found - NOT_CAPSTONE if not n.startswith(("test_", "my_"))}
 
 
+def _skill_dir(path: Path) -> Path | None:
+    """The skills/<name>/ folder a markdown file belongs to, if any."""
+    return next((p for p in path.parents if p.parent.name == "skills"), None)
+
+
+def _skill_script_names(path: Path) -> set[str]:
+    """Functions and classes a skill's own scripts define (pipeline-view's `track(...)`)."""
+    skill = _skill_dir(path)
+    if skill is None:
+        return set()
+    names: set[str] = set()
+    for script in skill.rglob("*.py"):
+        for node in ast.walk(ast.parse(script.read_text(encoding="utf-8"))):
+            if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+                names.add(node.name)
+    return names
+
+
 def test_every_unqualified_name_the_skills_use_exists():
     """`holm` or `PurgedKFold(...)` named without a module is still something capstone has."""
-    known = _capstone_names()
+    capstone_names = _capstone_names()
     checked = 0
     for path in MARKDOWN:
+        known = capstone_names | _skill_script_names(path)
         for name in sorted(
             _unqualified_names(path.read_text(encoding="utf-8"), path.name == "methods.md")
         ):
@@ -158,13 +178,16 @@ FILE_REFERENCE = re.compile(
 
 
 def test_skills_point_at_repository_files_that_exist():
-    seen = {
-        quoted or bare
-        for path in MARKDOWN
-        for quoted, bare in FILE_REFERENCE.findall(path.read_text(encoding="utf-8"))
-    }
-    assert {"CONTRIBUTING.md", "CLAUDE.md"} <= seen, "expected the skills to name repository files"
-    assert sorted(m for m in seen if not (ROOT / m).is_file()) == []
+    """A path resolves from the repository root or, for a skill's own scripts, from its folder."""
+    seen: dict[str, list[Path]] = {}
+    for path in MARKDOWN:
+        for quoted, bare in FILE_REFERENCE.findall(path.read_text(encoding="utf-8")):
+            seen.setdefault(quoted or bare, []).append(path)
+    assert {"CONTRIBUTING.md", "CLAUDE.md"} <= set(seen), (
+        "expected the skills to name repository files"
+    )
+    roots = {m: [ROOT, *filter(None, (_skill_dir(p) for p in paths))] for m, paths in seen.items()}
+    assert sorted(m for m in seen if not any((r / m).is_file() for r in roots[m])) == []
 
 
 def test_the_plugin_carries_no_private_or_host_specific_text():

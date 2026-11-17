@@ -59,7 +59,7 @@ carries a badge (✕, ‖, ✓) and a basket label.
    tagged `class="a-<verb>"`, a display with id `lcd-<i>` if it has one. Keep it under the
    180 px height of its neighbours.
 3. Add the keyframes under `.inst.active` in `view.html` and its read-out in `lcdText`.
-4. Rerun `python build_scene.py`, check a snapshot by eye, and run `tests/test_mscf_plugin.py`.
+4. Rerun `python build_scene.py`, check a snapshot by eye, and run `tests/test_mscf_plugin_viewer.py`.
 
 ## Avoid
 
