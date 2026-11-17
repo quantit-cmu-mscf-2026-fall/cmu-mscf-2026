@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -503,3 +504,94 @@ def read_source(access, name, source_version):
         raise HoldoutSealed("source is unauthorized or already materialized in this terminal look")
     used.add(name)
     return row["sources"][name]
+
+
+GUARD_ENV = "CAPSTONE_HOLDOUT_GUARD"
+
+
+def guard_enabled():
+    """True when the environment turns on sealing of unauthorized post-discovery reads.
+
+    Default off: enforcing it everywhere is a team decision. With it on, a licensed or
+    unregistered shared file read without an access stops at 2020-12-31, and the WRDS
+    loader refuses any query or cache past that date.
+    """
+    return os.environ.get(GUARD_ENV, "").strip().casefold() in {"1", "on", "true", "yes"}
+
+
+# Licensed shared files (docs/shared_data.md, scripts/pull_wrds.py) and the date
+# column a bounded read must filter on; None = undated (no bounded read exists,
+# so it is refused). `crsp_*`/`sp500_*` filter on `date` (`event_date` for event
+# or action files). They open only under a real-dataset authority.
+LICENSED_DATASETS = {
+    "comp_funda": "datadate",
+    "comp_fundq": "datadate",
+    "comp_company": None,
+    "ccm_link": "linkdt",
+}
+LICENSED_PREFIXES = ("crsp_", "sp500_")
+# Files whose post-2020 rows are not holdout outcomes; none registered. Every
+# other unregistered name (factor, event, descriptor-named files) fails closed:
+# without an access it is read only through 2020.
+PUBLIC_DATASETS = frozenset()
+
+
+def protected_dataset(name):
+    """REAL_DATASET for a registered licensed file, else None (an unregistered
+    file is still guarded by `guard_shared_read` unless it is public)."""
+    if not isinstance(name, str) or Path(name).name != name or "/" in name or "\\" in name:
+        raise HoldoutSealed("shared sources require canonical file names, not path aliases")
+    name = name.casefold()
+    return REAL_DATASET if name in LICENSED_DATASETS or name.startswith(LICENSED_PREFIXES) else None
+
+
+def guard_shared_read(name, columns, end, date_column, auto_sync, access):
+    """Run before sync/import/materialization; calendar capability is projection-only.
+
+    Off (a no-op without an access) unless `CAPSTONE_HOLDOUT_GUARD` is on, so the team's
+    existing reads are unchanged until it adopts code-enforced sealing. A read that
+    passes an `access` is always validated.
+    """
+    if access is None and not guard_enabled():
+        return False
+    dataset = protected_dataset(name)
+    name = name.casefold()
+    if name in PUBLIC_DATASETS and access is None:
+        return False
+    if dataset is not None:
+        event = "event" in name or "action" in name
+        expected = LICENSED_DATASETS.get(name, "event_date" if event else "date")
+        if date_column != expected:
+            raise HoldoutSealed("protected source requires its authoritative date filter")
+    if end is not None and _day(end) <= DISCOVERY_END and access is None:
+        return False
+    calendar = (
+        columns == ["date"]
+        and date_column == "date"
+        and end is not None
+        and _day(end) <= "2021-01-31"
+        and access is None
+    )
+    if calendar:
+        if auto_sync:
+            raise HoldoutSealed("calendar metadata cannot refresh market sources")
+        return True
+    validate_access(access, dataset=dataset, end=end)
+    if end is None:
+        raise HoldoutSealed("source reads require the terminal look's frozen date bound")
+    if auto_sync:
+        raise HoldoutSealed("authorized final sources cannot refresh during their look")
+    return False
+
+
+def require_discovery_query(end):
+    """WRDS refresh/cache is not the frozen final-data path, regardless of credentials.
+
+    Off unless `CAPSTONE_HOLDOUT_GUARD` is on (see `guard_enabled`).
+    """
+    if not guard_enabled():
+        return
+    if end is None or _day(end) > DISCOVERY_END:
+        raise HoldoutSealed(
+            "CRSP holdout queries/caches remain sealed; use separately authorized frozen sources"
+        )
