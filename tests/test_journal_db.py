@@ -28,3 +28,25 @@ def test_second_owner_is_refused_with_the_callers_message_and_lock_is_released(t
             raise ValueError("interrupted")
     with locked_journal(path):
         pass
+
+
+def test_different_journal_extensions_have_independent_owners(tmp_path):
+    first, second = tmp_path / "runs.db", tmp_path / "runs.sqlite"
+    with locked_journal(first) as a, locked_journal(second) as b:
+        for connection, value in ((a, 1), (b, 2)):
+            connection.execute("CREATE TABLE t (x INTEGER)")
+            connection.execute("INSERT INTO t VALUES (?)", (value,))
+            connection.commit()
+    for path, value in ((first, 1), (second, 2)):
+        with locked_journal(path) as connection:
+            assert connection.execute("SELECT x FROM t").fetchall() == [(value,)]
+
+
+def test_journal_with_lock_extension_is_a_database_not_its_own_lock(tmp_path):
+    path = tmp_path / "journal.lock"
+    with locked_journal(path) as connection:
+        connection.execute("CREATE TABLE t (x INTEGER)")
+        connection.execute("INSERT INTO t VALUES (7)")
+        connection.commit()
+    with locked_journal(path) as connection:
+        assert connection.execute("SELECT x FROM t").fetchall() == [(7,)]

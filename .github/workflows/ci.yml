@@ -23,3 +23,8 @@ jobs:
         run: ruff format --check .
       - name: Tests
         run: pytest -q -m "not network"
+      - name: Paperlog tests (offline, no API keys)
+        working-directory: research/paperlog
+        run: |
+          pip install -e ".[dev]"
+          pytest -q
