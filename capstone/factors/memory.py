@@ -29,7 +29,7 @@ import random
 import sqlite3
 import statistics
 from collections import Counter
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 
 from capstone.factors import store
@@ -74,17 +74,29 @@ def _above(value: float, edges: tuple) -> int:
     return sum(value > edge for edge in edges)
 
 
-def parent_context(parent: Node, *, quality: float | None, times_selected: int) -> str:
+def parent_context(
+    parent: Node,
+    *,
+    quality: float | None,
+    times_selected: int,
+    quality_edges: Sequence[float] = QUALITY_EDGES,
+    signed_quality: bool = False,
+) -> str:
     """The parent's context key, such as ``returns+size|q2|d1|u0``.
 
-    `quality` is the parent's |ICIR| on the search period, or None (or NaN)
-    if it has not been scored, which gives the quality bin ``unscored``.
+    `quality` is the parent's quality on the search period, or None (or NaN)
+    if it has not been scored, which gives the quality bin ``unscored``. The
+    bins are `quality_edges`, in the scorer's units: by default |ICIR|, where
+    a factor and its negation are equally good, so the sign is ignored. With
+    `signed_quality` (a score such as a net-of-cost z, where negative is
+    bad), a negative quality falls in the bottom bin.
     """
     groups = "+".join(sorted({FIELD_GROUPS[f] for f in features_used(parent)}))
     if quality is None or math.isnan(quality):
         band = "unscored"
     else:
-        band = f"q{sum(abs(quality) >= edge for edge in QUALITY_EDGES)}"
+        q = quality if signed_quality else abs(quality)
+        band = f"q{sum(q >= edge for edge in quality_edges)}"
     size = f"d{_above(node_count(parent), SIZE_EDGES)}"
     return f"{groups}|{band}|{size}|u{_above(times_selected, USAGE_EDGES)}"
 

@@ -180,6 +180,23 @@ def test_a_round_records_move_lineage_events_and_one_ledger_trial_per_score(con,
     assert all(e["tags"] == ["learned-memory-search", "deepen"] for e in entries)
 
 
+def test_scores_carry_the_scorers_params_and_metrics_into_the_ledger(con, ledger):
+    class DetailedScorer(FakeScorer):
+        def __call__(self, tree):
+            s = super().__call__(tree)
+            return replace(s, params={"data_version": "v-test"}, metrics={"pvalue": 0.2})
+
+    d = deepener(con, ScriptedEditor(["log(cap)"]), DetailedScorer(), children=1)
+    seeds = _entries(ledger)
+    assert len(seeds) == len(SEEDS) and all(e["params"]["role"] == "parent" for e in seeds)
+    d.step()
+    entries = _entries(ledger)
+    assert len(entries) == len(SEEDS) + 1
+    for e in entries:
+        assert e["params"]["data_version"] == "v-test" and e["metrics"]["pvalue"] == 0.2
+        assert e["params"]["run_id"] == "test"  # the scorer's params never override deepen's
+
+
 def test_screening_rejections_are_not_scored(con, ledger):
     # Window variants of a stored factor fail the store-originality check.
     editor = ScriptedEditor(["ts_mean(returns, 63)", "ts_mean(returns, 252)"])

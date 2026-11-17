@@ -250,6 +250,38 @@ def test_load_filters_dates_and_returns_plain_numpy_dtypes(env):
     assert isinstance(frame["ticker"].dtype, pd.StringDtype)
 
 
+def test_load_filters_on_another_date_column_and_on_knowledge_times(env):
+    drive, _ = env
+    annual = pd.DataFrame(
+        {
+            "permno": [1, 1, 1],
+            "datadate": pd.to_datetime(["2019-12-31", "2020-12-31", "2020-12-31"]),
+            "published_at": pd.to_datetime(["2020-03-01", "2021-03-01", "2020-03-01"]),
+            "vintage_at": pd.to_datetime(["2020-03-01", "2021-03-01", "2020-03-01"]),
+            "book": [1.0, 2.0, 3.0],
+        }
+    )
+    _publish(drive, {"annual": annual})
+    plain = sd.load("annual", end="2020-12-31", date_column="datadate")
+    assert plain["book"].tolist() == [1.0, 2.0, 3.0]
+    known = sd.load(
+        "annual",
+        end="2020-12-31",
+        date_column="datadate",
+        knowledge_columns=("published_at", "vintage_at"),
+    )
+    assert known["book"].tolist() == [1.0, 3.0]  # published after the cut: never read
+
+
+def test_load_refuses_unsupported_date_and_knowledge_columns(env):
+    with pytest.raises(ValueError, match="date column"):
+        sd.load("daily", date_column="ticker")
+    with pytest.raises(ValueError, match="knowledge-time"):
+        sd.load("daily", knowledge_columns=("published_at",))  # no end date
+    with pytest.raises(ValueError, match="knowledge-time"):
+        sd.load("daily", end="2020-12-31", knowledge_columns=("ticker",))
+
+
 def test_load_unknown_file(env):
     with pytest.raises(sd.SharedDataError, match="not in the shared data"):
         sd.load("nope")
