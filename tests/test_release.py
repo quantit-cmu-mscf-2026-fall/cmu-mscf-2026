@@ -82,7 +82,12 @@ def test_exported_tree_reads_its_stamp_and_detects_edits(tmp_path):
         "dirty": False,
         "deployment_tag": None,
     }
-    assert stamped_identity(tmp_path, "deploy-2026.01.02")["deployment_tag"] == "deploy-2026.01.02"
+    assert (
+        stamped_identity(tmp_path, "deploy-2026.01.02", resolve_tag=lambda r, t: "c" * 40)[
+            "deployment_tag"
+        ]
+        == "deploy-2026.01.02"
+    )
     (tmp_path / "a.txt").write_text("edited\n")
     assert stamped_identity(tmp_path)["dirty"] is True
     (tmp_path / "a.txt").unlink()
@@ -96,3 +101,66 @@ def test_exported_tree_refuses_a_different_tag_and_a_missing_stamp(tmp_path):
     stamp(tmp_path, ["a.txt"])
     with pytest.raises(ValueError, match="does not identify"):
         stamped_identity(tmp_path, "deploy-2030.01.01")
+
+
+@pytest.mark.parametrize("identity", [release_identity, stamped_identity])
+def test_exported_deployment_tag_requires_an_independent_checker(tmp_path, identity):
+    (tmp_path / "a.txt").write_text("one\n")
+    stamp(tmp_path, ["a.txt"])
+    with pytest.raises(ValueError, match="needs a tag checker"):
+        identity(repo=tmp_path, deployment_tag="deploy-2026.01.02")
+
+
+def test_exported_tag_is_checked_against_the_recorded_commit(tmp_path):
+    (tmp_path / "a.txt").write_text("one\n")
+    stamp(tmp_path, ["a.txt"])
+    seen = []
+
+    def resolve(path, tag):
+        seen.append((path, tag))
+        return "c" * 40
+
+    assert (
+        release_identity("deploy-2026.01.02", repo=tmp_path, resolve_tag=resolve)["dirty"] is False
+    )
+    assert seen == [(tmp_path, "deploy-2026.01.02")]
+    stamp(tmp_path, ["a.txt"], commit="d" * 40)
+    with pytest.raises(ValueError, match="does not identify"):
+        release_identity("deploy-2026.01.02", repo=tmp_path, resolve_tag=resolve)
+
+
+def test_untracked_files_remain_dirty_when_git_configuration_hides_them(repo):
+    (repo / ".gitignore").write_text("data_cache/\nexperiments/\n")
+    git(repo, "add", ".gitignore")
+    git(repo, "commit", "-q", "-m", "ignore generated files")
+    git(repo, "config", "status.showUntrackedFiles", "no")
+    (repo / "data_cache").mkdir()
+    (repo / "data_cache" / "derived.txt").write_text("synthetic\n")
+    (repo / "experiments").mkdir()
+    (repo / "experiments" / "runs.jsonl").write_text("synthetic\n")
+    assert release_identity(repo=repo)["dirty"] is False
+    (repo / "new.py").write_text("x = 1\n")
+    assert release_identity(repo=repo)["dirty"] is True
+
+
+def test_git_status_uses_utf8_for_unquoted_non_ascii_names(repo, monkeypatch):
+    git(repo, "config", "core.quotePath", "false")
+    (repo / "\u03b1.py").write_text("x = 1\n")
+    run = subprocess.run
+
+    def require_utf8(*args, **kwargs):
+        assert kwargs.get("encoding") == "utf-8"
+        return run(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", require_utf8)
+    assert release_identity(repo=repo)["dirty"] is True
+
+
+@pytest.mark.parametrize("files", [None, {}])
+def test_export_stamp_requires_a_nonempty_file_manifest(tmp_path, files):
+    content = {"commit": "c" * 40, "tag": "deploy-x"}
+    if files is not None:
+        content["files"] = files
+    (tmp_path / RELEASE_STAMP).write_text(json.dumps(content))
+    with pytest.raises(ValueError, match="nonempty.*manifest"):
+        stamped_identity(tmp_path)
