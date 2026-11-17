@@ -418,7 +418,8 @@ def reject(
 
 def factors(con: sqlite3.Connection) -> list[dict]:
     """Every stored factor, oldest first."""
-    return [dict(r) for r in con.execute("SELECT * FROM factors ORDER BY created_at, id")]
+    # Wall-clock ties must not change which equally similar factor is named first.
+    return [dict(r) for r in con.execute("SELECT * FROM factors ORDER BY rowid")]
 
 
 def factor_trees(con: sqlite3.Connection) -> list[tuple[str, Node]]:
