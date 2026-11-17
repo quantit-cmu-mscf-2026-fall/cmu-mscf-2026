@@ -27,8 +27,13 @@ description.
   the `gate-holdout-look` ledger entry written before the holdout provider is
   called. Stages 1-3 get the search period only; stage 3 is not measured yet
   (`s3_measured` False). Tests: `tests/test_gate_run.py`.
-- Not yet: strict checks on the provider's answer, the stage-3 spanning test,
-  the power header.
+- **Holdout inputs** (QUANTIT-34): the provider's answer is checked on
+  arrival (exactly the requested variants, registered holdout dates only,
+  finite); a survivor with no holdout returns fails stage 4. Tests:
+  `tests/test_gate_holdout_inputs.py`; the decision matrix (null and planted
+  markets on iid, `rho` and `ar1` data), scorecard, report and expected-mean
+  tests are in `tests/test_gate_decisions.py`.
+- Not yet: the stage-3 spanning test and the power header.
 
 ## 2. Contract
 - Input: a performance matrix (dates x variants, `docs/validation.md`) and a
