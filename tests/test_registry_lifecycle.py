@@ -172,7 +172,7 @@ def test_events_are_checked_for_shape_and_for_an_impossible_sequence(root):
     (genesis,) = lines(root)
     with pytest.raises(ValueError, match="not JSON"):
         verify_lifecycle("nope\n", entries)
-    with pytest.raises(ValueError, match="registered or state event"):
+    with pytest.raises(ValueError, match="registered, state or role event"):
         verify_lifecycle('{"field":"role"}\n', entries)
     first = json.loads(genesis)
     chained = canonical({**first, "prev_hash": digest(first)}) + chr(10)
