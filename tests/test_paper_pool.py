@@ -22,6 +22,8 @@ import pytest
 from capstone.factors import paper_pool, pipeline, store
 from capstone.factors.llm import FactorConfig
 from capstone.factors.sources import FileSource
+from capstone.pipeline.budget import BudgetedClient, CallBudgetExceeded
+from capstone.pipeline.usage import UsageRecorder
 
 PAPERS = 6
 SHARED = "rank(volume) - rank(ts_mean(volume, 10))"  # proposed by every paper: duplicates
@@ -94,6 +96,18 @@ def _papers_file(tmp_path, n=PAPERS, broken=()):
     path = tmp_path / "papers.toml"
     path.write_text("\n".join(lines), encoding="utf-8")
     return path
+
+
+def _run_counted(tmp_path, name, concurrency, *, seed=0, max_calls=10_000):
+    """As `_run`, through a usage recorder and a call ceiling."""
+    con = store.connect(tmp_path / f"{name}.db")
+    fake = DelayedFake(seed)
+    recorder = UsageRecorder(fake)
+    budget = BudgetedClient(recorder, max_calls)
+    source = FileSource(_papers_file(tmp_path))
+    summary = paper_pool.run_isolated(con, source, budget, CONFIG, concurrency)
+    con.close()
+    return dict(summary=summary, usage=recorder.records, budget=budget, fake=fake)
 
 
 def _dump(con: sqlite3.Connection) -> dict:
@@ -173,6 +187,55 @@ def test_concurrency_resolves_from_the_machine_and_the_operator_cap(monkeypatch)
     assert paper_pool.resolve_concurrency(0, 1000) == min(2, cores)
     with pytest.raises(ValueError):
         paper_pool.resolve_concurrency(-1, 3)
+
+
+def test_usage_and_calls_are_identical_at_concurrency_1_and_n(tmp_path):
+    one = _run_counted(tmp_path, "one", 1, seed=1)
+    many = _run_counted(tmp_path, "many", PAPERS, seed=2)
+    assert one["usage"] == many["usage"]
+    assert one["budget"].calls == many["budget"].calls == len(one["usage"])
+
+
+def test_usage_records_are_kept_in_paper_order_not_completion_order():
+    class Echo:
+        def __init__(self):
+            self.messages = self
+
+        def create(self, **kwargs):
+            return SimpleNamespace(content=[], usage=SimpleNamespace(input_tokens=1))
+
+    recorder = UsageRecorder(Echo())
+    recorder.messages.create(model="before")
+    later = threading.Event()
+
+    def paper(index, models, wait):
+        with paper_pool.slot(index):
+            for m in models:
+                if wait:
+                    later.wait()
+                recorder.messages.create(model=m)
+        if not wait:
+            later.set()
+
+    first = threading.Thread(target=paper, args=(0, ["p0a", "p0b"], True))
+    second = threading.Thread(target=paper, args=(1, ["p1a", "p1b"], False))
+    first.start()
+    second.start()  # paper 1 finishes before paper 0 starts calling
+    first.join()
+    second.join()
+    recorder.messages.create(model="after")
+    models = [r["model"] for r in recorder.records]
+    assert models == ["before", "p0a", "p0b", "p1a", "p1b", "after"]
+
+
+def test_a_used_up_budget_in_the_paper_phase_is_refused_before_sending(tmp_path):
+    out = _run_counted(tmp_path, "tight", PAPERS, max_calls=7)
+    assert len(out["fake"].sent) == 7 == out["budget"].calls
+    assert out["budget"].refused
+    with pytest.raises(CallBudgetExceeded):
+        out["budget"].check()
+    with pytest.raises(ValueError):
+        BudgetedClient(out["fake"], 0)
 
 
 class InterruptedFake(DelayedFake):
