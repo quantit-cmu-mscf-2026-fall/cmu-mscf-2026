@@ -208,10 +208,11 @@ backtest upward, and no method in this document can correct it.
 | `bootstrap` | stationary bootstrap, block-length selection | planned |
 | `snooping` | White's Reality Check, Romano–Wolf step-down | planned |
 | `cv` | purged k-fold with embargo (from the Alpha-GPT work), walk-forward | planned |
-| `pbo` | CSCV / probability of backtest overfitting | planned |
+| `pbo` | CSCV / probability of backtest overfitting | done |
 | `spanning` | incremental value over known factors and accepted signals | planned |
 | `evaluate` | `haircut_sharpe`: Harvey–Liu haircut (their reference code), ledger trial count | done |
 | `search_fdr` | search-adjusted p-value for a hypothesis's best of K variants: block bootstrap of the family maximum (`bootstrap_family_pvalues`, from Carl's branch), or exact for independent or equicorrelated variants (`rho=`); search-adjusted FDR (López de Prado & Fabozzi 2026); max-of-mixture fit over assumed K, a sensitivity table, not a gate | done |
+| `grading` | the gate's graded scores (BY, Holm, local FDR, PSR, MinTRL, haircut Sharpe with the ledger trial count), batch diagnostics and the expected mean: reported, never read back into a decision | done |
 | `gate` | staged, pre-registered scorecard; trial count from the ledger; holdout looked at once | planned |
 
 Already in `evaluate`: `benjamini_hochberg`, `bonferroni`,
