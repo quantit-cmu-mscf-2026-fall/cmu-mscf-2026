@@ -30,8 +30,9 @@ LOG="$DATA/papers"   # papers.db lives here; stop and ask if DATA is empty
 
 ## Reading (default)
 
-Copy the log, then query the copy read-only with Python's `sqlite3`; nothing
-needs installing. The `papers` table holds each paper's latest screening:
+Copy the log, then query the copy read-only with Python's `sqlite3`; queries
+need nothing installed (`paperlog pending` below needs
+`pip install -e research/paperlog`). The `papers` table holds each paper's latest screening:
 `title`, `authors`, `published`, `url`, `abstract`, `relevance` (0-5),
 `tags` (JSON list), `summary_en`, `methods`, `lookahead_bias`, `status`
 (`screened`, `read`, `adopted`, `rejected`, ...), `human_rating` and
