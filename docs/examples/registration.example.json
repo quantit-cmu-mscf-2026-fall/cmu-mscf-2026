@@ -1,0 +1,44 @@
+{
+  "catalogue": [
+    {
+      "aliases": [],
+      "brief": {
+        "family": "liquidity_supply",
+        "method_key": "turnover-demand-pressure",
+        "packet_id": "idea-0",
+        "track": "discovery"
+      },
+      "constructor": "program",
+      "kind": "exploratory_original",
+      "required_inputs": ["returns", "volume", "shares"],
+      "source_revisions": ["0b9195095bd8ddf4ce8818915111f79415de8d753e38a1472b75b4548ff2058a"],
+      "version": 2
+    }
+  ],
+  "policy": {
+    "reservations": [["liquidity_supply", "discovery", 1]],
+    "version": 1,
+    "universe": "sp500",
+    "discovery_end": "2020-12-31",
+    "max_repairs": 1,
+    "model_rejection": false
+  },
+  "constructor_context": {
+    "data_version": "set-to-the-input-archive-data_version",
+    "anchor": "2020-01-02",
+    "sides": ["long_only"],
+    "weightings": ["equal"],
+    "schedules": [{"kind": "month_end", "interval": 1, "version": 1}],
+    "directions": ["high"],
+    "max_tail": 0.5,
+    "constructor": "fixed_tails_v1"
+  },
+  "call_limits": {
+    "liquidity_supply:discovery": 3,
+    "liquidity_supply:discovery:alignment": 1
+  },
+  "reviewed_methods": {"authority_id": "set-to-your-review-authority", "reviews": []},
+  "qualified_inputs": [],
+  "input_inventory_id": null,
+  "max_prompt_chars": 200000
+}
