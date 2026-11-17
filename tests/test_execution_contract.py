@@ -158,8 +158,6 @@ def test_benchmark_and_prefix_routes_need_their_own_root_types(absent):
 
 def test_versions_owned_by_a_missing_module_are_refused_by_name(absent):
     for version in (
-        "saved-program-portfolio-v4",
-        "saved-program-portfolio-v9",
         "observed-benchmark-next-open-v5",
         "observed-benchmark-next-open-v8",
     ):
@@ -167,6 +165,14 @@ def test_versions_owned_by_a_missing_module_are_refused_by_name(absent):
             execution_contract(diversified(), version=version)
         with pytest.raises(ExecutionContractBlocked, match="execution_route_not_in_this_build"):
             contracts._record("program-v1", "long_only", version=version)
+
+
+def test_saved_portfolio_versions_are_built_and_need_a_saved_root(absent):
+    # The saved-portfolio module is part of this build, so its versions are registered;
+    # a different root type is refused for the saved route, never as "not in this build".
+    for version in ("saved-program-portfolio-v4", "saved-program-portfolio-v9"):
+        with pytest.raises(ExecutionContractBlocked, match="saved_allocation_requires_explicit"):
+            execution_contract(diversified(), version=version)
 
 
 def test_a_route_needing_a_missing_input_module_names_it(monkeypatch):
