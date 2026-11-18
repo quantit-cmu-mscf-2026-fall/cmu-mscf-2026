@@ -40,7 +40,9 @@ def test_nothing_is_authorized_by_default(tmp_path, monkeypatch):
 
 
 def test_policy_refusals(store):
-    with pytest.raises(authority.PolicyRefused, match="is empty"):
+    with pytest.raises(
+        authority.PolicyRefused, match="is empty; session 2026-01-05 is not authorized"
+    ):
         authority.ensure(store, {}, "2026-01-05", SIGNER)
     with pytest.raises(authority.PolicyRefused, match="sealed research holdout"):
         authority.ensure(store, POLICY | {"start": "2025-06-02"}, "2026-01-05", SIGNER)
@@ -83,6 +85,26 @@ def test_a_killed_attempt_is_adopted_not_duplicated(store, monkeypatch):
     record, created = authority.ensure(store, POLICY, "2026-01-05", SIGNER)
     assert record == written.stem and created
     assert len(list(folder.glob("*.json"))) == 1
+
+
+def test_a_revoked_record_from_a_killed_attempt_is_not_adopted(store, monkeypatch):
+    def killed(point):
+        raise RuntimeError(point)
+
+    real = authority.fault
+    monkeypatch.setattr(authority, "fault", killed)
+    with pytest.raises(RuntimeError, match="autopilot:daily:authorized"):
+        authority.ensure(store, POLICY, "2026-01-05", SIGNER)  # interrupt
+    folder = current_authority.store_root() / "authorizations"
+    (written,) = list(folder.glob("*.json"))
+    current_authority.revoke_current(
+        written.stem, revoked_by="synthetic operator", reason="test", effective="2026-01-05"
+    )
+    monkeypatch.setattr(authority, "fault", real)
+    record, created = authority.ensure(store, POLICY, "2026-01-05", SIGNER)  # resume
+    assert created and record != written.stem
+    assert not current_authority.revocations(record)
+    assert json.loads(store.read_text(encoding="utf-8"))["record_id"] == record
 
 
 def test_a_policy_changed_after_a_killed_attempt_is_refused(store, monkeypatch):

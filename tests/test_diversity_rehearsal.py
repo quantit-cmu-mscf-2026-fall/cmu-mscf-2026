@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from capstone.factors.evaluation import Panel
 from capstone.pipeline.diversity_rehearsal import event_blockers, rehearsals
@@ -20,9 +21,9 @@ class Spec(ReferenceStrategySpec):
     method = "monthly_momentum"
 
 
-def synthetic_inputs(events=None):
+def synthetic_inputs(events=None, last_session="2020-03-02"):
     dates = pd.bdate_range("2018-01-01", "2020-01-31")
-    calendar = pd.bdate_range("2018-01-01", "2020-03-02")
+    calendar = pd.bdate_range("2018-01-01", last_session)
     names = pd.Index(range(1, 41), name="permno")
     rng = np.random.default_rng(7)
     returns = pd.DataFrame(rng.normal(0, 0.008, (len(dates), len(names))), dates, names)
@@ -107,3 +108,23 @@ def test_a_failure_to_freeze_is_recorded_as_blocked_not_raised(tmp_path, monkeyp
     rehearsals(tmp_path, inputs, [spec])
     (row,) = json.loads((tmp_path / "rehearsals.json").read_text(encoding="utf-8"))
     assert row == {"id": spec.id, "status": "blocked", "reason": "synthetic refusal"}
+
+
+def test_a_rehearsal_on_the_last_calendar_session_is_blocked_not_aborted(tmp_path):
+    inputs = synthetic_inputs(last_session=AT)
+    first = Spec(CLAIM, "synthetic-rehearsal", "2018-12-31")
+    rehearsals(tmp_path, inputs, [first])
+    (row,) = json.loads((tmp_path / "rehearsals.json").read_text(encoding="utf-8"))
+    assert row["id"] == first.id and row["status"] == "blocked"
+    assert "not followed by a session" in row["reason"] and "result" not in row
+
+
+def test_a_programming_error_is_not_recorded_as_a_blocked_candidate(tmp_path, monkeypatch):
+    spec = Spec(CLAIM, "synthetic-rehearsal", "2018-12-31")
+
+    def bug(*args, **kwargs):
+        raise KeyError("programming error")
+
+    monkeypatch.setattr("capstone.execution.bundle.freeze_bundle", bug)
+    with pytest.raises(KeyError):
+        rehearsals(tmp_path, synthetic_inputs(), [spec])

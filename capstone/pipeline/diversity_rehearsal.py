@@ -23,9 +23,20 @@ def rehearsals(root, inputs, strategy_specs):
     rows = []
     for s in strategy_specs:
         at = pd.Timestamp("2019-12-27" if s.method == "weekly_reversal" else "2019-11-29")
-        execution = inputs.panel.calendar[inputs.panel.calendar.get_loc(at) + 1]
         dest = root / "rehearsals" / s.id
         try:
+            calendar = inputs.panel.calendar
+            position = calendar.get_indexer([at])[0] + 1  # 0 when `at` is not a session
+            if position == 0 or position >= len(calendar):
+                rows.append(
+                    {
+                        "id": s.id,
+                        "status": "blocked",
+                        "reason": f"{at.date()} is not followed by a session on the calendar",
+                    }
+                )
+                continue
+            execution = calendar[position]
             bundle = freeze_bundle(
                 dest / "inputs",
                 inputs.panel,
@@ -85,6 +96,6 @@ def rehearsals(root, inputs, strategy_specs):
                     ),
                 }
             )
-        except (ValueError, KeyError) as error:
+        except ValueError as error:  # the freeze/plan/rehearse refusals; bugs still raise
             rows.append({"id": s.id, "status": "blocked", "reason": str(error)})
     atomic_json(root / "rehearsals.json", rows)

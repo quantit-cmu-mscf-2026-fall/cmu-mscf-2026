@@ -55,7 +55,7 @@ def normalize(policy, session):
     """The authorization arguments for `session`, or PolicyRefused."""
     if not policy:
         raise PolicyRefused(
-            f"session {session} is after 2020-12-31 and [daily] current_authorization is empty"
+            f"[daily] current_authorization is empty; session {session} is not authorized"
         )
     if unknown := sorted(set(policy) - KEYS):
         raise PolicyRefused(f"current_authorization has unknown keys {unknown}")
@@ -94,6 +94,8 @@ def adopt(arguments, authorized_by, opened_at):
     for path in sorted(folder.glob("*.json")) if folder.is_dir() else ():
         try:
             row = current_authority.authorization(path.stem)
+            if current_authority.revocations(row["record_id"]):
+                continue  # revoked: authorize_current re-issues it; never adopt it
         except (HoldoutSealed, OSError, ValueError):
             continue
         same = {k: row[k] for k in ("vendor", "start", "end", "fields", "authorized_by")} == {
