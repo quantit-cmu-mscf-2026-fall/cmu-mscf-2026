@@ -8,10 +8,18 @@ defaults. Rules:
 - No gate report, no entry: an entry without one is refused when built or
   read.
 - `enabled` defaults to false. Turning a strategy on is a reviewed edit of
-  the registry file, never a side effect of reading or rewriting it.
+  the registry file, never a side effect of reading or rewriting it, and
+  registering again never turns it off (or on).
+- `register` writes a spec's file (`deploy/strategies/<id>.toml`) and its entry, only
+  under the given root. Registering the same spec twice changes no byte of either file.
+  A program or saved-portfolio entry needs a JSON gate report of its module's schema
+  (`check_program_gate_report`), except a "plumbing-test" one.
 - A file that is read and rendered again is byte for byte what it was. The
   optional keys are never written at their defaults, so a file without them
   reads and writes exactly as before.
+- `module` is one of `MODULES` (a legacy `StrategySpec`, a typed program, a saved program
+  portfolio); `registry_spec` reads an entry's spec file, `deploy/strategies/<id>.toml`
+  (`SPEC_DIR`), with that module's `from_toml`.
 - `role`: "deploy" (the default), "incubation-only" for a family the gate
   labelled incubate, or "plumbing-test" for an entry that tests plumbing and
   claims no edge. Reading never changes a role.
@@ -19,12 +27,19 @@ defaults. Rules:
   recorded here and changes only through `set_state`, which appends a hash-chained
   event to `deploy/lifecycle.jsonl` before rewriting the entry. `version` is an
   optional label (for example an allocation version).
-- A registry whose entries disagree with their events is refused when read (an
-  entry with no events at all is a legacy entry that predates the file). A crash
+- `register` writes a `registered` event for every new entry. A registry whose
+  entries disagree with their events is refused when read (a contract entry
+  with no events at all is a legacy entry that predates the file). A crash
   between the event and the entry is the recoverable
   `lifecycle_entry_rewrite_pending:<id>`, completed by the same call again.
-  Retired is terminal. Rollback is a revert of the registry commit, which takes
+  Retired is terminal, and registering never changes a state: it refuses a
+  suspended or retired id. Rollback is a revert of the registry commit, which takes
   an entry and its events back together.
+- A re-anchored version (`register_version`): a program re-anchored on a later panel
+  (only `anchor` and `data_version` moved) has a new id; it is registered as a new entry
+  with `version = "reanchor-of:<parent id>"`, the parent's gate report and role
+  `incubation-only`. Its gate report names the parent, which `check_program_gate_report`
+  accepts through that label.
 - `promote` turns an active "incubation-only" entry into a "deploy" one only on a
   confirm record whose confirming e-value reached 1/alpha (`check_confirm_record`);
   the record is kept in the `role` event.
@@ -50,8 +65,11 @@ from capstone.artifacts import canonical, digest
 from capstone.faults import maybe_fault
 
 MODULE = "capstone.strategy.contract"
-MODULES = (MODULE,)
+PROGRAM_MODULE = "capstone.strategy.program"
+SAVED_PORTFOLIO_MODULE = "capstone.strategy.saved_portfolio"
+MODULES = (MODULE, PROGRAM_MODULE, SAVED_PORTFOLIO_MODULE)
 REGISTRY_FILE = Path("deploy") / "strategies.yml"
+SPEC_DIR = Path("deploy") / "strategies"  # one spec file per registry entry: <id>.toml
 LIFECYCLE_FILE = Path("deploy") / "lifecycle.jsonl"
 KEYS = ("id", "module", "gate_report", "enabled", "role", "state", "version")
 Role = Literal["deploy", "incubation-only", "plumbing-test"]
@@ -68,6 +86,15 @@ TRANSITIONS = frozenset(
         ("suspended", "retired"),
     }
 )
+# The gate report a program / saved-portfolio entry needs: these identity keys here, the
+# full versioned schema in `capstone.program_gate.check_schema`.
+REPORT_SCHEMAS = {
+    PROGRAM_MODULE: "program-gate-report-v1",
+    SAVED_PORTFOLIO_MODULE: "saved-portfolio-gate-report-v1",
+}
+REPORT_KEYS = ("schema", "procedure_id", "strategy_ids", "holdout_opened")
+# The `version` label of a re-anchored program version names its parent entry.
+LINEAGE_PREFIX = "reanchor-of:"
 
 
 @dataclass(frozen=True)
@@ -187,12 +214,48 @@ def parse_registry(text: str) -> tuple[RegistryEntry, ...]:
     return tuple(_parse(text)[1])
 
 
-def read_registry(root: Path) -> tuple[RegistryEntry, ...]:
+def read_registry(root: Path, *, resume: bool = False) -> tuple[RegistryEntry, ...]:
     """The entries of `<root>/deploy/strategies.yml`, in file order, checked
-    against `<root>/deploy/lifecycle.jsonl` (absent: no events)."""
+    against `<root>/deploy/lifecycle.jsonl` (absent: no events) and the lineage of
+    every re-anchored entry. `resume=True` returns the entries as the file has them
+    when a crash left the last event without its entry (`LifecycleRewritePending`),
+    for the action that completes it (`set_state` / `promote`); otherwise that raises."""
     entries = parse_registry(_read(root, REGISTRY_FILE))
-    verify_lifecycle(_lifecycle_text(root), entries)
+    try:
+        events = verify_lifecycle(_lifecycle_text(root), entries)
+    except LifecycleRewritePending:
+        if not resume:
+            raise
+        events = ()
+    check_lineage(entries, events)
     return entries
+
+
+def check_lineage(entries, events) -> None:
+    """Every `reanchor-of:<parent>` entry must be what `register_version` makes: a
+    program registered incubation-only, with the gate report of an existing program
+    parent. A forged label (hand-written, or passed to `register`) is refused."""
+    registered = {e["id"]: e for e in events if e["field"] == "registered"}
+    by_id = {entry.id: entry for entry in entries}
+    for entry in entries:
+        if not (isinstance(entry.version, str) and entry.version.startswith(LINEAGE_PREFIX)):
+            continue
+        parent = by_id.get(lineage_parent(entry.version) or "")
+        first = registered.get(entry.id)
+        if (
+            parent is None
+            or parent.id == entry.id
+            or parent.module != PROGRAM_MODULE
+            or entry.module != PROGRAM_MODULE
+            or entry.gate_report != parent.gate_report
+            or first is None
+            or first["role"] != INCUBATION_ONLY
+        ):
+            raise ValueError(
+                f"strategy {entry.id} has version {entry.version!r}, but is not an "
+                "incubation-only program registered through register_version "
+                "from an existing program parent with its gate report"
+            )
 
 
 def _read(root: Path, path: Path) -> str:
@@ -202,6 +265,199 @@ def _read(root: Path, path: Path) -> str:
 def _lifecycle_text(root: Path) -> str:
     path = Path(root) / LIFECYCLE_FILE
     return path.read_bytes().decode("utf-8") if path.exists() else ""
+
+
+def spec_from_toml(module: str, text: str):
+    """A spec file's content, read with its registry module's `from_toml`."""
+    if module == MODULE:
+        from capstone.strategy.contract import StrategySpec
+
+        return StrategySpec.from_toml(text)
+    if module == PROGRAM_MODULE:
+        from capstone.strategy.program import ProgramStrategySpec
+
+        return ProgramStrategySpec.from_toml(text)
+    if module == SAVED_PORTFOLIO_MODULE:
+        from capstone.strategy.saved_portfolio import SavedProgramPortfolioSpec
+
+        return SavedProgramPortfolioSpec.from_toml(text)
+    raise ValueError(f"module must be one of {MODULES}: {module!r}")
+
+
+def registry_spec(root: Path, strategy_id: str, module: str | None = None):
+    """The spec file of a registered strategy, read with its entry's module
+    (`module` if given; the contract for an id not in the registry); refused
+    if its content is not its id."""
+    if module is None:
+        entries = _parse(_read(root, REGISTRY_FILE))[1]
+        module = next((e.module for e in entries if e.id == strategy_id), MODULE)
+    path = Path(root) / SPEC_DIR / f"{strategy_id}.toml"
+    if module == MODULE:
+        from capstone.strategy.contract import load_spec
+
+        spec = load_spec(path)
+    else:
+        spec = spec_from_toml(module, _read(root, path))
+    if spec.id != strategy_id:
+        raise ValueError(f"spec file {strategy_id}.toml holds spec id {spec.id}")
+    return spec
+
+
+def check_program_gate_report(report: Any, entry: RegistryEntry) -> None:
+    """A program / saved-portfolio entry's gate report must be a JSON object of
+    its module's schema (`capstone.program_gate`) that names the entry: every key
+    of the schema, an unchanged `id`, and either the search stage
+    (`holdout_opened: false`, nothing accepted) or a final report whose holdout
+    look the authority store recorded. The content is re-verified (re-run on its
+    bound inputs) by execution evidence, not here."""
+    from capstone.program_gate import check_schema  # heavy; only for programs
+
+    where = f"program gate report {entry.gate_report} of strategy {entry.id}"
+    if not isinstance(report, dict):
+        raise ValueError(f"{where} is not a JSON object in the repository")
+    missing = [key for key in REPORT_KEYS if key not in report]
+    if missing:
+        raise ValueError(f"{where} lacks {missing}")
+    schema = REPORT_SCHEMAS[entry.module]
+    if report["schema"] != schema:
+        raise ValueError(f"{where} has schema {report['schema']!r}, not {schema!r}")
+    if not isinstance(report["procedure_id"], str) or not report["procedure_id"]:
+        raise ValueError(f"{where} has no procedure_id")
+    ids = report["strategy_ids"]
+    named = (entry.id, lineage_parent(entry.version))  # a re-anchored version: its parent
+    if not isinstance(ids, list) or not any(sid in ids for sid in named if sid):
+        raise ValueError(f"{where}: strategy_ids does not name {entry.id}")
+    try:
+        check_schema(report)
+    except ValueError as error:
+        raise ValueError(f"{where}: {error}") from error
+
+
+def lineage_parent(version: str) -> str | None:
+    """The parent id a re-anchored version's `version` label names, else None."""
+    if isinstance(version, str) and version.startswith(LINEAGE_PREFIX):
+        return version[len(LINEAGE_PREFIX) :] or None
+    return None
+
+
+def _report(root: Path, gate_report: str) -> Any:
+    if "://" in gate_report:
+        return None
+    try:
+        return json.loads(_read(root, Path(gate_report)))
+    except (OSError, ValueError):
+        return None
+
+
+def register(
+    spec,
+    root: Path,
+    *,
+    enabled: bool = False,
+    role: Role = "deploy",
+    gate_report: str | None = None,
+    version: str = "",
+    at: str = "",
+    reviewer: str = "",
+) -> RegistryEntry:
+    """Write the spec's file and its registry entry; return the entry in the file.
+    A `reanchor-of:` version label is refused here: only `register_version` makes one.
+
+    The module is the spec class's for a program or saved portfolio, else the
+    contract (whose `load_spec` reads every older spec schema); the gate report
+    is `gate_report`, else the spec's own (a spec naming one must agree).
+    A new entry gets a `registered` lifecycle event (role, state, module,
+    version, `reviewer`, `at`) before it is written; `at` is the caller's
+    timestamp and is required for a program or saved portfolio (a legacy
+    contract caller that passes none records "").
+    An id already registered is left exactly as it is (its spec file must
+    still match), so registering twice is a no-op and never flips `enabled`
+    or changes `role`; a suspended or retired id is refused, since
+    registering never changes a state.
+    """
+    if isinstance(version, str) and version.startswith(LINEAGE_PREFIX):
+        raise ValueError(f"version {version!r} is reserved for register_version")
+    return _register(spec, root, enabled, role, gate_report, version, at, reviewer)
+
+
+def _register(spec, root, enabled, role, gate_report, version, at, reviewer) -> RegistryEntry:
+    module = type(spec).__module__
+    module = module if module in REPORT_SCHEMAS else MODULE  # the contract, as before
+    report = spec.gate_report if gate_report is None else gate_report
+    if spec.gate_report and report != spec.gate_report:
+        raise ValueError(f"spec {spec.id} names gate report {spec.gate_report}, not {report}")
+    entry = RegistryEntry(spec.id, module, report, enabled, role, version=version)
+    if not (isinstance(at, str) and isinstance(reviewer, str)):
+        raise ValueError("at and reviewer must be strings")
+    if module != MODULE and not at:
+        raise ValueError("registering a program or saved portfolio needs a timestamp (`at`)")
+    if module != MODULE and role != PLUMBING_TEST:
+        check_program_gate_report(_report(root, report), entry)
+    entries = parse_registry(_read(root, REGISTRY_FILE))
+    existing = next((e for e in entries if e.id == spec.id), None)
+    if existing is not None and existing.state != "active":
+        raise ValueError(
+            f"strategy {spec.id} is {existing.state}; registering never changes a state "
+            "(set_state resumes a suspended entry; a retired one is final)"
+        )
+    spec_path = Path(root) / SPEC_DIR / f"{spec.id}.toml"
+    if spec_path.exists():
+        registry_spec(root, spec.id, module)
+    else:
+        spec_path.parent.mkdir(parents=True, exist_ok=True)
+        if module == MODULE:
+            from capstone.strategy.contract import save_spec
+
+            save_spec(spec, spec_path)
+        else:
+            spec_path.write_bytes(spec.to_toml().encode("utf-8"))
+    if existing is not None:
+        return existing
+    event = {
+        "field": "registered",
+        "id": spec.id,
+        "role": role,
+        "state": "active",
+        "module": module,
+        "version": version,
+        "reviewer": reviewer,
+        "at": at,
+    }
+    return _commit(root, event, entry)
+
+
+def register_version(spec, root: Path, *, parent_id: str, at: str, reviewer: str) -> RegistryEntry:
+    """Register `spec`, a re-anchoring of the registered program `parent_id`, as a
+    new version of it; return the entry in the file.
+
+    A re-anchoring is the parent's spec with only `anchor` and `data_version`
+    moved (the live handoff). The new entry has the parent's gate report, role
+    `incubation-only` (promotion is earned again, on the new data) and
+    `version = "reanchor-of:<parent_id>"`. Refused unless the parent is an
+    active program entry. Idempotent like `register`: a version already
+    registered with this label is returned as it is (whatever its state), and a
+    `registered` event a crash left pending is completed by the same call."""
+    from capstone.strategy.program import ProgramStrategySpec
+
+    version = LINEAGE_PREFIX + parent_id
+    entries = parse_registry(_read(root, REGISTRY_FILE))
+    existing = next((e for e in entries if e.id == spec.id), None)
+    if existing is not None:
+        if existing.version != version:
+            raise ValueError(f"strategy {spec.id} is registered, but not as {version}")
+        registry_spec(root, spec.id, existing.module)  # its spec file still matches
+        return existing
+    parent = next((e for e in entries if e.id == parent_id), None)
+    if parent is None or parent.module != PROGRAM_MODULE:
+        raise ValueError(f"{parent_id} is not a registered program; {spec.id} has no parent")
+    if parent.state != "active":
+        raise ValueError(f"{parent_id} is {parent.state}; a new version needs an active parent")
+    if not isinstance(spec, ProgramStrategySpec) or spec.id == parent_id:
+        raise ValueError(f"{spec.id} is not a new program version of {parent_id}")
+    held = registry_spec(root, parent_id, PROGRAM_MODULE)
+    if replace(spec, anchor=held.anchor, data_version=held.data_version).id != parent_id:
+        raise ValueError(f"{spec.id} is not a re-anchoring of {parent_id}")
+    return _register(spec, root, False, INCUBATION_ONLY, parent.gate_report, version, at, reviewer)
 
 
 def read_lifecycle(root: Path) -> tuple[dict[str, Any], ...]:
@@ -228,7 +484,7 @@ def _refused(message: str) -> ValueError:
 
 class LifecycleRewritePending(ValueError):
     """The last event is written and its entry not yet (a crash between the two
-    writes). Recoverable: the same `set_state`/`promote` call again rewrites the
+    writes). Recoverable: the same `register`/`set_state`/`promote` call again rewrites the
     entry without a second event. Until then reads refuse."""
 
     def __init__(self, event: dict[str, Any]):
@@ -282,8 +538,8 @@ def _event(n: int, line: str) -> dict[str, Any]:
         or not all(isinstance(v, str) for k, v in event.items() if k != "confirm_record")
     ):
         raise _refused(f"line {n} is not a registered, state or role event")
-    if event["field"] == "registered":  # a caller may record no time
-        required = ("id",)
+    if event["field"] == "registered":  # a legacy contract caller may record no time
+        required = ("id",) if event["module"] == MODULE else ("id", "at")
     else:
         required = ("id", "reason", "reviewer", "at")
     if not all(event[k] for k in required):
@@ -337,7 +593,9 @@ def _mismatches(entries, model) -> dict[str, str]:
     bad: dict[str, str] = {}
     for entry in entries:
         reg = registered.get(entry.id)
-        if reg is not None and (entry.module, entry.version) != (reg["module"], reg["version"]):
+        if reg is None and entry.module != MODULE:
+            bad[entry.id] = "has no registered event (only a legacy contract entry may lack one)"
+        elif reg is not None and (entry.module, entry.version) != (reg["module"], reg["version"]):
             bad[entry.id] = "has a module or version its registered event does not"
         role = "deploy" if entry.id in promoted else reg["role"] if reg else None
         if role is not None and entry.role != role:
@@ -359,8 +617,9 @@ def verify_lifecycle(text: str, entries) -> tuple[dict[str, Any], ...]:
     """The events of a lifecycle file's text; refused unless every line is a
     canonical event, the hash chain is intact, each transition is allowed, and
     every entry's state, role, module and version are where its events leave
-    them. An entry with no `registered` event is a legacy entry (it predates
-    the file); its state still changes only through events.
+    them. Program and saved-portfolio entries need a `registered` event; a
+    contract entry without one is a legacy entry (it predates the file), and
+    its state still changes only through events.
 
     The one recoverable case, files with the last event written and its entry
     not yet, raises `LifecycleRewritePending` (`lifecycle_entry_rewrite_pending:<id>`)."""
