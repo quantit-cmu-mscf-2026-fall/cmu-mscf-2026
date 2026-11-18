@@ -36,6 +36,16 @@ description.
   `tests/test_gate_holdout_inputs.py`; the decision matrix (null and planted
   markets on iid, `rho` and `ar1` data), scorecard, report and expected-mean
   tests are in `tests/test_gate_decisions.py`.
+- **The decision rule** (QUANTIT-34): `run_gate` takes a `DecisionRule`
+  (required; `gate.load_registered` reads it, with the config, from
+  `scripts/gate_crsp_v1.json`) and **`accepted` follows it**. crsp-v1's is the
+  baseline (Q5): BH at q = 0.05 on the family bootstrap p-values, so
+  `accepted` is `s1_stat <= q`. The funnel's own verdict (every stage passed,
+  at the config's q1 / q4) stays on the scorecard as `funnel_pass`, reported
+  beside it and never deciding; under a `funnel` rule the two columns are
+  equal. The rule used is in the look entry and the header (`decision_rule`).
+  The config's hash covers the funnel only, so the rule is not part of it.
+  Tests: `tests/test_gate_decision_rule.py`.
 - Not yet: the stage-3 spanning test and the power header.
 
 ## 2. Contract

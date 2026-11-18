@@ -51,7 +51,11 @@ their own name.
    A survivor with no holdout returns fails stage 4.
 4. **Graded scores never decide.** `grading` computes them from the search
    period; nothing reads them back.
-5. **Stage 3 is not measured yet:** it passes stage 2's survivors through and
+5. **The decision rule decides `accepted`.** `run_gate` takes a `DecisionRule`
+   (no default; `load_registered` reads the registered one): the baseline is
+   BH at its q on the stage-1 bootstrap p-values, the funnel is every stage
+   passing. The funnel's verdict stays on the card as `funnel_pass` either way.
+6. **Stage 3 is not measured yet:** it passes stage 2's survivors through and
    the scorecard says so (`s3_measured` False). A config that registers a
    factor frame is refused until the spanning test is connected.
 
@@ -61,6 +65,7 @@ never counted as trials (`_trial_count`).
 
 from __future__ import annotations
 
+import dataclasses
 import datetime
 import hashlib
 import json
@@ -69,6 +74,7 @@ import numbers
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -76,7 +82,13 @@ import pandas as pd
 from capstone import funnel, grading, runlog
 from capstone.evaluate import average_correlation, bh_adjusted
 from capstone.funnel import Thresholds, thresholds_dict
-from capstone.scorecard import SCORECARD_COLUMNS, GateHeader, GateResult, TrialScope
+from capstone.scorecard import (
+    SCORECARD_COLUMNS,
+    DecisionRule,
+    GateHeader,
+    GateResult,
+    TrialScope,
+)
 
 __all__ = [
     "DEFAULT_MIN_HOLDOUT_COVERAGE",
@@ -86,11 +98,13 @@ __all__ = [
     "REGISTRATION_NAME",
     "SYNTHETIC_DATA_VERSION",
     "SYNTHETIC_TAG",
+    "DecisionRule",
     "GateConfig",
     "GateNotRegistered",
     "HoldoutAlreadyOpened",
     "HoldoutProvider",
     "TrialScope",
+    "load_registered",
     "register",
     "required_holdout_obs",
     "required_n_boot",
@@ -317,6 +331,16 @@ def required_n_boot(n_families: int, q: float = 0.05) -> int:
     return int(np.ceil(n_families / q)) - 1
 
 
+def load_registered(path: str | Path) -> tuple[GateConfig, DecisionRule]:
+    """A registered file's config and decision rule (`scripts/gate_crsp_v1.json`).
+
+    The file holds `gate_config` (what `register` hashes) and `decision_rule`
+    (which column decides `accepted`); the gate run takes both from it.
+    """
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    return GateConfig.from_dict(data["gate_config"]), DecisionRule.from_dict(data["decision_rule"])
+
+
 def _checked_family(returns: pd.DataFrame, family: pd.Series) -> pd.Series:
     """`family` aligned to `returns`' columns; every column needs a label."""
     if not isinstance(returns, pd.DataFrame) or not isinstance(returns.index, pd.DatetimeIndex):
@@ -412,6 +436,7 @@ def run_gate(
     *,
     holdout: HoldoutProvider,
     authorizer: str,
+    decision_rule: DecisionRule,
 ) -> GateResult:
     """Run the registered gate once.
 
@@ -426,6 +451,11 @@ def run_gate(
             called when nothing reaches stage 4.
         authorizer: who authorises the look at the holdout; required, recorded
             in the look entry.
+        decision_rule: which column decides `accepted`; required, no default
+            (`load_registered` reads the registered one). The baseline is BH
+            on the stage-1 bootstrap p-values at its q; the funnel is every
+            stage passing. The other is reported (`funnel_pass`, the stage
+            columns). Recorded in the look entry and the header.
 
     Raises:
         ValueError: no authorizer, bad inputs, returns past `search_end`, too
@@ -437,6 +467,13 @@ def run_gate(
         LookupError: from `runlog.trial_count`, when the scope matches nothing.
     """
     authorizer = _checked_authorizer(authorizer)
+    if not isinstance(decision_rule, DecisionRule):
+        raise TypeError("decision_rule must be a DecisionRule (see gate.load_registered)")
+    if decision_rule.rule == "baseline" and config.thresholds.stage1 != "bootstrap":
+        raise ValueError(
+            "the baseline decides on the bootstrap family p-values: register stage1='bootstrap' "
+            f"(this config has {config.thresholds.stage1!r})"
+        )
     h = config.config_hash
     registration = _entries_for(REGISTRATION_NAME, h)
     if not registration:
@@ -481,6 +518,7 @@ def run_gate(
             "generator": config.generator,
             "data_version": config.data_version,
             "authorizer": authorizer,
+            "decision_rule": dataclasses.asdict(decision_rule),
             "candidates": [str(b) for b in ids],
         },
         seed=config.seed,
@@ -526,7 +564,13 @@ def run_gate(
     card["s4_stat"] = grading.stage4_stat(stats, alive, th)
     card["s4_threshold"] = th.q4 if th.final == "bh" else th.d4
     card["s4_pass"] = s4
-    card["accepted"] = stages["stage1"] & stages["stage2"] & stages["stage3"] & s4
+    funnel_pass = stages["stage1"] & stages["stage2"] & stages["stage3"] & s4
+    if decision_rule.rule == "baseline":
+        accepted_rows = card["s1_stat"] <= decision_rule.q  # BH-adjusted p; NaN is False
+    else:
+        accepted_rows = funnel_pass
+    card["accepted"] = accepted_rows.astype(bool)
+    card["funnel_pass"] = funnel_pass
     for column in graded.columns:
         card[column] = graded[column]
     card["ho_sharpe"] = stats["ho_sharpe"]
@@ -563,6 +607,7 @@ def run_gate(
         avg_correlation=float(avg_corr),
         min_holdout_coverage=config.min_holdout_coverage,
         min_holdout_obs=required_holdout_obs(config),
+        decision_rule=decision_rule,
     )
     accepted = tuple(card.index[card["accepted"]])
     return GateResult(card, header, accepted)

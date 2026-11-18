@@ -15,7 +15,7 @@ import pandas as pd
 
 from capstone import calibration, gate, runlog
 from capstone.funnel import Thresholds
-from capstone.gate import GateConfig, TrialScope, register, run_gate
+from capstone.gate import DecisionRule, GateConfig, TrialScope, register, run_gate
 from capstone.scorecard import GateResult
 
 N_FAMILIES = 10
@@ -25,6 +25,8 @@ N_SEARCH = 6 * 252
 N_HOLDOUT = 3 * 252
 TRIAL_NAME = "evaluate-factor"
 AUTHORIZER = "test-gate-owner"
+# The tests below the decision-rule ones decide by the funnel, as the gate did before the rule.
+FUNNEL = DecisionRule("funnel")
 STAGE_1_TO_3 = [
     "best",
     "k",
@@ -129,18 +131,29 @@ class Holdout:
         return self.returns.loc[(idx >= start) & (idx <= end), list(ids)]
 
 
-def run(config: GateConfig, m: Market, *, holdout=None, authorizer=AUTHORIZER) -> GateResult:
+def run(
+    config: GateConfig, m: Market, *, holdout=None, authorizer=AUTHORIZER, decision_rule=FUNNEL
+) -> GateResult:
     """Run a registered config on `m`'s search period, its holdout on demand."""
     holdout = Holdout(m.returns, config.config_hash) if holdout is None else holdout
-    return run_gate(config, search_of(m), m.family, holdout=holdout, authorizer=authorizer)
+    return run_gate(
+        config,
+        search_of(m),
+        m.family,
+        holdout=holdout,
+        authorizer=authorizer,
+        decision_rule=decision_rule,
+    )
 
 
-def gate_once(m: Market, *, n_trials: int | None = None, holdout=None, **overrides) -> GateResult:
+def gate_once(
+    m: Market, *, n_trials: int | None = None, holdout=None, decision_rule=FUNNEL, **overrides
+) -> GateResult:
     """Register a config on the current ledger and run the gate once."""
     log_trials(m.returns.shape[1] if n_trials is None else n_trials)
     config = config_for(m, **overrides)
     register(config)
-    return run(config, m, holdout=holdout)
+    return run(config, m, holdout=holdout, decision_rule=decision_rule)
 
 
 def looks(config_hash: str) -> list[dict]:

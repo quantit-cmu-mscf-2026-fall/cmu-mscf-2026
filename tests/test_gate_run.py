@@ -24,6 +24,7 @@ import pandas as pd
 import pytest
 from gate_helpers import (
     AUTHORIZER,
+    FUNNEL,
     STAGE_1_TO_3,
     Holdout,
     Market,
@@ -142,7 +143,13 @@ class TestAuthorizer:
         config = config_for(null_market)
         register(config)
         with pytest.raises(TypeError):
-            run_gate(config, search_of(null_market), null_market.family, holdout=lambda *a: None)
+            run_gate(
+                config,
+                search_of(null_market),
+                null_market.family,
+                holdout=lambda *a: None,
+                decision_rule=FUNNEL,
+            )
 
     def test_the_authorizer_is_recorded_with_the_look(self, ledger, planted_market):
         config = config_for(planted_market)
@@ -238,6 +245,7 @@ class TestSingleLook:
                 planted_market.family,
                 holdout=Holdout(planted_market.returns),
                 authorizer=AUTHORIZER,
+                decision_rule=FUNNEL,
             )
         assert looks(config.config_hash) == []
 
