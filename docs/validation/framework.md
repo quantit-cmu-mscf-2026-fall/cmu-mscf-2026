@@ -290,9 +290,10 @@ The decision rule is a hashed field of `GateConfig` (`decision_rule`): the
 rule and its q (baseline, BH at 0.05) are in the config hash, so changing
 either re-registers the gate; the gate run takes them from the config.
 **Superseded hashes (2026-11-18).** `8bda49ec…` and `5e89d78a…` are superseded by `5f590f13…`.
-The thresholds, q and data are unchanged; only the set of hashed fields grew (`min_holdout_coverage`,
-then `decision_rule`). A ledger entry recorded under an older hash refers to the same registered
-rule. It is not a different or tampered config; read it as this registration's earlier hash.
+The decision rule, q, stage thresholds and data are unchanged. `5e89d78a…` → `8bda49ec…` added the
+stage-4 coverage guard (`min_holdout_coverage`), and `8bda49ec…` → `5f590f13…` moved `decision_rule` into
+the hashed config. A ledger entry recorded under an older hash refers to this registration at that
+step. It is not a different or tampered config.
 
 `min_holdout_coverage = 0.5` is a guard against a survivor seen on a sliver of
 the holdout, not a calibrated value: nothing was tuned to choose half. The run
