@@ -336,6 +336,7 @@ def authorize(
     }
     path = _path(protocol, synthetic_root)
     with exclusive_file(path.with_suffix(".lock")):
+        _refuse_if_ledger_spent(protocol)
         if path.exists():
             row = _load(path)
             _check(protocol, row)
@@ -370,6 +371,25 @@ def require_authorized(protocol, *, config_hash, generator_id, synthetic_root=No
         raise HoldoutSpent("the dataset's final look is terminal")
     if state != "AUTHORIZED":
         raise HoldoutSealed("final protocol has no explicit operator authorization")
+
+
+def real_look_spent():
+    """True when the run ledger already holds a real `holdout-look` for REAL_DATASET.
+
+    The per-HOME authority store cannot see a look taken from another HOME; the ledger
+    is the team's shared record, so it is what makes the look once-only across machines.
+    """
+    return any(
+        entry.get("name") == LOOK_RUN_NAME
+        and "synthetic" not in entry.get("tags", [])
+        and entry.get("params", {}).get("dataset") == REAL_DATASET
+        for entry in runlog.read_entries()
+    )
+
+
+def _refuse_if_ledger_spent(protocol):
+    if protocol.payload["dataset"] == REAL_DATASET and real_look_spent():
+        raise HoldoutSpent("the ledger already holds the real holdout's one look")
 
 
 def _log_look(protocol, approval, receipt):
@@ -443,6 +463,7 @@ def open_once(protocol, *, candidates, start, end, synthetic_root=None):
         raise HoldoutSealed("reader period is outside the frozen sealed interval")
     path = _path(protocol, synthetic_root)
     with exclusive_file(path.with_suffix(".lock")):
+        _refuse_if_ledger_spent(protocol)
         if not path.exists():
             raise HoldoutSealed("the final holdout has no authorization")
         saved = _load(path)

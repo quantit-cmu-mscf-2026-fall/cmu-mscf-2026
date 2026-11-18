@@ -1,5 +1,10 @@
 """The post-holdout read route for live-era CRSP.
 
+Which file this is for: a `crsp_*` extract of post-holdout rows. The one documented
+CRSP file, `sp500_daily_1990_2025`, ends in 2025 and has no live-era rows, so the live
+route does not serve it (and its `sp500_` name is refused here by design). No `crsp_*`
+file exists yet; when one does, `load_live` still needs the holdout's look to be spent.
+
 A separate module: `holdout_authority` is unchanged by it, and its
 `guard_shared_read` still refuses every live-era read. The holdout's end is read from
 `holdout_authority.REAL_PERIOD` at each call and is never repeated here.
@@ -24,6 +29,7 @@ LIVE_READ_REASONS = (
     "live_read_unbounded",  # no start, or a bound that is not a plain date
     "live_read_touches_holdout",  # the window starts on or before the holdout's end
     "live_read_inverted",  # the window ends before it starts
+    "live_read_look_unspent",  # the real holdout's once-only look is not in the ledger
 )
 
 
@@ -68,3 +74,14 @@ def guard_live_read(name, start, end, date_column):
     if last is not None and last < first:
         raise LiveReadRefused("live_read_inverted", f"window {first}..{last} ends before it starts")
     return first, last
+
+
+def require_spent_look():
+    """Refuse a live read until the ledger holds the real holdout's look.
+
+    Post-holdout price levels plus a discovery-period read reveal each stock's holdout
+    return, so the live route must not open before the one look is spent."""
+    if not authority.real_look_spent():
+        raise LiveReadRefused(
+            "live_read_look_unspent", "the real holdout's once-only look has not been spent"
+        )

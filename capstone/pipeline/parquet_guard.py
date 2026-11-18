@@ -38,10 +38,14 @@ def _temporal_leaves(dtype, path, repeated=False):
     elif pa.types.is_map(dtype):
         yield from _temporal_leaves(dtype.key_type, path, True)
         yield from _temporal_leaves(dtype.item_type, path, True)
+    elif pa.types.is_nested(dtype):
+        # Fail closed: a nested type this walker does not handle (list_view, unions, ...)
+        # could hide a date, so it is treated as an unqualified repeated date.
+        yield path, dtype, True
 
 
 def verify_discovery_dates(path, role):
-    """Check every temporal leaf using footers, without reading any observations.
+    """Check every date/timestamp-typed leaf using footers, without reading any observations.
 
     Scheduled events.pay_date is exempt; list/map dates have no qualified row
     filter and are refused. All-null dates are retained for caller qualification.

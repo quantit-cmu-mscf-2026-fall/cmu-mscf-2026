@@ -352,3 +352,53 @@ def test_a_spent_look_with_a_lost_ledger_entry_is_recovered_once(tmp_path, monke
     with pytest.raises(authority.HoldoutSpent):
         with open_look(protocol, root):
             pytest.fail("recovery does not renew the look")
+
+
+def _home(monkeypatch, path):
+    path.mkdir(exist_ok=True)
+    monkeypatch.setenv("HOME", str(path))
+    monkeypatch.setenv("USERPROFILE", str(path))
+
+
+def test_a_second_home_cannot_take_a_second_real_look_on_the_same_ledger(tmp_path, monkeypatch):
+    protocol = make_protocol(dataset=authority.REAL_DATASET)
+    _home(monkeypatch, tmp_path / "h1")
+    approve(protocol, None)
+    with open_look(protocol, None):
+        pass
+    assert authority.status(protocol)["state"] == "SPENT"
+    _home(monkeypatch, tmp_path / "h2")
+    assert authority.status(protocol)["state"] == "SEALED"  # the new HOME knows nothing
+    with pytest.raises(authority.HoldoutSpent):
+        approve(protocol, None)
+    assert authority.status(protocol)["state"] == "SEALED"  # authorize left no state behind
+    assert len(looks()) == 1
+
+
+def test_open_once_also_refuses_when_the_ledger_holds_a_real_look(tmp_path, monkeypatch):
+    protocol = make_protocol(dataset=authority.REAL_DATASET)
+    _home(monkeypatch, tmp_path / "h2")
+    approve(protocol, None)  # authorized on this HOME while the ledger is still empty
+    authority._log_look(
+        protocol,
+        {"approved_by": "another machine", "cosigned_by": None},
+        {"candidates": ["a" * 16], "dates": ["2021-01-04", "2025-12-31"], "id": "r" * 64},
+    )
+    with pytest.raises(authority.HoldoutSpent):
+        with open_look(protocol, None):
+            pytest.fail("a second real look was opened")
+    assert authority.status(protocol)["state"] == "AUTHORIZED"
+    assert len(looks()) == 1
+
+
+def test_a_synthetic_look_in_the_ledger_does_not_spend_the_real_dataset(tmp_path, monkeypatch):
+    synthetic = make_protocol()
+    approve(synthetic, tmp_path / "authority")
+    with open_look(synthetic, tmp_path / "authority"):
+        pass
+    _home(monkeypatch, tmp_path / "h1")
+    real = make_protocol(dataset=authority.REAL_DATASET)
+    approve(real, None)
+    with open_look(real, None):
+        pass
+    assert len(looks()) == 2

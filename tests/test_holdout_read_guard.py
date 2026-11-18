@@ -276,3 +276,25 @@ def test_without_the_guard_the_cache_and_loader_behave_as_before(tmp_path, monke
     monkeypatch.setattr(wrds_loader, "_cache_path", lambda name: path)
     frame = wrds_loader.cached_crsp_daily(None, "2020-01-01", "2020-12-31", name="synthetic")
     assert frame.ret.tolist() == [4]  # unchanged behavior: the whole cache, not date-bounded
+
+
+def test_calendar_read_handles_parquet_date32(synthetic_source):
+    import datetime
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    _, _, path = synthetic_source
+    days = [datetime.date(2020, 12, 31), datetime.date(2021, 1, 4), datetime.date(2021, 1, 5)]
+    table = pa.table({"date": pa.array(days, type=pa.date32()), "dlyret": [9, 9, 9]})
+    pq.write_table(table, path.with_name("sp500_daily_1990_2025.parquet"))
+    frame = sd.load("sp500_daily_1990_2025", columns=["date"], end="2021-01-31", auto_sync=False)
+    assert pd.to_datetime(frame.date).tolist() == [
+        pd.Timestamp("2020-12-31"),
+        pd.Timestamp("2021-01-04"),
+    ]
+
+
+def test_calendar_read_refuses_to_refresh_market_sources(synthetic_source):
+    with pytest.raises(authority.HoldoutSealed, match="calendar metadata cannot refresh"):
+        sd.load("sp500_daily_1990_2025", columns=["date"], end="2021-01-31", auto_sync=True)
