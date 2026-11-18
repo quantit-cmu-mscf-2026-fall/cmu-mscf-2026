@@ -278,6 +278,19 @@ class TestStage4Stat:
         pd.testing.assert_series_equal(out[alive], expected, check_names=False)
         assert math.isnan(out["c"])
 
+    def test_a_survivor_without_a_holdout_p_is_in_the_family_at_one(self):
+        """The gate decides with p = 1 for it, so the statistic must agree with the decision."""
+        stats = self._stats()
+        stats.loc["b", ["ho_p", "ho_sharpe", "ho_n_obs"]] = [np.nan, np.nan, 5]  # flat
+        alive = pd.Series([True, True, False], index=stats.index)
+        out = grading.stage4_stat(stats, alive, funnel.Thresholds(final="bh"))
+        expected = bh_adjusted(pd.Series({"a": 0.001, "b": 1.0}))
+        assert out["a"] == pytest.approx(expected["a"]) and out["a"] == pytest.approx(0.002)
+        assert out["b"] == pytest.approx(1.0)
+        # The decision on the same rows agrees: b fails whatever q4 is.
+        decided = funnel._final_gate(stats, alive, funnel.Thresholds(final="bh", q4=0.99))
+        assert decided["a"] and not decided["b"]
+
     def test_nan_for_everyone_when_nothing_is_alive(self):
         stats = self._stats()
         alive = pd.Series(False, index=stats.index)

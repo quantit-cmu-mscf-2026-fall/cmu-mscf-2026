@@ -149,11 +149,16 @@ def stage4_stat(stats: pd.DataFrame, alive: pd.Series, th: Thresholds) -> pd.Ser
     if not alive.any():
         return out
     if th.final == "bh":
-        out[alive] = bh_adjusted(stats.loc[alive, "ho_p"])
+        # A survivor with no holdout p-value is in the family at p = 1, as the
+        # gate decides it (`funnel._final_gate`); dropping it would show a
+        # statistic under q4 beside a failed stage.
+        out[alive] = bh_adjusted(stats.loc[alive, "ho_p"].fillna(1.0))
         return out
     n_trials = stats.attrs["n_variants"] if th.final_trials == "searched" else int(alive.sum())
     for h in alive[alive].index:
         r = stats.loc[h]
+        if not r["ho_n_obs"] > 0:  # never tested: no statistic
+            continue
         out[h] = deflated_sharpe_ratio(
             r["ho_sharpe"],
             n_trials,
