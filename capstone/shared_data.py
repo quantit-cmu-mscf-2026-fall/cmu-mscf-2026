@@ -325,6 +325,7 @@ def load(
     strings = {pa.string(): pd.StringDtype("pyarrow"), pa.large_string(): pd.StringDtype("pyarrow")}
     frame = table.to_pandas(types_mapper=strings.get)
     if calendar_only:
+        frame["date"] = pd.to_datetime(frame["date"])  # parquet date32 reads as datetime.date
         frame = frame.drop_duplicates().sort_values("date").reset_index(drop=True)
         future = frame.loc[frame.date > pd.Timestamp(holdout_authority.DISCOVERY_END), "date"]
         if not future.empty:
@@ -357,12 +358,15 @@ def load_live(
     """Read live-era rows of one shared CRSP file: the post-holdout route.
 
     `holdout_live.guard_live_read` admits only a window that starts after the
-    sealed holdout's end; `load` and its guard are unchanged and still refuse such a
-    read. The bounds go into the parquet filter, so no holdout-era row reaches memory,
-    and the frame is checked against them again after the read."""
+    sealed holdout's end, and only once the holdout's once-only look is in the run
+    ledger (`holdout_live.require_spent_look`); `load` and its guard are unchanged and
+    still refuse such a read. The route is for a post-holdout `crsp_*` extract, not
+    `sp500_daily_1990_2025`. The bounds go into the parquet filter, so no holdout-era row
+    reaches memory, and the frame is checked against them again after the read."""
     from capstone import holdout_live
 
     first, last = holdout_live.guard_live_read(name, start, end, date_column)
+    holdout_live.require_spent_look()
     import pyarrow as pa
     import pyarrow.parquet as pq
 
