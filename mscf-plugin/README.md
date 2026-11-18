@@ -20,7 +20,7 @@ For development: `claude --plugin-dir ./mscf-plugin`.
 | Skill | `pipeline-boundaries` | Sealed holdout, ledger before results, one-way validation, pre-registered thresholds, public-repo hygiene |
 | Skill | `shared-data` | Loading CRSP/Compustat through `capstone.shared_data` and the returns/costs/fundamentals rules |
 | Skill | `run-ledger` | `log_run` before looking, what counts as a trial, stage tags, trial counts scoped to the family |
-| Skill | `validate-candidates` | Performance matrix, one-sided HAC Sharpe tests, choosing a correction, the five-stage funnel |
+| Skill | `validate-candidates` | Performance matrix, one-sided HAC Sharpe tests, one luck correction per stage plus graded scores, the five-stage funnel |
 | Skill | `null-calibration` | Null and power tests every new validation method ships with |
 | Skill | `research-pr` | Branch, checks, PR template with seeds and trial count, review and merge |
 | Skill | `paper-round` | Weekly paper one-pager, smallest experiment, report back |
