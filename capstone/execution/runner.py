@@ -75,7 +75,9 @@ from capstone.strategy.registry import INCUBATION_ONLY
 LEDGER_NAME = "paper-run"
 Mode = Literal["dry-run"]
 MODES = get_args(Mode)
-SEND_PATH = "python -m capstone.execution.instructions <plan> --paper"
+SEND_PATH = (
+    "python -m capstone.execution.instructions <plan> --context <file> --journal <file> --paper"
+)
 SEND_PATH_REMOVED = (
     "the runner has no paper send path; it only dry-runs. Freeze a plan and send it with "
     "the single send path: " + SEND_PATH

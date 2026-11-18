@@ -542,3 +542,88 @@ def test_the_send_path_imports_no_client_library_and_opens_no_socket():
         elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
             imported.add(node.module.split(".")[0])
     assert imported <= allowed, sorted(imported - allowed)
+
+
+# ---------------------------------------------------------------------------
+# Review fixes: unused instruments, the advertised command, capital, cancels
+
+
+def test_instruments_the_plan_neither_trades_nor_holds_do_not_block():
+    plan = fixture_plan(
+        projected_shares={"1": 10},
+        account_positions={},
+        instruments={
+            "1": {"symbol": "S1", "qualified": True, "con_id": 123},
+            "2": {"symbol": "S2", "qualified": False},
+        },
+    )[0]
+    used = instructions.plan_instruments(plan)
+    assert list(used) == ["1"]
+    InstructionBroker(FakeSession(), used, {})
+    with pytest.raises(ValueError, match="uniquely qualified"):
+        InstructionBroker(FakeSession(), plan["instruments"], {})
+
+
+def test_a_held_instrument_is_kept_and_an_undescribed_one_is_refused():
+    plan = fixture_plan(
+        projected_shares={"1": 10},
+        account_positions={"2": 5},
+        instruments={
+            "1": {"symbol": "S1", "qualified": True, "con_id": 123},
+            "2": {"symbol": "S2", "qualified": True, "con_id": 456},
+            "3": {"symbol": "S3", "qualified": False},
+        },
+    )[0]
+    assert list(instructions.plan_instruments(plan)) == ["1", "2"]
+    bad = fixture_plan(projected_shares={"9": 1})[0]
+    with pytest.raises(ValueError, match="does not describe"):
+        instructions.plan_instruments(bad)
+
+
+def test_main_ignores_an_unqualified_unused_instrument(tmp_path):
+    plan = fixture_plan(
+        projected_shares={"1": 10},
+        account_positions={},
+        instruments={
+            "1": {"symbol": "S1", "qualified": True, "con_id": 123},
+            "2": {"symbol": "S2", "qualified": False},
+        },
+    )[0]
+    rest = write(tmp_path, plan, session=SESSION_DAY, capital=10000)
+    session = FakeSession(readonly=True)
+    with pytest.raises(ValueError, match="no saved execution record"):
+        instructions.main(
+            [*rest, "--paper", "--reconcile-only"], session_factory=lambda *a, **k: session
+        )
+
+
+def test_the_advertised_send_command_carries_every_required_argument_and_parses(tmp_path):
+    import shlex
+
+    from capstone.execution.runner import SEND_PATH
+
+    assert "--context" in SEND_PATH and "--journal" in SEND_PATH
+    plan = fixture_plan()[0]
+    rest = write(tmp_path, plan, session=SESSION_DAY, capital=10000)
+    files = iter([rest[0], rest[2], rest[4]])
+    words = shlex.split(SEND_PATH)
+    assert words[:3] == ["python", "-m", "capstone.execution.instructions"]
+    argv = [next(files) if w.startswith("<") else w for w in words[3:]]
+    # argparse accepts it; the plan is not transmittable, so it stops after parsing
+    with pytest.raises(ValueError, match="fully qualified"):
+        instructions.main(argv, session_factory=trap())
+
+
+def test_capital_is_always_serialised_as_a_float():
+    for capital in (10000, 10000.0):
+        a, _ = adapter(context={"capital": capital})
+        value = a.snapshot()["capital"]
+        assert isinstance(value, float) and json.dumps(value) == "10000.0"
+
+
+def test_a_duplicated_open_order_is_cancelled_once():
+    a, session = adapter()
+    row = {"account": ACCOUNT, "ref": "mine", "order_id": 1}
+    session.rows["open"] = [row, dict(row, order_id=2)]
+    a.cancel("mine")
+    assert session.cancelled == ["mine"]

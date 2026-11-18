@@ -200,7 +200,7 @@ class InstructionBroker:
         return {
             "positions": positions,
             "cash": values["cash"],
-            "capital": self.context["capital"],
+            "capital": float(self.context["capital"]),
             "open_orders": sorted(opened),
         }
 
@@ -267,9 +267,20 @@ class InstructionBroker:
             raise PaperGuardError("read-only connection cannot cancel orders")
         session.recheck()
         check_paper(session.account_id, session.port, os.environ)
-        for row in session.open_orders():
-            if row["account"] == session.account_id and row["ref"] == instruction_id:
-                session.cancel(instruction_id)
+        if any(
+            row["account"] == session.account_id and row["ref"] == instruction_id
+            for row in session.open_orders()
+        ):
+            session.cancel(instruction_id)
+
+
+def plan_instruments(plan: Mapping) -> dict:
+    """Return only the instruments the plan trades or holds."""
+    names = set(plan.get("projected_shares", {})) | set(plan.get("account_positions", {}))
+    missing = names - set(plan["instruments"])
+    if missing:
+        raise ValueError("plan trades or holds an instrument it does not describe")
+    return {n: plan["instruments"][n] for n in sorted(names, key=int)}
 
 
 def main(argv=None, *, session_factory: Callable[..., PaperSession] | None = None):
@@ -313,7 +324,7 @@ def main(argv=None, *, session_factory: Callable[..., PaperSession] | None = Non
         raise PaperGuardError(NO_SESSION)
     session = session_factory(os.environ, readonly=args.reconcile_only)
     try:
-        adapter = InstructionBroker(session, plan["instruments"], context)
+        adapter = InstructionBroker(session, plan_instruments(plan), context)
         result = execute_plan(plan, adapter, args.journal, reconcile_only=args.reconcile_only)
         if args.abandon_prepared:
             count = abandon_prepared(plan, args.journal)
