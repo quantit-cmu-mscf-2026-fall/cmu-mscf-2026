@@ -1003,3 +1003,18 @@ def test_numbering_is_compared_in_title_order_and_pronouns_are_not_numerals():
         one, two = Paper(title=a), Paper(title=b)
         assert len(dedupe.dedupe_batch([one, two])) == 2, (a, b)
         assert dedupe.match_db(two, [(one.key, one.title_norm, None, None)]) is None, (a, b)
+
+
+def test_an_adopted_paper_the_prefilter_filtered_is_still_screened(tmp_path):
+    con = dbm.connect(str(tmp_path / "f.db"))
+    k = dbm.insert(con, Paper(title="Off topic at first", doi="10.9/f"), 1)
+    cli.classify(con, [k], {"agent_terms": ["zzz"], "finance_terms": ["zzz"], "version": 1}, False)
+    row = con.execute(
+        "SELECT status, relevance, screened_at FROM papers WHERE key=?", (k,)
+    ).fetchone()
+    assert (row["status"], row["relevance"], row["screened_at"]) == ("filtered", 0, None)
+    cli.set_review(con, k, "adopted", None, None)
+    cfg = {"screening": {"budget_per_run": 10}}
+    assert cli.candidates(con, cfg, [], lambda *a: None) == [k]
+    save(con, k, {"relevance": 4, "tags": []}, "m", 1)
+    assert cli.candidates(con, cfg, [], lambda *a: None) == []
