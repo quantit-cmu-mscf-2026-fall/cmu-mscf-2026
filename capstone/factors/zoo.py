@@ -19,6 +19,11 @@ closed grammar (`FIELDS`), transcribed member by member. Excluded, and why:
   by design: every operator must be differentiable-in-spirit and cheap to
   canonicalise for Eq. 5.
 
+An alpha the grammar cannot express also cannot be proposed, so the excluded
+members cannot produce undetected copies. If the grammar ever gains
+conditionals or element-wise min/max, the zoo must gain the members they
+unlock in the same PR.
+
 Transcription notes. Alpha101's `delay` is `shift`, `correlation` is
 `ts_corr`, `covariance` is `ts_cov`, `stddev` is `ts_std`, `sum` is
 `ts_sum`, `Ts_Rank` is `ts_rank`, `product` is `ts_product`, `min(x, d)`

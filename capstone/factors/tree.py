@@ -419,8 +419,8 @@ def identity_key(node: Node) -> str:
     """Same factor, same key: windows and constants kept; the order and grouping of
     `+` and `*` operands, the argument order of ts_corr and ts_cov, nested shifts and
     the spelling of a negation (`-1 * x`, `x * -1`, `-(x)`, `0 - x`) are ignored.
-    Only the order is canonicalised: `close / 2` and `close * 0.5` are different
-    factors."""
+    Identity canonicalises order and negation, not arithmetic: `close / 2` and
+    `close * 0.5` get different ids by design."""
     return _key(node, keep_parameters=True)
 
 
