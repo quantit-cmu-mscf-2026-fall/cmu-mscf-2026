@@ -52,6 +52,11 @@ description.
   ledger trials or a failed stage 1-3 raise before the look, so none of them
   spends it; once the look is logged the config cannot be run again.
 - A config registered with `factors_digest` is refused until stage 3 exists.
+- Real data cannot search the holdout: unless `data_version` is "synthetic",
+  `GateConfig` refuses a `search_end` on or after `gate.HOLDOUT_OPENS`
+  (2021-01-01, where `docs/validation.md` starts the holdout), when it is
+  built, so such a config can't be registered or run. A test keeps this
+  constant and the docs' date equal.
 - `GateConfig`'s default thresholds use stage 1 on the bootstrap family
   maximum (`Thresholds()` itself still defaults to "rho", as on `main`).
 - A config's hash is SHA-256 of its canonical JSON, equal in every process.

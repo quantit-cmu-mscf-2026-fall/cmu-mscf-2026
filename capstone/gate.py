@@ -61,6 +61,7 @@ never counted as trials (`_trial_count`).
 
 from __future__ import annotations
 
+import datetime
 import hashlib
 import json
 import numbers
@@ -78,8 +79,10 @@ from capstone.scorecard import SCORECARD_COLUMNS, GateHeader, GateResult, TrialS
 
 __all__ = [
     "GATE_TAG",
+    "HOLDOUT_OPENS",
     "LOOK_NAME",
     "REGISTRATION_NAME",
+    "SYNTHETIC_DATA_VERSION",
     "SYNTHETIC_TAG",
     "GateConfig",
     "GateNotRegistered",
@@ -96,6 +99,12 @@ LOOK_NAME = "gate-holdout-look"
 GATE_TAG = "gate"
 # runlog's convention for entries that are not trials of a strategy.
 SYNTHETIC_TAG = "synthetic"
+# The only `data_version` allowed to search past HOLDOUT_OPENS: simulated data.
+SYNTHETIC_DATA_VERSION = "synthetic"
+# The first day of the real holdout (`docs/validation.md`, "Holdout | 2021-01-01
+# to 2025-12-31 | The final stage only"). Real data's search period must end
+# before it. One constant: the docs name it, and a test keeps them equal.
+HOLDOUT_OPENS = datetime.date(2021, 1, 1)
 
 
 # Stage 4's source of holdout returns: (variant ids, holdout_start, holdout_end)
@@ -138,6 +147,11 @@ class GateConfig:
     set): thresholds belong to a generator. `factors_digest` is the SHA-256
     hex digest of stage 3's factor frame, or None for no stage-3 test.
 
+    Unless `data_version` is "synthetic", `search_end` must be before
+    `HOLDOUT_OPENS` (2021-01-01): the real holdout is for the final stage only,
+    so a config that searches into it is refused when it is built, before it
+    can be registered or run.
+
     `seed` and `n_boot` are integers (NumPy integers are stored as ints; a
     float or bool is refused, so a fractional value can't hash like its
     truncation). The trial scope's tags are stored sorted and without
@@ -167,6 +181,12 @@ class GateConfig:
         # Compare the dates themselves: as strings a missing date ("NaT") sorts last.
         if not dates["search_end"] < dates["holdout_start"] <= dates["holdout_end"]:
             raise ValueError("need search_end < holdout_start <= holdout_end")
+        if self.data_version != SYNTHETIC_DATA_VERSION and dates["search_end"] >= HOLDOUT_OPENS:
+            raise ValueError(
+                f"search_end {dates['search_end']} is not before {HOLDOUT_OPENS}, where the real "
+                f"holdout begins: stages 1-3 would score it. Only data_version="
+                f"{SYNTHETIC_DATA_VERSION!r} may search that late (docs/validation.md)"
+            )
         for name in ("n_boot", "seed"):
             value = getattr(self, name)
             if isinstance(value, bool | np.bool_) or not isinstance(value, numbers.Integral):

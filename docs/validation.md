@@ -161,6 +161,9 @@ all of it predates the cutoff. The split (decided 2026-10-05):
 | Search | 1990-01-02 to 2020-12-31 | Agents and stages 1-3 |
 | Holdout | 2021-01-01 to 2025-12-31 | The final stage only, looked at once |
 
+The holdout's first day is `capstone.gate.HOLDOUT_OPENS`: the gate refuses a
+real-data config whose search period reaches it.
+
 Five years rather than three because at 95% confidence (normal returns) an
 annual Sharpe of 1.0 needs about 2.7 years to tell from zero, 0.75 about 4.8
 and 0.5 about 11: five years can confirm 0.75 and up, three only about 1 and
