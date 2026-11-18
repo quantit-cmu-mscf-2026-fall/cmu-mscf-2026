@@ -24,7 +24,8 @@
       ],
       "exclude_tags": []
     },
-    "factors_digest": null
+    "factors_digest": null,
+    "min_holdout_coverage": 0.5
   },
   "decision_rule": {
     "rule": "baseline",

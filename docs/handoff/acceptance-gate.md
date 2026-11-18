@@ -29,7 +29,10 @@ description.
   (`s3_measured` False). Tests: `tests/test_gate_run.py`.
 - **Holdout inputs** (QUANTIT-34): the provider's answer is checked on
   arrival (exactly the requested variants, registered holdout dates only,
-  finite); a survivor with no holdout returns fails stage 4. Tests:
+  finite); a survivor with fewer holdout returns than the registered minimum
+  coverage (`min_holdout_coverage`, default half the holdout's business days;
+  `gate.required_holdout_obs`) is not tested: it fails stage 4, stays in the
+  stage-4 family at p = 1, and its `ho_n_obs` is on the scorecard. Tests:
   `tests/test_gate_holdout_inputs.py`; the decision matrix (null and planted
   markets on iid, `rho` and `ar1` data), scorecard, report and expected-mean
   tests are in `tests/test_gate_decisions.py`.

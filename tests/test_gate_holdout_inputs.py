@@ -27,7 +27,11 @@ from gate_helpers import (
     run,
 )
 
+from capstone import gate
+from capstone.evaluate import bh_adjusted
+from capstone.funnel import Thresholds
 from capstone.gate import GateNotRegistered, HoldoutAlreadyOpened, register
+from capstone.scorecard import read_report, write_report
 
 
 @pytest.fixture
@@ -226,7 +230,8 @@ class TestMissingHoldout:
         (family,) = card.index[card["best"] == seen["variant"]]
         assert card.loc[family, "s3_pass"]  # it survived the screen
         assert not card.loc[family, "s4_pass"] and not card.loc[family, "accepted"]
-        assert np.isnan(card.loc[family, "s4_stat"])
+        assert card.loc[family, "s4_stat"] == pytest.approx(1.0)  # in the family at p = 1
+        assert card.loc[family, "ho_n_obs"] == 0
         assert card.loc[family, ["ho_sharpe", "ho_p", "ho_mean"]].astype(float).isna().all()
         others = [f for f in baseline.accepted if f != family]
         assert set(result.accepted) >= set(others) - {family}
@@ -242,3 +247,120 @@ class TestMissingHoldout:
         assert result.header.n_holdout_obs == 0
         # The look was still logged and spent.
         assert len(looks(config_for(planted_market).config_hash)) == 1
+
+
+class TestMinimumCoverage:
+    """A survivor seen on a sliver of the holdout is not tested: it fails stage 4,
+    stays in the family at p = 1 and shows its `ho_n_obs`."""
+
+    def thin(self, n: int, which: int = 0):
+        """Keep only the first `n` holdout returns of one survivor."""
+        seen = {}
+
+        def change(frame, ids):
+            frame = frame.copy()
+            seen["variant"] = ids[which]
+            frame.iloc[n:, list(frame.columns).index(ids[which])] = np.nan
+            return frame
+
+        return change, seen
+
+    def run_thin(self, ledger, m: Market, n: int, **overrides):
+        change, seen = self.thin(n)
+        result = gate_once(m, holdout=serving(m, change), **overrides)
+        card = result.scorecard
+        (family,) = card.index[card["best"] == seen["variant"]]
+        return result, family
+
+    def test_the_default_bar_is_half_the_holdouts_business_days(self, planted_market):
+        config = config_for(planted_market)
+        assert config.min_holdout_coverage == gate.DEFAULT_MIN_HOLDOUT_COVERAGE == 0.5
+        assert gate.required_holdout_obs(config) == 378  # 756 business days
+        assert (
+            gate.required_holdout_obs(config_for(planted_market, min_holdout_coverage=1.0)) == 756
+        )
+        tiny = config_for(planted_market, min_holdout_coverage=1e-9)
+        assert gate.required_holdout_obs(tiny) == 2  # funnel.MIN_PERIOD_OBS
+
+    @pytest.mark.parametrize("n", [1, 2, 3, 377])
+    def test_a_survivor_below_the_bar_fails_untested(self, ledger, planted_market, n):
+        result, family = self.run_thin(ledger, planted_market, n)
+        card = result.scorecard
+        assert card.loc[family, "s3_pass"]  # it survived the screen
+        assert card.loc[family, "ho_n_obs"] == n  # on the scorecard
+        assert not card.loc[family, "s4_pass"] and not card.loc[family, "accepted"]
+        assert (
+            card.loc[family, ["ho_sharpe", "ho_p", "ho_psr", "ho_mean"]].astype(float).isna().all()
+        )
+        assert card.loc[family, "s4_stat"] == pytest.approx(1.0)
+        assert family not in result.accepted
+
+    def test_the_bar_itself_is_enough(self, ledger, planted_market):
+        result, family = self.run_thin(ledger, planted_market, 378)
+        card = result.scorecard
+        assert card.loc[family, "ho_n_obs"] == 378
+        assert card.loc[family, "ho_p"] == card.loc[family, "ho_p"]  # tested: not NaN
+        assert card.loc[family, "s4_stat"] < 1.0
+
+    def test_the_failed_survivor_stays_in_the_family_at_p_equal_one(self, ledger, planted_market):
+        baseline = gate_once(planted_market).scorecard
+        ledger()
+        result, family = self.run_thin(ledger, planted_market, 2)
+        card = result.scorecard
+        others = [f for f in baseline.index[baseline["s3_pass"]] if f != family]
+        p = baseline.loc[others, "ho_p"].copy()
+        p[family] = 1.0
+        expected = bh_adjusted(p)
+        pd.testing.assert_series_equal(
+            card.loc[others, "s4_stat"], expected[others], check_names=False
+        )
+        # Dropping it from the family instead would have been kinder to the rest.
+        assert (bh_adjusted(baseline.loc[others, "ho_p"]) < expected[others]).any()
+
+    def test_a_dsr_gate_fails_it_without_a_statistic(self, ledger, planted_market):
+        result, family = self.run_thin(
+            ledger, planted_market, 2, thresholds=Thresholds(stage1="bootstrap", final="dsr")
+        )
+        card = result.scorecard
+        assert not card.loc[family, "s4_pass"]
+        assert np.isnan(float(card.loc[family, "s4_stat"]))
+
+    def test_the_bar_is_registered_with_the_config(self, planted_market):
+        a = config_for(planted_market)
+        assert a.to_dict()["min_holdout_coverage"] == 0.5
+        assert config_for(planted_market, min_holdout_coverage=0.75).config_hash != a.config_hash
+
+    @pytest.mark.parametrize("bad", [0.0, -0.1, 1.5, float("nan")])
+    def test_a_bar_outside_zero_to_one_is_refused(self, planted_market, bad):
+        with pytest.raises(ValueError, match="min_holdout_coverage"):
+            config_for(planted_market, min_holdout_coverage=bad)
+
+    @pytest.mark.parametrize("bad", [True, "0.5", None])
+    def test_a_bar_that_is_not_a_number_is_refused(self, planted_market, bad):
+        with pytest.raises(TypeError, match="min_holdout_coverage"):
+            config_for(planted_market, min_holdout_coverage=bad)
+
+    def test_the_header_and_report_carry_the_bar(self, ledger, planted_market, tmp_path):
+        result = gate_once(planted_market)
+        assert result.header.min_holdout_coverage == 0.5
+        assert result.header.min_holdout_obs == 378
+        path, _ = write_report(result, tmp_path / "gate.json")
+        back = read_report(path)
+        assert back.header == result.header
+        pd.testing.assert_frame_equal(back.scorecard, result.scorecard, check_dtype=False)
+
+    def test_padding_the_holdout_with_empty_dates_does_not_change_its_length(
+        self, ledger, planted_market
+    ):
+        def pad(frame, ids):
+            empty = pd.DataFrame(
+                np.nan,
+                index=pd.date_range(frame.index[0], frame.index[-1], freq="D").difference(
+                    frame.index
+                ),
+                columns=frame.columns,
+            )
+            return pd.concat([frame, empty]).sort_index()
+
+        padded = gate_once(planted_market, holdout=serving(planted_market, pad))
+        assert padded.header.n_holdout_obs == 3 * 252  # not the calendar days

@@ -24,7 +24,10 @@ Row (index `family`), in `SCORECARD_COLUMNS` order:
   p-value stage 1 adjusted), `by`, `holm` (adjusted across families),
   `lfdr`, `sharpe`, `psr`, `min_trl_years` (search period),
   `haircut_sharpe` (with the ledger trial count), `ho_sharpe`, `ho_p`,
-  `ho_psr` (holdout, stage-4 families only);
+  `ho_psr` (holdout, stage-4 families that had enough returns to be
+  tested), and `ho_n_obs` (the non-missing holdout returns of every
+  stage-4 family's `best`, tested or not: below the registered minimum
+  coverage the family fails stage 4 untested, at p = 1 in the family);
 - what a later live check needs: `is_mean` (search-period mean of `best`),
   `ho_mean`, `expected_mean` (the per-period mean to expect, accepted
   families) and `scale` (search-period standard deviation of `best`).
@@ -81,6 +84,7 @@ SCORECARD_COLUMNS: tuple[str, ...] = (
     "ho_sharpe",
     "ho_p",
     "ho_psr",
+    "ho_n_obs",
     "is_mean",
     "ho_mean",
     "expected_mean",
@@ -126,7 +130,12 @@ class GateHeader:
     annualised Sharpe a real family needs to pass the funnel at 50% and 80%
     power under this gate's own configuration (`capstone.power`, `power_sims`
     simulated worlds); reported only, never read by a decision, and None (with
-    `power_sims` 0) when no power budget was run.
+    `power_sims` 0) when no power budget was run. `n_holdout_obs` is the
+    number of holdout dates on which some survivor has a return.
+    `min_holdout_coverage` is the registered share of the holdout's business
+    days a survivor needs a return on, and `min_holdout_obs` the number of
+    returns that makes (`ho_n_obs` below it fails stage 4); None for a report
+    written before the rule existed.
     """
 
     config_hash: str
@@ -151,6 +160,8 @@ class GateHeader:
     avg_correlation: float
     min_detectable_sharpe: tuple[MinDetectableSharpe, ...] | None = None
     power_sims: int = 0
+    min_holdout_coverage: float | None = None
+    min_holdout_obs: int | None = None
 
 
 HEADER_FIELDS: tuple[str, ...] = tuple(f.name for f in dataclasses.fields(GateHeader))

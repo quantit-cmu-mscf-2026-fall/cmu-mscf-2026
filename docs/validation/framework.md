@@ -283,7 +283,8 @@ is a count: 0, 1 or 2 real families, at an annual Sharpe of 0.5, 1.0 or 1.5.
 | Funnel, reported alongside | stage 1 BH at **q₁ = 0.10** on bootstrap family p-values; stage 2 no gate; stage 4 BH across survivors at **q₄ = 0.50** |
 | Stage 1's p-value | `stage1 = "bootstrap"`, 1,999 draws |
 | α₃ | not registered: stage 3 isn't built, so the config has no `factors_digest` |
-| Registered config | `scripts/gate_crsp_v1.json`: the `GateConfig` above, hash `5e89d78ae00e9537af3db3aa20810c5804c1d6c3ae892cf91600ce962e179009` |
+| Stage 4 coverage | a survivor needs a return on at least **half** of the holdout's business days (`min_holdout_coverage = 0.5`), or it fails stage 4 untested, staying in the family at p = 1 |
+| Registered config | `scripts/gate_crsp_v1.json`: the `GateConfig` above, hash `8bda49ec7d64c5f7e56839fac35fc4667b14e94dd4e4cdf49367be15e25455b0` (`5e89d78a…` before the coverage field was added to the hashed config) |
 
 `GateConfig` has no field for the decision rule, so its hash covers the
 funnel only. The rule and its q (baseline, BH at 0.05) are fixed here and in

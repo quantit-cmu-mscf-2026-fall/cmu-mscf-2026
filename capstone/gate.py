@@ -64,6 +64,7 @@ from __future__ import annotations
 import datetime
 import hashlib
 import json
+import math
 import numbers
 import re
 from collections.abc import Callable, Sequence
@@ -78,6 +79,7 @@ from capstone.funnel import Thresholds, thresholds_dict
 from capstone.scorecard import SCORECARD_COLUMNS, GateHeader, GateResult, TrialScope
 
 __all__ = [
+    "DEFAULT_MIN_HOLDOUT_COVERAGE",
     "GATE_TAG",
     "HOLDOUT_OPENS",
     "LOOK_NAME",
@@ -90,6 +92,7 @@ __all__ = [
     "HoldoutProvider",
     "TrialScope",
     "register",
+    "required_holdout_obs",
     "required_n_boot",
     "run_gate",
 ]
@@ -105,6 +108,8 @@ SYNTHETIC_DATA_VERSION = "synthetic"
 # to 2025-12-31 | The final stage only"). Real data's search period must end
 # before it. One constant: the docs name it, and a test keeps them equal.
 HOLDOUT_OPENS = datetime.date(2021, 1, 1)
+# Stage 4's minimum holdout coverage per survivor (`GateConfig.min_holdout_coverage`).
+DEFAULT_MIN_HOLDOUT_COVERAGE = 0.5
 
 
 # Stage 4's source of holdout returns: (variant ids, holdout_start, holdout_end)
@@ -152,6 +157,22 @@ class GateConfig:
     so a config that searches into it is refused when it is built, before it
     can be registered or run.
 
+    `min_holdout_coverage` is the share of the registered holdout's business
+    days (`holdout_start` to `holdout_end`) on which a survivor's chosen
+    variant must have a return, or it fails stage 4 untested, staying in the
+    stage-4 family at p = 1. The default is one half, for three reasons. The
+    thresholds were calibrated on a full-length holdout, and a variant seen
+    on a fraction of it is a shorter, different test: the Sharpe's standard
+    error grows as 1 / sqrt(n), so half the days is already 41% wider, and
+    below that the p-value is mostly noise (a survivor seen on 3 of 756
+    days reported a Sharpe of 18 and p = 0.02). A strategy can be out of
+    the market on many days (NaN is a missing return, never a zero), so
+    demanding every day would fail honest, selective strategies. And
+    business days overstate a trading calendar by about 3.5% (holidays), so a
+    bar at half leaves room for that. It is in the hashed config, so
+    changing it re-registers the gate. At least 2 returns are always needed
+    (`funnel.MIN_PERIOD_OBS`).
+
     `seed` and `n_boot` are integers (NumPy integers are stored as ints; a
     float or bool is refused, so a fractional value can't hash like its
     truncation). The trial scope's tags are stored sorted and without
@@ -168,6 +189,7 @@ class GateConfig:
     seed: int = 0
     trial_scope: TrialScope = field(default_factory=TrialScope)
     factors_digest: str | None = None
+    min_holdout_coverage: float = DEFAULT_MIN_HOLDOUT_COVERAGE
 
     def __post_init__(self) -> None:
         dates = {}
@@ -192,6 +214,12 @@ class GateConfig:
             if isinstance(value, bool | np.bool_) or not isinstance(value, numbers.Integral):
                 raise TypeError(f"{name} must be an integer, not {type(value).__name__}: {value!r}")
             object.__setattr__(self, name, int(value))
+        coverage = self.min_holdout_coverage
+        if isinstance(coverage, bool | np.bool_) or not isinstance(coverage, numbers.Real):
+            raise TypeError(f"min_holdout_coverage must be a real number, not {coverage!r}")
+        if not 0.0 < float(coverage) <= 1.0:
+            raise ValueError(f"min_holdout_coverage must be in (0, 1], got {coverage!r}")
+        object.__setattr__(self, "min_holdout_coverage", float(coverage))
         object.__setattr__(self, "trial_scope", _canonical_scope(self.trial_scope))
         if self.n_boot < 0 or (self.thresholds.stage1 == "bootstrap" and self.n_boot == 0):
             raise ValueError("n_boot must be positive for the bootstrap stage-1 gate")
@@ -221,6 +249,7 @@ class GateConfig:
                 "exclude_tags": list(scope.exclude_tags),
             },
             "factors_digest": self.factors_digest,
+            "min_holdout_coverage": self.min_holdout_coverage,
         }
 
     @classmethod
@@ -361,6 +390,13 @@ def _checked_holdout(frame: object, ids: tuple, config: GateConfig) -> pd.DataFr
     return frame[list(ids)]
 
 
+def required_holdout_obs(config: GateConfig) -> int:
+    """Returns a survivor needs inside the holdout: `min_holdout_coverage` of its
+    business days, rounded up, and never fewer than `funnel.MIN_PERIOD_OBS`."""
+    n_days = len(pd.bdate_range(config.holdout_start, config.holdout_end))
+    return max(funnel.MIN_PERIOD_OBS, math.ceil(config.min_holdout_coverage * n_days))
+
+
 def _checked_stage3(config: GateConfig) -> None:
     if config.factors_digest is not None:
         raise ValueError(
@@ -456,17 +492,19 @@ def run_gate(
         ho_returns = _checked_holdout(holdout(ids, start, end), ids, config)
     else:
         ho_returns = pd.DataFrame(index=pd.DatetimeIndex([]))
-    # A survivor whose chosen variant has no holdout returns can't be tested:
-    # it fails stage 4.
-    has_holdout = pd.Series(
-        {f: bool(ho_returns[b].notna().any()) for f, b in chosen.dropna().items()}, dtype=bool
+    # Every stage-3 survivor reaches stage 4. One whose chosen variant has too
+    # few holdout returns (`required_holdout_obs`: none, or a sliver of the
+    # window) is not tested: it fails, and stays in the family at p = 1.
+    alive = stages["stage3"]
+    ho_n_obs = pd.Series(
+        {f: float(ho_returns[b].notna().sum()) for f, b in chosen.dropna().items()}, dtype=float
     )
-    alive = stages["stage3"] & has_holdout.reindex(stages.index, fill_value=False)
-    tested = stats["best"].where(alive)
+    covered = (ho_n_obs >= required_holdout_obs(config)).reindex(stages.index, fill_value=False)
+    tested = stats["best"].where(alive & covered)
     ho = funnel.holdout_statistics(ho_returns, tested)
     for column in ho.columns:
         stats[column] = ho[column]
-    s4 = alive & funnel._final_gate(stats, alive, th)
+    s4 = alive & funnel._final_gate(stats, alive, th, covered=covered)
     ho_mean = pd.Series({f: ho_returns[b].mean() for f, b in tested.dropna().items()}, dtype=float)
 
     card = pd.DataFrame(index=stats.index)
@@ -494,6 +532,7 @@ def run_gate(
     card["ho_sharpe"] = stats["ho_sharpe"]
     card["ho_p"] = stats["ho_p"]
     card["ho_psr"] = 1.0 - stats["ho_p"]  # sharpe_test: pvalue_greater = 1 - psr
+    card["ho_n_obs"] = ho_n_obs.reindex(card.index)  # every survivor, tested or not
     card["is_mean"] = [search[b].mean() for b in card["best"]]
     card["ho_mean"] = ho_mean.reindex(card.index)
     card["scale"] = [search[b].std() for b in card["best"]]
@@ -518,10 +557,12 @@ def run_gate(
         n_families=len(card),
         n_variants=returns.shape[1],
         n_search_obs=len(search),
-        n_holdout_obs=len(ho_returns),
+        n_holdout_obs=int(ho_returns.notna().any(axis=1).sum()),
         search_fdr_estimate=grading.search_fdr_estimate(p1, stages["stage1"]),
         pbo=batch_pbo,
         avg_correlation=float(avg_corr),
+        min_holdout_coverage=config.min_holdout_coverage,
+        min_holdout_obs=required_holdout_obs(config),
     )
     accepted = tuple(card.index[card["accepted"]])
     return GateResult(card, header, accepted)
