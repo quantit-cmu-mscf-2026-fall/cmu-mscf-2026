@@ -8,6 +8,7 @@ look-ahead.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -46,42 +47,168 @@ def to_weights(signal: pd.DataFrame, *, demean: bool = True, gross: float = 1.0)
     return values.mul(scale, axis=0)
 
 
-def backtest_components(
+def _check_band(band: float) -> None:
+    if not (math.isfinite(band) and band >= 0):
+        raise ValueError(f"band must be a finite number >= 0, got {band!r}")
+
+
+def band_book(
+    weights: pd.DataFrame,
+    missing: pd.DataFrame,
+    *,
+    band: float,
+    hold: int = 1,
+) -> pd.DataFrame:
+    """The book held after each date's close under a no-trade band.
+
+    `weights` is the target book on each date (`to_weights`), `missing` marks
+    the names with no signal that date. On every `hold`-th date counted from
+    the first (a rebalance):
+
+    - a name trades to its target only when |target - held| > `band`, or when
+      it has no signal (it is closed, whatever its weight); otherwise it keeps
+      its held weight;
+    - a flat book opens at its target in full, so the band never keeps a book
+      flat while there is a signal;
+    - a target with no position at all (no signal anywhere) is taken as is:
+      the book goes flat.
+
+    Between rebalances the book is held. `band` is in units of target weight.
+    The book is not rescaled: every name is within `band` of its target on
+    each rebalance, so the book is never levered onto the names that traded.
+    It is therefore not exactly dollar-neutral, and its gross can differ from
+    the target's, by at most `band` per kept name.
+    """
+    _check_band(band)
+    if hold < 1:
+        raise ValueError("hold must be at least 1 period")
+    target = weights.to_numpy(dtype="float64")
+    closed = missing.reindex_like(weights).fillna(True).to_numpy(dtype=bool)
+    out = np.empty_like(target)
+    held = np.zeros(target.shape[1])
+    for t in range(len(target)):
+        if t % hold == 0:
+            row = target[t]
+            if np.abs(row).sum() > 0 and np.abs(held).sum() > 0:
+                move = (np.abs(row - held) > band) | closed[t]
+                held = np.where(move, row, held)
+            else:
+                held = row.copy()
+        out[t] = held
+    return pd.DataFrame(out, index=weights.index, columns=weights.columns)
+
+
+def backtest_frame(
     signal: pd.DataFrame,
     returns: pd.DataFrame,
     *,
-    cost_bps: float,
+    cost_bps: float | pd.DataFrame,
     demean: bool,
     gross: float,
-) -> tuple[pd.Series, pd.Series]:
-    """Net returns and turnover for one signal: the core of `run_backtest`, `sweep`
-    and `candidate_returns`.
+    hold: int = 1,
+    band: float = 0.0,
+) -> pd.DataFrame:
+    """Per-period net and gross returns, cost and turnover for one signal.
 
     Aligns signal/returns on their common index and columns, shifts positions
-    one period so `signal.loc[t]` earns `returns.loc[t+1]`, and returns both
-    the net strategy return series and the per-period turnover series (the
-    latter is not part of `run_backtest`'s public return value, but `sweep`
-    needs it to populate `BacktestSummary.turnover`).
+    one period so `signal.loc[t]` earns `returns.loc[t+1]`.
+
+    `cost_bps` is the cost of trading one unit of weight, in basis points:
+    one rate for every asset and date, or a dates x assets table (a stock's
+    half quoted spread that day, say). A trade made at date t's close pays
+    date t's rate. An asset with no rate that day pays that day's median. A
+    trade on a date where no asset has a rate raises `ValueError` rather than
+    trading for free.
+
+    `hold` rebalances every `hold`-th period, counted from the first date,
+    and holds the book in between; `hold=1` rebalances every period. Between
+    rebalances the weights are held fixed, so the trades that would keep them
+    fixed as prices drift are not charged.
+
+    `band` > 0 is a no-trade band on each rebalance (`band_book`: a name
+    trades only when its target is more than `band` from its held weight).
+    `band=0` is the backtest without one, computed exactly as before.
+
+    Returns a frame with columns `net`, `gross`, `cost` and `turnover`.
     """
+    if hold < 1:
+        raise ValueError("hold must be at least 1 period")
+    _check_band(band)
     dates = signal.index.intersection(returns.index)
     assets = signal.columns.intersection(returns.columns)
     signal = signal.loc[dates, assets]
     returns = returns.loc[dates, assets]
 
     weights = to_weights(signal, demean=demean, gross=gross)
+    no_signal = signal.isna().all(axis=1)
+    if hold > 1:
+        rebalance = pd.Series(np.arange(len(dates)) % hold == 0, index=dates)
+        no_signal = no_signal.astype(float).where(rebalance).ffill().astype(bool)
+    if band > 0:
+        weights = band_book(weights, signal.isna(), band=band, hold=hold)
+    elif hold > 1:
+        weights = weights.where(rebalance, axis=0).ffill()
     positions = weights.shift(1)
 
     # Diff against a flat book, not against the NaN first row: otherwise the
     # turnover of building the first position is NaN and `.sum` counts it as 0.
-    turnover = positions.fillna(0.0).diff().abs().sum(axis=1)
+    trades = positions.fillna(0.0).diff().abs()
+    turnover = trades.sum(axis=1)
     gross_returns = (positions * returns).sum(axis=1)
-    costs = cost_bps / 10000.0 * turnover
+    if isinstance(cost_bps, pd.DataFrame):
+        rate = cost_bps.reindex(index=dates, columns=assets) / 10000.0
+        rate = rate.where(rate.notna(), rate.median(axis=1), axis=0)
+        # positions[t] - positions[t-1] was traded at date t-1's close.
+        charged = rate.shift(1)
+        # A date with no rate for any asset has no median either. `.sum` would
+        # read its trades as free, overstating net returns without a word, so
+        # refuse instead: a missing date, a table that ends early or an index
+        # of a different type (strings, not Timestamps) all land here.
+        unpriced = (trades > 0) & charged.isna()
+        if unpriced.to_numpy().any():
+            when = unpriced.any(axis=1)
+            first = when.idxmax()
+            raise ValueError(
+                f"cost_bps has no rate for trades on {int(when.sum())} date(s), the first "
+                f"made at the close before {first}: no asset has a rate that day, so there "
+                "is no median to fall back on. Fill the table (e.g. carry the last rate "
+                "forward) or check that its index matches the returns' dates."
+            )
+        costs = (trades * charged).sum(axis=1)
+    else:
+        costs = cost_bps / 10000.0 * turnover
     net_returns = gross_returns - costs
-    # Nothing is held on the first date: no return and no trade, rather than a
-    # zero that `summarize` would count as an observation.
-    net_returns.iloc[:1] = np.nan
-    turnover.iloc[:1] = np.nan
-    return net_returns, turnover
+    # A date whose position comes from no signal at all, and that trades
+    # nothing, is not a period with a return: NaN, rather than a zero that
+    # `summarize` would count as a flat day (#25). That covers the first date
+    # and any warm-up or gap where the signal row is entirely NaN. Idleness is
+    # decided from the signal, not the weights: a real signal with zero net
+    # weight (e.g. a timing overlay gone flat) is a genuine 0.0 day. The shift
+    # matches `positions`: the date-t position comes from the date t-1 signal.
+    # A date that only closes the book is kept, since its cost is real.
+    idle = no_signal.shift(1, fill_value=True) & (turnover == 0)
+    frame = pd.DataFrame(
+        {"net": net_returns, "gross": gross_returns, "cost": costs, "turnover": turnover}
+    )
+    frame.loc[idle] = np.nan
+    return frame
+
+
+def backtest_components(
+    signal: pd.DataFrame,
+    returns: pd.DataFrame,
+    *,
+    cost_bps: float | pd.DataFrame,
+    demean: bool,
+    gross: float,
+    hold: int = 1,
+) -> tuple[pd.Series, pd.Series]:
+    """Net returns and turnover for one signal: the core of `run_backtest`, `sweep`
+    and `candidate_returns` (`backtest_frame`'s `net` and `turnover`)."""
+    frame = backtest_frame(
+        signal, returns, cost_bps=cost_bps, demean=demean, gross=gross, hold=hold
+    )
+    return frame["net"], frame["turnover"]
 
 
 def run_backtest(
@@ -105,12 +232,34 @@ def run_backtest(
     Returns:
         Per-period strategy return series, net of costs. Positions are
         `to_weights(signal).shift(1)`, so the first observation is always
-        NaN (no prior signal to trade on).
+        NaN (no prior signal to trade on). So is every date whose prior
+        signal row is entirely NaN and that trades nothing, such as a
+        lookback's warm-up; a date that only closes the book carries its
+        cost. A real signal with zero net weight is a 0.0 day, not NaN.
     """
     net_returns, _turnover = backtest_components(
         signal, returns, cost_bps=cost_bps, demean=demean, gross=gross
     )
     return net_returns
+
+
+def sharpe_ratio(returns: pd.Series, periods_per_year: int) -> float:
+    """Annualised Sharpe ratio of a per-period return series.
+
+    The mean over the sample standard deviation (ddof=1) of the non-NaN
+    periods, times sqrt(periods_per_year). NaN when there is no variance (all
+    periods equal) or fewer than two periods. `summarize` uses it; anything
+    else that reports a backtest's Sharpe ratio should too, so the number has
+    one definition.
+    """
+    clean = returns.dropna()
+    sd = float(clean.std(ddof=1))
+    # A constant series can leave a rounding-error sd of about 1e-18, so test
+    # the spread itself, not only the sd.
+    if len(clean) < 2 or not clean.max() > clean.min() or not sd > 0:
+        return float("nan")
+    # Annualise the mean and the sd separately, as `summarize` reports them.
+    return float(clean.mean() * periods_per_year / (sd * np.sqrt(periods_per_year)))
 
 
 @dataclass
@@ -121,7 +270,8 @@ class BacktestSummary:
         n_obs: number of non-NaN periods used.
         mean: annualised mean return.
         vol: annualised return volatility.
-        sharpe: annualised mean / annualised vol; NaN if vol is 0.
+        sharpe: `sharpe_ratio`, the annualised mean over the annualised vol
+            (sample sd, ddof=1); NaN if the returns are constant.
         max_drawdown: peak-to-trough drawdown on cumulative returns, <= 0.
         hit_rate: share of strictly positive periods among non-NaN periods.
         turnover: mean per-period turnover, if supplied by the caller.
@@ -194,7 +344,6 @@ def summarize(
     periods = PERIODS_PER_YEAR[freq]
     mean = float(clean.mean() * periods)
     vol = float(clean.std() * np.sqrt(periods))
-    sharpe = mean / vol if vol != 0 else float("nan")
 
     cumulative = (1.0 + clean).cumprod()
     drawdown = cumulative / cumulative.cummax() - 1.0
@@ -206,7 +355,7 @@ def summarize(
         n_obs=n_obs,
         mean=mean,
         vol=vol,
-        sharpe=float(sharpe),
+        sharpe=sharpe_ratio(clean, periods),
         max_drawdown=max_drawdown,
         hit_rate=hit_rate,
         turnover=turnover,

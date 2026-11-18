@@ -62,6 +62,14 @@ Every correction depends on how many candidates were tried. That number comes
 from the run ledger (`capstone.runlog`), not from an argument someone typed:
 log every trial before looking at its result.
 
+**What counts as a trial:** every candidate whose performance anyone, or any
+agent, has seen. That includes parameter variants, candidates that were
+discarded, and every iteration inside an agent's search. An idea that never
+produced a performance number is not a trial. Counts accumulate across rounds
+of a search, because each round is chosen knowing the earlier results. The
+deflated Sharpe ratio needs this full count and the spread of Sharpe ratios
+across all of it (Bailey & López de Prado 2014).
+
 ## Graded evidence, not one yes/no
 
 A candidate is not "real" because one procedure said so. Every correction here
@@ -74,6 +82,7 @@ candidate real, and `evaluate.evidence_profile` puts them side by side:
 | `by` | false-discovery rate | any dependence |
 | `bh` | false-discovery rate | positive dependence: one-sided p-values of positively correlated candidates |
 | `q` (Storey) | estimated false-discovery rate | independent candidates only |
+| `lfdr` (Efron) | probability this candidate is null; 0.2 is the usual line | correlated candidates, 200 or more; answers "stands out from the rest" |
 
 Lower is stronger in every column. Feed it one-sided p-values
 (`sharpe_test(...).pvalue_greater`): only positive Sharpe ratios are
@@ -82,25 +91,111 @@ decide on `q` for correlated candidates; the share-of-nulls estimate behind it
 collapses when candidates move together, and it calls false discoveries more
 than twice as often as BH does (`tests/test_evaluate.py`).
 
+`lfdr` is the fix for that problem, with a change of question. It estimates the
+null from the bulk of the candidates (`evaluate.empirical_null`), so a shared
+factor moves the null along with them: all-null sets flag something as often at
+pairwise correlation 0.5 as at 0 (2-5% of sets at 200 candidates), and with
+planted signals under correlation it finds more of them than BH at 10% while
+keeping the false-discovery proportion under about 7%. But against an estimated
+null, "real" means **better than the other candidates**: an edge every candidate
+shares becomes part of the null. Use `bh` or `by` for "is the Sharpe above zero
+at all". On independent candidates `lfdr` is the more conservative of the two
+(for example, 0.19 against BH's 0.49 of signals found when 10% were real at
+shift 2.5). It is NaN below 200 candidates, where the null can't be estimated,
+which covers most single batches of 50-200.
+
+Strongly negative candidates suppress real positive ones: one density fit has
+to serve both tails, and five candidates at z = -4 cut the call rate of five
+planted at z = +4 from 0.80 to 0.19 (300 candidates). Keep one orientation per
+hypothesis rather than feeding a signal and its sign-flipped twin. A few extreme
+z-scores, such as a p-value of 0 from a leaky backtest, are kept out of the fit
+(though still scored), so they don't move anyone else's `lfdr`.
+
+Its role is a **graded score**, reported next to the gate, not a gate: the
+stage-1 gate stays BH-based unless calibration shows `lfdr` finds more real
+signals at our base rate. Feed it every candidate a search produced, or one
+search-adjusted p-value per hypothesis family, never only the winners: a null
+estimated from selected winners is shifted up, and real candidates then look
+ordinary.
+
 ## A staged funnel
 
-Strictness is spent where a mistake costs money, not at the first look. Loose
-early stages are safe only because later ones look at data the earlier ones
-never touched.
+Strictness is spent where a mistake costs money, not at the first look. A
+loose early stage is safe because the final stage tests the survivors on a
+holdout that nothing before it has seen. Stages 1–3 share the search period
+(#43); the holdout is what protects the end-to-end result.
 
-| Stage | Question | Strictness |
+| Stage | Question | Gate (proposed in [`validation/framework.md`](validation/framework.md)) |
 |---|---|---|
-| 1. Screen | Worth a closer look? | Loose and graded: `bh` or local FDR around 0.10-0.20 |
-| 2. Robustness | Does it survive other periods, lags, costs and cross-validation? Is the search overfit? | Medium |
-| 3. Incremental value | Does it add anything beyond known factors and signals already held? | Medium |
-| 4. Final decision | Allocate capital? | Strict: deflated or haircut Sharpe with the full ledger trial count, on a holdout looked at once |
+| 1. Screen | Worth a closer look? | BH across hypothesis families on each family's search-adjusted p-value |
+| 2. Robustness | Does it survive other lags, costs and sub-periods? Is the search overfit? | None: graded checks only |
+| 3. Incremental value | Does it add anything beyond known factors and signals already held? | Spanning alpha (not built yet) |
+| 4. Final decision | Allocate capital? | BH across the survivors' holdout p-values, the holdout looked at once |
 | 5. Incubation | Does it work live? | Small live or paper capital |
 
 Every stage's score and threshold is fixed before the candidates are scored.
 Choosing the procedure or threshold after seeing results is multiple testing
-of its own. Thresholds are tuned on simulated candidate sets to a chosen ratio
-of missed discoveries to false ones (Harvey & Liu 2020), not left at textbook
-defaults.
+of its own. Thresholds are set by simulating the whole pipeline on candidate
+sets with known truth, to a flat 10% end-to-end false-discovery rate (#50,
+Q5), not left at textbook defaults. `validation/framework.md` gives each
+method its role and records the thresholds and the evidence for them.
+
+## Decisions the stages depend on
+
+Proposed 2026-09-29; holdout dates fixed 2026-10-05. These are fixed before any
+agent generates candidates; changing one later means re-running every candidate
+scored under the old one.
+
+**Holdout period.** Language models can reproduce market history from before
+their training cutoff, even when told not to (Glasserman & Lin 2023; Sarkar &
+Vafa 2024). A holdout guards against search overfitting but not against the
+model's memory of the period it covers.
+
+The agents run on Claude Opus 5 (`claude-opus-5`, a pinned snapshot; training
+cutoff May 2026; set in `config/factors.toml`). The data is CRSP from
+1990-01-02 to 2025-12-31, and no new data is coming while this is built, so
+all of it predates the cutoff. The split (decided 2026-10-05):
+
+| Period | Dates | Who sees it |
+|---|---|---|
+| Search | 1990-01-02 to 2020-12-31 | Agents and stages 1-3 |
+| Holdout | 2021-01-01 to 2025-12-31 | The final stage only, looked at once |
+
+Five years rather than three because at 95% confidence (normal returns) an
+annual Sharpe of 1.0 needs about 2.7 years to tell from zero, 0.75 about 4.8
+and 0.5 about 11: five years can confirm 0.75 and up, three only about 1 and
+up. Since the holdout predates the cutoff, the model may remember it: a
+candidate that passes is not established against memorisation, and results
+should say so. Changing the agents' model means deciding these dates again.
+
+**Trading costs.** Candidates are scored net of costs from stage 1, with gross
+returns reported alongside. Most published anomalies earn close to nothing
+after bid-ask costs (Chen & Velikov 2023), so screening gross returns spends
+the later stages on candidates that were never tradable. The cost model is an
+estimated effective spread from CRSP times turnover, fixed before scoring.
+
+**Stage 3 comparison set.**
+
+- *Known factors:* Fama–French five factors plus momentum, from Ken French's
+  library (`load_french`; the momentum file still needs adding).
+- *Known signals:* the Chen & Zimmermann open-source anomaly portfolios (over
+  200 published signals), plus any signal we already hold. An agent that has
+  read the literature tends to rediscover published anomalies, and those earn
+  about half as much after publication (McLean & Pontiff 2016). Adding value
+  beyond this set is the test of novelty.
+
+Stage 3's frequency is an open decision for its owner: the anomaly portfolios
+are monthly, while #75 proposes daily factors to match the candidate returns.
+α₃ is chosen and calibrated only once the frequency is settled.
+
+**Calibration range for the share of real candidates.** Start at 0 to 5% for
+agent-generated candidates. Harvey & Liu (2020) use up to 20% for a curated
+database of strategies already known to have worked, which is not our setting.
+Update the range as planted signals and the ledger's history give base rates.
+
+**Data.** Index membership as of each date, not today's members, and returns
+that include delisting returns (Shumway 1997). Either mistake biases every
+backtest upward, and no method in this document can correct it.
 
 ## What exists
 
@@ -109,13 +204,14 @@ defaults.
 | `synth`, `backtest` | `make_return_matrix`, `candidate_returns` | done |
 | `evaluate` | `sharpe_variance` / `sharpe_test` (normal, non-normal, autocorrelation-robust), PSR, MinTRL, implied independent trials | done |
 | `evaluate` | `holm`, `benjamini_yekutieli`, `estimate_pi0`, `storey_qvalues`; adjusted p-values and `evidence_profile`; one-sided `pvalue_greater` | done |
-| `evaluate` | local false-discovery rate and empirical null (Efron): a per-candidate probability of being real that allows for correlation | planned |
+| `evaluate` | `empirical_null`, `local_fdr` and `evidence_profile`'s `lfdr` column (Efron): empirical-null estimates and per-candidate null probabilities that allow for correlation | done |
 | `bootstrap` | stationary bootstrap, block-length selection | planned |
 | `snooping` | White's Reality Check, Romano–Wolf step-down | planned |
 | `cv` | purged k-fold with embargo (from the Alpha-GPT work), walk-forward | planned |
 | `pbo` | CSCV / probability of backtest overfitting | planned |
 | `spanning` | incremental value over known factors and accepted signals | planned |
 | `evaluate` | `haircut_sharpe`: Harvey–Liu haircut (their reference code), ledger trial count | done |
+| `search_fdr` | search-adjusted p-value for a hypothesis's best of K variants: block bootstrap of the family maximum (`bootstrap_family_pvalues`, from Carl's branch), or exact for independent or equicorrelated variants (`rho=`); search-adjusted FDR (López de Prado & Fabozzi 2026); max-of-mixture fit over assumed K, a sensitivity table, not a gate | done |
 | `gate` | staged, pre-registered scorecard; trial count from the ledger; holdout looked at once | planned |
 
 Already in `evaluate`: `benjamini_hochberg`, `bonferroni`,
