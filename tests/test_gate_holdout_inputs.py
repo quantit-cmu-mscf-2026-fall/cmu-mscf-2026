@@ -168,14 +168,20 @@ class TestTheAnswerIsChecked:
 
         self.refused(ledger, planted_market, late, ValueError, "outside the holdout")
 
-    def test_unordered_or_repeated_dates_are_refused(self, ledger, planted_market):
-        self.refused(
-            ledger,
-            planted_market,
+    @pytest.mark.parametrize(
+        "spoil",
+        [
+            # Repeated and out of order (the repeat is appended).
             lambda frame, ids: pd.concat([frame, frame.iloc[[0]]]),
-            ValueError,
-            "strictly increasing",
-        )
+            # Out of order only: every date once.
+            lambda frame, ids: frame.iloc[::-1],
+            # Repeated only: in order, a date twice. Dropping `is_unique` passes this.
+            lambda frame, ids: pd.concat([frame, frame.iloc[[0]]]).sort_index(kind="stable"),
+        ],
+        ids=["unordered-and-repeated", "unordered", "repeated"],
+    )
+    def test_unordered_or_repeated_dates_are_refused(self, ledger, planted_market, spoil):
+        self.refused(ledger, planted_market, spoil, ValueError, "strictly increasing")
 
     def test_infinite_returns_are_refused(self, ledger, planted_market):
         def spoil(frame, ids):
