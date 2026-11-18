@@ -990,3 +990,16 @@ def test_an_adopted_paper_without_a_score_is_queued_for_screening(tmp_path):
     assert cli.candidates(con, cfg, [], lambda *a: None) == [adopted]
     save(con, adopted, {"relevance": 4, "tags": []}, "m", 1)
     assert cli.candidates(con, cfg, [], lambda *a: None) == []
+
+
+def test_numbering_is_compared_in_title_order_and_pronouns_are_not_numerals():
+    base = "Lecture Notes in Empirical Asset Pricing"
+    long = "What I Learned from Twenty Years of Trading Cross-Sectional Momentum in Equity Markets"
+    for a, b in [
+        (f"{base}, Volume 2, Part I", f"{base}, Volume 1, Part II"),
+        (long, f"{long}, Part 1"),
+        ("Chapter 2, Part I", "Chapter 1, Part II"),
+    ]:
+        one, two = Paper(title=a), Paper(title=b)
+        assert len(dedupe.dedupe_batch([one, two])) == 2, (a, b)
+        assert dedupe.match_db(two, [(one.key, one.title_norm, None, None)]) is None, (a, b)

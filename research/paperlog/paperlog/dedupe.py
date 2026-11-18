@@ -32,12 +32,24 @@ def _ids_conflict(a: Paper, b: Paper) -> bool:
     return False
 
 
-def _numbering(title_norm: str) -> set[int]:
-    """The numbers and roman numerals in a normalised title ("... part ii", "... 2"),
-    as integers, so "part i"/"part 1", "3,000"/"3000", "s&p 500"/"s&p500" and
-    "covid-19"/"covid19" agree."""
+_MARKER_NUMBER = re.compile(
+    r"\b(?:parts?|vol|volume|chapter|book|section|lecture)\s+(?P<roman>[ivx]+)\b|(?P<digits>\d+)"
+)
+
+
+def _numbering(title_norm: str) -> list[int]:
+    """The numbers in a normalised title, in title order ("... part ii", "... 2"), so
+    "part i"/"part 1", "3,000"/"3000", "s&p 500"/"s&p500" and "covid-19"/"covid19"
+    agree but "volume 2, part i" and "volume 1, part ii" do not. A roman numeral counts
+    only after a marker word (part, volume, chapter, ...); elsewhere "I" is a pronoun."""
     t = re.sub(r"(?<=\d) (?=\d{3}\b)", "", title_norm)  # "3,000" normalises to "3 000"
-    return {int(n) for n in re.findall(r"\d+", t)} | {_ROMAN[w] for w in t.split() if w in _ROMAN}
+    out = []
+    for m in _MARKER_NUMBER.finditer(t):
+        if m["digits"]:
+            out.append(int(m["digits"]))
+        elif m["roman"] in _ROMAN:
+            out.append(_ROMAN[m["roman"]])
+    return out
 
 
 def _same_numbering(a: str, b: str) -> bool:
