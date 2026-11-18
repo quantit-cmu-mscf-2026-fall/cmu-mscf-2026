@@ -53,6 +53,19 @@ def run(repo, *args):
     return done.stdout.strip()
 
 
+def run_hash(repo, text_path):
+    # a blob holding the link target, as git stores a symlink
+    done = subprocess.run(
+        ["git", "hash-object", "-w", "--stdin"],
+        cwd=repo,
+        input=text_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return done.stdout.strip()
+
+
 @pytest.fixture
 def repo(tmp_path):
     path = tmp_path / "repo"
@@ -72,7 +85,9 @@ def test_stamp_names_the_commit_and_hashes_every_file(repo, tmp_path):
     result = module.export(tmp_path / "out" / "r.tar.gz", repo=repo)
     assert result["commit"] == sha and result["tag"] is None and result["files"] == 2
     with tarfile.open(tmp_path / "out" / "r.tar.gz") as tar:
-        tar.extractall(tmp_path / "x", filter="data")
+        # the filter argument needs Python 3.11.4+; requires-python allows 3.11.0
+        kwargs = {"filter": "data"} if hasattr(tarfile, "data_filter") else {}
+        tar.extractall(tmp_path / "x", **kwargs)
     (tree,) = (tmp_path / "x").iterdir()
     assert tree.name == f"cmu-mscf-2026-{sha[:12]}"
     stamp = json.loads((tree / "RELEASE").read_text(encoding="utf-8"))
@@ -83,6 +98,18 @@ def test_stamp_names_the_commit_and_hashes_every_file(repo, tmp_path):
     }
     assert not (tree / ".git").exists()
     assert str(tmp_path) not in (tree / "RELEASE").read_text(encoding="utf-8")
+
+
+def test_a_symlink_is_recorded_with_its_target(repo, tmp_path):
+    run(repo, "update-index", "--add", "--cacheinfo", "120000," + run_hash(repo, "a.txt") + ",link")
+    run(repo, "commit", "-q", "-m", "link")
+    module = load()
+    module.export(tmp_path / "r.tar.gz", repo=repo)
+    with tarfile.open(tmp_path / "r.tar.gz") as tar:
+        release = next(m for m in tar if m.name.endswith("/RELEASE"))
+        stamp = json.loads(tar.extractfile(release).read())
+    assert stamp["files"]["link"] == "symlink:a.txt"
+    assert stamp["files"]["a.txt"] == hashlib.sha256(b"alpha\n").hexdigest()
 
 
 def test_an_exact_match_tag_is_recorded(repo, tmp_path):

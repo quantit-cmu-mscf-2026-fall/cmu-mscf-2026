@@ -4,10 +4,11 @@
 
 The archive is `git archive <commit>` (so .gitattributes line endings apply) under the
 prefix `cmu-mscf-2026-<sha12>/`, plus `RELEASE`: `{commit, tag, date, files}` with the
-exact-match tag (or null), the commit date and the sha256 of every exported file. An
-extracted tree has no .git; the stamp is what names its commit and lets a reader detect
-that an exported file changed. Archive bytes depend only on the commit (gzip mtime 0,
-member times from git). The script only reads the repository and writes `--out`: it
+exact-match tag (or null), the commit date and the sha256 of every exported regular file
+(a symlink is recorded as `symlink:<target>`). An extracted tree has no .git; the stamp is
+what names its commit and lets a reader detect that an exported file changed.
+Archive bytes depend only on the commit (gzip mtime 0, member times from git).
+The script only reads the repository and writes `--out`: it
 pushes, uploads and registers nothing, and the stamp holds no local paths.
 """
 
@@ -50,8 +51,11 @@ def export(out, commit="HEAD", repo=REPO):
     with tarfile.open(fileobj=io.BytesIO(raw)) as source:
         members = [(m, source.extractfile(m).read() if m.isfile() else None) for m in source]
     for member, data in members:
+        name = member.name.removeprefix(prefix)
         if data is not None:
-            files[member.name.removeprefix(prefix)] = hashlib.sha256(data).hexdigest()
+            files[name] = hashlib.sha256(data).hexdigest()
+        elif member.issym():
+            files[name] = f"symlink:{member.linkname}"
     stamp = {"commit": sha, "tag": tag, "date": date, "files": files}
     text = (json.dumps(stamp, indent=2, sort_keys=True) + "\n").encode("utf-8")
     info = tarfile.TarInfo(prefix + "RELEASE")
