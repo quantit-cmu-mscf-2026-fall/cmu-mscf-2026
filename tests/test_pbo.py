@@ -318,6 +318,20 @@ class TestGuardrails:
         result = cscv(matrix, n_blocks=8)
         assert result["n_obs_used"] <= len(matrix) - 2
 
+    def test_inf_returns_are_refused(self):
+        matrix = pd.DataFrame(np.random.default_rng(0).normal(0, 0.01, (800, 5)))
+        matrix.iloc[10, 1] = np.inf
+
+        with pytest.raises(ValueError, match="inf"):
+            cscv(matrix, n_blocks=10)
+
+    def test_rows_out_of_time_order_are_refused(self):
+        dates = pd.bdate_range("2020-01-01", periods=800)
+        matrix = pd.DataFrame(np.random.default_rng(0).normal(0, 0.01, (800, 5)), index=dates)
+
+        with pytest.raises(ValueError, match="time order"):
+            cscv(matrix.sample(frac=1, random_state=1), n_blocks=10)
+
 
 class TestMedianTiesAndUnusableSplits:
     """A rank exactly ON the OOS median is not evidence of "no overfitting".
@@ -439,6 +453,20 @@ class TestMedianTiesAndUnusableSplits:
         assert "cash" not in set(result["winner_columns"])
         assert result["n_splits_used"] == result["n_splits"]
         assert np.all(np.abs(result["winner_is_sharpe"]) < 100)
+
+    def test_a_winner_idle_out_of_sample_is_flat_not_a_zero_sharpe(self):
+        # A candidate that earns early and is exactly 0.0 later: when its OOS
+        # half is all zeros it must be flat (NaN), never a finite Sharpe of 0.0
+        # that would rank it above the other flat candidates.
+        for seed in range(100):
+            rng = np.random.default_rng(seed)
+            matrix = pd.DataFrame(rng.normal(0, 0.01, (800, 10)))
+            matrix.iloc[:400, 0] += 0.003
+            matrix.iloc[400:, 0] = 0.0
+
+            result = cscv(matrix, n_blocks=8)
+
+            assert not (result["winner_oos_sharpe"] == 0.0).any(), seed
 
 
 # REVIEW.md item 3: null calibration and power on `synth.make_return_matrix`,

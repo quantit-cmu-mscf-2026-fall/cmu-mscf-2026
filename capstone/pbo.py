@@ -167,7 +167,8 @@ def cscv(
                 actually evaluated, after dropping incomplete rows and trimming.
 
     Raises:
-        ValueError: if `n_blocks` is odd, below 2, above 24, exceeds the usable
+        ValueError: if the rows are not in time order or hold an inf; if
+            `n_blocks` is odd, below 2, above 24, exceeds the usable
             row count, or leaves fewer than 2 observations per side; or if fewer
             than 2 strategies are supplied, since a lone strategy always ranks
             first against itself and PBO would be vacuously 0.
@@ -180,7 +181,11 @@ def cscv(
             "splits; use fewer blocks"
         )
 
+    if not returns_matrix.index.is_monotonic_increasing:
+        raise ValueError("returns_matrix rows must be in time order")
     clean = returns_matrix.dropna(how="any")
+    if not np.isfinite(clean.to_numpy(dtype=float)).all():
+        raise ValueError("returns_matrix contains inf")
     n_obs_total, n_strategies = clean.shape
     if n_strategies < 2:
         raise ValueError("CSCV needs at least 2 strategies; a single column always ranks first")
@@ -203,8 +208,6 @@ def cscv(
     blocks = values.reshape(n_blocks, block_size, n_strategies)
     block_total = blocks.sum(axis=1)
     block_total_sq = np.square(blocks).sum(axis=1)
-    grand_total = block_total.sum(axis=0)
-    grand_total_sq = block_total_sq.sum(axis=0)
 
     ranks: list[np.ndarray] = []
     is_sharpes: list[np.ndarray] = []
@@ -214,10 +217,11 @@ def cscv(
     for is_mask in _chunked_masks(n_blocks, _COMBO_CHUNK):
         is_total = is_mask @ block_total
         is_total_sq = is_mask @ block_total_sq
-        # The complement is the rest of the sample, so it comes from a
-        # subtraction rather than a second matrix product.
-        oos_total = grand_total - is_total
-        oos_total_sq = grand_total_sq - is_total_sq
+        # Its own product, not grand - is: the subtraction leaves rounding
+        # residue on an all-zero OOS half, which then reads as a finite Sharpe.
+        oos_mask = 1.0 - is_mask
+        oos_total = oos_mask @ block_total
+        oos_total_sq = oos_mask @ block_total_sq
 
         is_sharpe = _sharpe_from_moments(is_total, is_total_sq, n_side, periods_per_year)
         oos_sharpe = _sharpe_from_moments(oos_total, oos_total_sq, n_side, periods_per_year)
