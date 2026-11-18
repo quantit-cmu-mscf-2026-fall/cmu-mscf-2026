@@ -227,7 +227,7 @@ class TestMissingHoldout:
         assert card.loc[family, "s3_pass"]  # it survived the screen
         assert not card.loc[family, "s4_pass"] and not card.loc[family, "accepted"]
         assert np.isnan(card.loc[family, "s4_stat"])
-        assert np.isnan(card.loc[family, ["ho_sharpe", "ho_p", "ho_mean"]]).all()
+        assert card.loc[family, ["ho_sharpe", "ho_p", "ho_mean"]].astype(float).isna().all()
         others = [f for f in baseline.accepted if f != family]
         assert set(result.accepted) >= set(others) - {family}
         assert family not in result.accepted
