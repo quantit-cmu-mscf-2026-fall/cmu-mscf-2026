@@ -68,13 +68,14 @@ yes; a candidate strong only under `q` is not a discovery.
 | 5 Incubation | Works live? | small paper capital |
 
 Until the funnel is calibrated and shown to beat it, **the baseline decides** (Q5 in
-`framework.md`): BH at the registered level on each family's bootstrap p-value (10% in
-`framework.md` at the time of writing; re-read it, since values are registered there). The
-funnel replaces the baseline only once it beats it.
+`framework.md`): BH on each family's bootstrap p-value, at the level registered for the
+generator. For crsp-v1 that is **BH at 5%** (`scripts/gate_crsp_v1.json`, `decision_rule`);
+10% was found too loose for this generator. Other generators use the level `framework.md`
+registers for them. The funnel replaces the baseline only once it beats it.
 
 Threshold values come from `capstone.calibration` simulations of the real generator and are
-registered in `docs/validation/framework.md` before scoring; none were registered when this
-was written. The defaults in code (`Thresholds()`, `run_baseline`) are not registered, and
+registered in `docs/validation/framework.md` before scoring (crsp-v1: "Registered
+thresholds: crsp-v1", and `scripts/gate_crsp_v1.json`). The defaults in code (`Thresholds()`, `run_baseline`) are not registered, and
 both default to `stage1="rho"`, the formula p-value. For real candidates stage 1 must pass
 `stage1="bootstrap"`. Tag the ledger entry with the stage (`stage:screen`, ...).
 
