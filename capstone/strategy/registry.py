@@ -25,8 +25,11 @@ defaults. Rules:
   `lifecycle_entry_rewrite_pending:<id>`, completed by the same call again.
   Retired is terminal. Rollback is a revert of the registry commit, which takes
   an entry and its events back together.
-- These events only RECORD a state a person confirmed. Nothing in this module
-  decides to suspend or retire a strategy.
+- `promote` turns an active "incubation-only" entry into a "deploy" one only on a
+  confirm record whose confirming e-value reached 1/alpha (`check_confirm_record`);
+  the record is kept in the `role` event.
+- These events only RECORD a state or role a person confirmed. Nothing in this
+  module decides to suspend, retire or promote a strategy.
 
 The project has no YAML dependency, so this module reads and writes the
 registry's own narrow schema: a header of comments, then `strategies: []` or
@@ -38,6 +41,7 @@ guessed at.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal, get_args
@@ -213,7 +217,8 @@ REGISTERED_EVENT = frozenset(
     {"prev_hash", "field", "id", "role", "state", "module", "version", "reviewer", "at"}
 )
 STATE_EVENT = frozenset({"prev_hash", "field", "id", "from", "to", "reason", "reviewer", "at"})
-EVENT_KEYS = {"registered": REGISTERED_EVENT, "state": STATE_EVENT}
+ROLE_EVENT = STATE_EVENT | {"confirm_record"}
+EVENT_KEYS = {"registered": REGISTERED_EVENT, "state": STATE_EVENT, "role": ROLE_EVENT}
 PENDING = "lifecycle_entry_rewrite_pending"
 
 
@@ -223,8 +228,8 @@ def _refused(message: str) -> ValueError:
 
 class LifecycleRewritePending(ValueError):
     """The last event is written and its entry not yet (a crash between the two
-    writes). Recoverable: the same `set_state` call again rewrites the entry
-    without a second event. Until then reads refuse."""
+    writes). Recoverable: the same `set_state`/`promote` call again rewrites the
+    entry without a second event. Until then reads refuse."""
 
     def __init__(self, event: dict[str, Any]):
         self.strategy_id = event["id"]
@@ -235,6 +240,44 @@ class LifecycleRewritePending(ValueError):
         )
 
 
+def check_confirm_record(record: Any, strategy_id: str):
+    """The `ConfirmState` of a promotion record `{"strategy_id": ...,
+    "confirm_state": ConfirmState.to_dict()}` that promotes `strategy_id`
+    (the confirming e-value reached 1/alpha); else refused."""
+    from capstone.incubation.confirm import ConfirmState
+
+    if not isinstance(record, Mapping) or set(record) != {"strategy_id", "confirm_state"}:
+        raise ValueError(
+            'a promotion needs a confirm record {"strategy_id", "confirm_state": '
+            "ConfirmState.to_dict()}"
+        )
+    if record["strategy_id"] != strategy_id:
+        raise ValueError(f"the confirm record is for {record['strategy_id']!r}, not {strategy_id}")
+    try:
+        state = ConfirmState.from_dict(record["confirm_state"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"the confirm record is not a serialized ConfirmState: {exc}") from exc
+    from capstone.incubate import IncubationSettings
+
+    policy = IncubationSettings().confirm_alpha
+    if state.config.alpha > policy:
+        raise ValueError(
+            f"the confirm record runs at alpha {state.config.alpha:.4g}; "
+            f"promotion needs alpha <= {policy:.4g}"
+        )
+    if state.n_obs < 1:
+        raise ValueError(f"the confirm record for {strategy_id} has no observations")
+    threshold = 1 / state.config.alpha
+    if not (
+        state.decision == "promote" and state.reason == "confirmed" and state.e_value >= threshold
+    ):
+        raise ValueError(
+            f"the confirm record does not promote {strategy_id}: decision {state.decision!r}, "
+            f"e-value {state.e_value:.4g} vs 1/alpha {threshold:.4g}"
+        )
+    return state
+
+
 def _event(n: int, line: str) -> dict[str, Any]:
     try:
         event = json.loads(line)
@@ -243,8 +286,12 @@ def _event(n: int, line: str) -> dict[str, Any]:
     if not isinstance(event, dict) or canonical(event) != line:
         raise _refused(f"line {n} is not a canonical JSON event")
     keys = EVENT_KEYS.get(event.get("field"))
-    if keys is None or set(event) != keys or not all(isinstance(v, str) for v in event.values()):
-        raise _refused(f"line {n} is not a registered or state event")
+    if (
+        keys is None
+        or set(event) != keys
+        or not all(isinstance(v, str) for k, v in event.items() if k != "confirm_record")
+    ):
+        raise _refused(f"line {n} is not a registered, state or role event")
     if event["field"] == "registered":  # a caller may record no time
         required = ("id",)
     else:
@@ -254,14 +301,16 @@ def _event(n: int, line: str) -> dict[str, Any]:
     return event
 
 
-def _replay(events) -> tuple[dict[str, str], dict[str, dict]]:
-    """(state, registered event) after `events`; refuses an impossible sequence."""
+def _replay(events) -> tuple[dict[str, str], dict[str, dict], set[str]]:
+    """(state, registered event, promoted ids) after `events`; refuses an
+    impossible sequence."""
     states: dict[str, str] = {}
     registered: dict[str, dict] = {}
+    promoted: set[str] = set()
     for n, event in enumerate(events, start=1):
         sid, field = event["id"], event["field"]
         if field == "registered":
-            if sid in registered or sid in states:
+            if sid in registered or sid in states or sid in promoted:
                 raise _refused(f"line {n}: {sid} is registered after events of its own")
             if (
                 event["state"] != "active"
@@ -270,25 +319,41 @@ def _replay(events) -> tuple[dict[str, str], dict[str, dict]]:
             ):
                 raise _refused(f"line {n}: not a valid registration")
             registered[sid] = event
-        else:
+        elif field == "state":
             if event["from"] != states.get(sid, "active"):
                 raise _refused(f"line {n}: {sid} was not {event['from']}")
             if (event["from"], event["to"]) not in TRANSITIONS:
                 raise _refused(f"line {n}: {event['from']} -> {event['to']} is not allowed")
             states[sid] = event["to"]
-    return states, registered
+        else:
+            first_role = registered[sid]["role"] if sid in registered else INCUBATION_ONLY
+            if (
+                (event["from"], event["to"]) != (INCUBATION_ONLY, "deploy")
+                or first_role != INCUBATION_ONLY
+                or sid in promoted
+            ):
+                raise _refused(f"line {n}: a role event is one incubation-only -> deploy")
+            if states.get(sid, "active") != "active":
+                raise _refused(f"line {n}: {sid} is {states[sid]}; only an active one is promoted")
+            try:
+                check_confirm_record(event["confirm_record"], sid)
+            except ValueError as exc:
+                raise _refused(f"line {n}: {exc}") from exc
+            promoted.add(sid)
+    return states, registered, promoted
 
 
 def _mismatches(entries, model) -> dict[str, str]:
     """Each strategy whose entry is not where the events leave it, and why."""
-    states, registered = model
+    states, registered, promoted = model
     bad: dict[str, str] = {}
     for entry in entries:
         reg = registered.get(entry.id)
         if reg is not None and (entry.module, entry.version) != (reg["module"], reg["version"]):
             bad[entry.id] = "has a module or version its registered event does not"
-        if reg is not None and entry.role != reg["role"]:
-            bad[entry.id] = f"says role {entry.role!r} but its events leave {reg['role']!r}"
+        role = "deploy" if entry.id in promoted else reg["role"] if reg else None
+        if role is not None and entry.role != role:
+            bad[entry.id] = f"says role {entry.role!r} but its events leave {role!r}"
         state = states.get(entry.id, "active")
         if entry.state != state:
             bad[entry.id] = (
@@ -401,3 +466,30 @@ def set_state(
         "at": at,
     }
     return _commit(root, event, replace(entry, state=state))
+
+
+def promote(
+    root: Path, strategy_id: str, *, confirm_record: Mapping, reviewer: str, at: str
+) -> RegistryEntry:
+    """Turn an active incubation-only entry into a deploy entry, only on a
+    confirm record that promotes it (`check_confirm_record`); the record is
+    kept in the lifecycle event. `enabled` is untouched."""
+    entry = _entry(root, strategy_id, reviewer, at)
+    if entry.role != INCUBATION_ONLY:
+        raise ValueError(
+            f"only an incubation-only entry is promoted; {strategy_id} is {entry.role}"
+        )
+    if entry.state != "active":
+        raise ValueError(f"strategy {strategy_id} is {entry.state}; only an active one is promoted")
+    check_confirm_record(confirm_record, strategy_id)
+    event = {
+        "field": "role",
+        "id": strategy_id,
+        "from": INCUBATION_ONLY,
+        "to": "deploy",
+        "reason": "confirmed",
+        "reviewer": reviewer,
+        "at": at,
+        "confirm_record": json.loads(canonical(dict(confirm_record))),
+    }
+    return _commit(root, event, replace(entry, role="deploy"))
