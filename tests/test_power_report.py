@@ -11,7 +11,8 @@ detectable Sharpe per stage, and the scorecard header carries it.
 - the header round-trips through the report, and a report written before the
   field existed still reads back (no power);
 - the script is deterministic for its seed and logs one ledger entry before
-  printing.
+  printing;
+- it simulates the registered config's thresholds and draws, and logs its hash.
 
 Synthetic data only (every date is before 2021); temporary ledgers.
 """
@@ -217,10 +218,30 @@ PARAMS = {
 }
 
 
-def run_script(tmp_path, monkeypatch, capsys, *, params=PARAMS, argv=("--quick",)):
+CONFIG = GateConfig(
+    search_end="2000-12-31",
+    holdout_start="2001-01-01",
+    holdout_end="2002-12-31",
+    data_version="synthetic",
+    generator="test-gen",
+    thresholds=Thresholds(q1=0.2, stage1="bootstrap", q4=0.4),
+    n_boot=99,  # n_boot + 1 >= 20 x 4 families at q = 0.05
+)
+
+
+def run_script(
+    tmp_path, monkeypatch, capsys, *, params=PARAMS, argv=("--quick",), config=CONFIG, use_flag=True
+):
     path = tmp_path / "params.json"
     path.write_text(json.dumps(params))
-    monkeypatch.setattr(sys, "argv", ["power_analysis.py", *argv, "--params", str(path)])
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({"gate_config": config.to_dict()}))
+    args = ["power_analysis.py", *argv, "--params", str(path)]
+    if use_flag:
+        args += ["--config", str(config_path)]
+    else:  # the default path, pointed at the test's file
+        monkeypatch.setattr(script, "CONFIG", config_path)
+    monkeypatch.setattr(sys, "argv", args)
     script.main()
     return capsys.readouterr().out
 
@@ -232,6 +253,41 @@ class TestScript:
         assert list(p["sharpe_grid"]) == sorted(p["sharpe_grid"])
         assert p["n_trials"] >= sum(p["variants"])
         assert p["within_corr"] >= p["across_corr"]
+        assert "thresholds" not in p and "n_boot" not in p  # these come from the config
+
+    def test_the_default_config_is_the_registered_crsp_v1_one(self):
+        assert script.CONFIG == SCRIPT.parent / "gate_crsp_v1.json"
+        registered = json.loads(script.CONFIG.read_text())["gate_config"]
+        config = GateConfig.from_dict(registered)
+        assert config.thresholds.stage1 == "bootstrap" and config.n_boot == 1999
+        p = json.loads(script.PARAMS.read_text())
+        power.PowerSpec.from_years(  # the shipped shape is a valid spec under the registered bar
+            search_years=p["search_years"],
+            holdout_years=p["holdout_years"],
+            variants=p["variants"],
+            within_corr=p["within_corr"],
+            across_corr=p["across_corr"],
+            n_trials=p["n_trials"],
+            n_boot=config.n_boot,
+            thresholds=config.thresholds,
+        )
+
+    @pytest.mark.parametrize("use_flag", [True, False], ids=["--config", "default"])
+    def test_it_simulates_the_registered_config_and_logs_its_hash(
+        self, tmp_path, ledger, monkeypatch, capsys, use_flag
+    ):
+        out = run_script(tmp_path, monkeypatch, capsys, use_flag=use_flag)
+        (entry,) = runlog.read_entries()
+        assert entry["params"]["config_hash"] == CONFIG.config_hash
+        assert entry["params"]["thresholds"]["q1"] == 0.2
+        assert entry["params"]["thresholds"]["q4"] == 0.4
+        assert entry["params"]["n_boot"] == CONFIG.n_boot == 99
+        assert "n_boot 99" in out
+
+    def test_thresholds_in_the_shape_file_are_refused(self, tmp_path, ledger, monkeypatch, capsys):
+        with pytest.raises(SystemExit, match="thresholds"):
+            run_script(tmp_path, monkeypatch, capsys, params={**PARAMS, "thresholds": {"q4": 0.3}})
+        assert not (ledger / "runs.jsonl").exists()
 
     def test_it_logs_one_entry_before_printing_and_prints_each_stage(
         self, tmp_path, ledger, monkeypatch, capsys
@@ -249,6 +305,20 @@ class TestScript:
             assert f"{stage}_null_rate" in entry["metrics"]
         assert "MDS 50%" in out and "power by true Sharpe" in out
 
+    def test_it_logs_before_it_prints_anything(self, tmp_path, ledger, monkeypatch, capsys):
+        events = []
+        real_log = script.log_run
+
+        def log(*args, **kwargs):
+            events.append("log")
+            return real_log(*args, **kwargs)
+
+        monkeypatch.setattr(script, "log_run", log)
+        monkeypatch.setattr(script, "print", lambda *a, **k: events.append("print"), raising=False)
+        run_script(tmp_path, monkeypatch, capsys)
+        assert events[0] == "log" and events.count("log") == 1
+        assert events.count("print") > 1
+
     def test_it_is_deterministic_for_its_seed(self, tmp_path, ledger, monkeypatch, capsys):
         run_script(tmp_path, monkeypatch, capsys)
         run_script(tmp_path, monkeypatch, capsys)
@@ -256,13 +326,6 @@ class TestScript:
         a = {k: v for k, v in first["metrics"].items() if k != "seconds"}
         b = {k: v for k, v in second["metrics"].items() if k != "seconds"}
         assert a == b
-
-    def test_the_gates_own_bootstrap_floor_sets_the_draws(
-        self, tmp_path, ledger, monkeypatch, capsys
-    ):
-        run_script(tmp_path, monkeypatch, capsys)
-        (entry,) = runlog.read_entries()
-        assert entry["params"]["n_boot"] == 4 * 20 - 1  # families / 0.05, minus 1
 
     def test_the_curve_rises_with_the_true_sharpe(self, tmp_path, ledger, monkeypatch, capsys):
         out = run_script(
