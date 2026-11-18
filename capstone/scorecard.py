@@ -140,8 +140,8 @@ class DecisionRule:
     p-values, nothing else. `rule="funnel"`: every funnel stage passes, at the
     config's thresholds (`q` is None). The other one is still reported, as
     `funnel_pass` or the stage columns. The rule is fixed in the registered
-    file (`scripts/gate_crsp_v1.json`, `decision_rule`); `GateConfig`'s hash
-    covers the funnel only, so the look entry records the rule used.
+    file (`scripts/gate_crsp_v1.json`, `decision_rule`); It is a hashed
+    field of `GateConfig`, and the look entry records the rule used.
     """
 
     rule: str

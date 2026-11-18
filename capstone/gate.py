@@ -51,9 +51,9 @@ their own name.
    A survivor with no holdout returns fails stage 4.
 4. **Graded scores never decide.** `grading` computes them from the search
    period; nothing reads them back.
-5. **The decision rule decides `accepted`.** `run_gate` takes a `DecisionRule`
-   (no default; `load_registered` reads the registered one): the baseline is
-   BH at its q on the stage-1 bootstrap p-values, the funnel is every stage
+5. **The decision rule decides `accepted`.** The config carries a `DecisionRule`
+   (a hashed field; `load_registered` reads the registered one): the baseline
+   is BH at its q on the stage-1 bootstrap p-values, the funnel is every stage
    passing. The funnel's verdict stays on the card as `funnel_pass` either way.
 6. **Stage 3 is not measured yet:** it passes stage 2's survivors through and
    the scorecard says so (`s3_measured` False). A config that registers a
@@ -183,9 +183,13 @@ class GateConfig:
     the market on many days (NaN is a missing return, never a zero), so
     demanding every day would fail honest, selective strategies. And
     business days overstate a trading calendar by about 3.5% (holidays), so a
-    bar at half leaves room for that. It is in the hashed config, so
-    changing it re-registers the gate. At least 2 returns are always needed
-    (`funnel.MIN_PERIOD_OBS`).
+    bar at half leaves room for that. It is a guard, not a calibrated value.
+    It is in the hashed config, so changing it re-registers the gate. At
+    least 2 returns are always needed (`funnel.MIN_PERIOD_OBS`).
+
+    `decision_rule` is which column decides `accepted` (the baseline, BH at
+    its q on the bootstrap family p-values, or the funnel). It is in the
+    hashed config, so changing the rule or its q re-registers the gate.
 
     `seed` and `n_boot` are integers (NumPy integers are stored as ints; a
     float or bool is refused, so a fractional value can't hash like its
@@ -204,6 +208,7 @@ class GateConfig:
     trial_scope: TrialScope = field(default_factory=TrialScope)
     factors_digest: str | None = None
     min_holdout_coverage: float = DEFAULT_MIN_HOLDOUT_COVERAGE
+    decision_rule: DecisionRule = field(default_factory=lambda: DecisionRule("funnel"))
 
     def __post_init__(self) -> None:
         dates = {}
@@ -234,6 +239,10 @@ class GateConfig:
         if not 0.0 < float(coverage) <= 1.0:
             raise ValueError(f"min_holdout_coverage must be in (0, 1], got {coverage!r}")
         object.__setattr__(self, "min_holdout_coverage", float(coverage))
+        if not isinstance(self.decision_rule, DecisionRule):
+            raise TypeError(
+                f"decision_rule must be a DecisionRule, not {type(self.decision_rule).__name__}"
+            )
         object.__setattr__(self, "trial_scope", _canonical_scope(self.trial_scope))
         if self.n_boot < 0 or (self.thresholds.stage1 == "bootstrap" and self.n_boot == 0):
             raise ValueError("n_boot must be positive for the bootstrap stage-1 gate")
@@ -264,6 +273,11 @@ class GateConfig:
             },
             "factors_digest": self.factors_digest,
             "min_holdout_coverage": self.min_holdout_coverage,
+            "decision_rule": {
+                "rule": self.decision_rule.rule,
+                "q": self.decision_rule.q,
+                "method": self.decision_rule.method,
+            },
         }
 
     @classmethod
@@ -271,6 +285,8 @@ class GateConfig:
         data = dict(data)
         data["thresholds"] = Thresholds(**data["thresholds"])
         data["trial_scope"] = TrialScope(**data["trial_scope"])
+        if "decision_rule" in data:
+            data["decision_rule"] = DecisionRule.from_dict(data["decision_rule"])
         return cls(**data)
 
     @property
@@ -331,14 +347,14 @@ def required_n_boot(n_families: int, q: float = 0.05) -> int:
     return int(np.ceil(n_families / q)) - 1
 
 
-def load_registered(path: str | Path) -> tuple[GateConfig, DecisionRule]:
-    """A registered file's config and decision rule (`scripts/gate_crsp_v1.json`).
+def load_registered(path: str | Path) -> GateConfig:
+    """A registered file's config (`scripts/gate_crsp_v1.json`).
 
-    The file holds `gate_config` (what `register` hashes) and `decision_rule`
-    (which column decides `accepted`); the gate run takes both from it.
+    The file's `gate_config` is what `register` hashes, including its
+    `decision_rule` (which column decides `accepted`).
     """
     data = json.loads(Path(path).read_text(encoding="utf-8"))
-    return GateConfig.from_dict(data["gate_config"]), DecisionRule.from_dict(data["decision_rule"])
+    return GateConfig.from_dict(data["gate_config"])
 
 
 def _checked_family(returns: pd.DataFrame, family: pd.Series) -> pd.Series:
@@ -436,7 +452,6 @@ def run_gate(
     *,
     holdout: HoldoutProvider,
     authorizer: str,
-    decision_rule: DecisionRule,
 ) -> GateResult:
     """Run the registered gate once.
 
@@ -451,11 +466,11 @@ def run_gate(
             called when nothing reaches stage 4.
         authorizer: who authorises the look at the holdout; required, recorded
             in the look entry.
-        decision_rule: which column decides `accepted`; required, no default
-            (`load_registered` reads the registered one). The baseline is BH
-            on the stage-1 bootstrap p-values at its q; the funnel is every
-            stage passing. The other is reported (`funnel_pass`, the stage
-            columns). Recorded in the look entry and the header.
+        (The config's `decision_rule` decides `accepted`: the baseline is BH
+        on the stage-1 bootstrap p-values at its q; the funnel is every
+        stage passing. The other is reported (`funnel_pass`, the stage
+        columns). It is in the config hash, and recorded in the look entry
+        and the header.)
 
     Raises:
         ValueError: no authorizer, bad inputs, returns past `search_end`, too
@@ -467,8 +482,7 @@ def run_gate(
         LookupError: from `runlog.trial_count`, when the scope matches nothing.
     """
     authorizer = _checked_authorizer(authorizer)
-    if not isinstance(decision_rule, DecisionRule):
-        raise TypeError("decision_rule must be a DecisionRule (see gate.load_registered)")
+    decision_rule = config.decision_rule
     if decision_rule.rule == "baseline" and config.thresholds.stage1 != "bootstrap":
         raise ValueError(
             "the baseline decides on the bootstrap family p-values: register stage1='bootstrap' "

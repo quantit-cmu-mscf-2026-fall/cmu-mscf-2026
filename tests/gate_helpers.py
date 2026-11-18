@@ -131,9 +131,7 @@ class Holdout:
         return self.returns.loc[(idx >= start) & (idx <= end), list(ids)]
 
 
-def run(
-    config: GateConfig, m: Market, *, holdout=None, authorizer=AUTHORIZER, decision_rule=FUNNEL
-) -> GateResult:
+def run(config: GateConfig, m: Market, *, holdout=None, authorizer=AUTHORIZER) -> GateResult:
     """Run a registered config on `m`'s search period, its holdout on demand."""
     holdout = Holdout(m.returns, config.config_hash) if holdout is None else holdout
     return run_gate(
@@ -142,7 +140,6 @@ def run(
         m.family,
         holdout=holdout,
         authorizer=authorizer,
-        decision_rule=decision_rule,
     )
 
 
@@ -151,9 +148,9 @@ def gate_once(
 ) -> GateResult:
     """Register a config on the current ledger and run the gate once."""
     log_trials(m.returns.shape[1] if n_trials is None else n_trials)
-    config = config_for(m, **overrides)
+    config = config_for(m, decision_rule=decision_rule, **overrides)
     register(config)
-    return run(config, m, holdout=holdout, decision_rule=decision_rule)
+    return run(config, m, holdout=holdout)
 
 
 def looks(config_hash: str) -> list[dict]:

@@ -4,7 +4,7 @@
 the baseline, BH on the families' bootstrap p-values at the registered q, the
 deciding rule, with the funnel "reported alongside". So:
 
-- `run_gate` takes the rule (no default) and `accepted` follows it;
+- the rule is a hashed field of `GateConfig` and `accepted` follows it;
 - under the baseline, `accepted` is `bh_adjusted(p1) <= q` and nothing else;
 - the funnel's verdict stays on the scorecard as `funnel_pass`;
 - the rule used is recorded in the look entry, the header and the report;
@@ -101,39 +101,38 @@ class TestTheRuleDecides:
         assert card.loc[~card["accepted"], "expected_mean"].isna().all()
 
 
-class TestTheRuleIsRequiredAndRecorded:
-    def test_there_is_no_default_rule(self, ledger, planted_market):
-        log_trials(planted_market.returns.shape[1])
-        config = config_for(planted_market)
-        register(config)
-        with pytest.raises(TypeError, match="decision_rule"):
-            gate.run_gate(
-                config,
-                planted_market.returns.loc[
-                    planted_market.returns.index <= planted_market.search_end
-                ],
-                planted_market.family,
-                holdout=lambda *a: None,
-                authorizer="x",
-            )
+class TestTheRuleIsHashedAndRecorded:
+    def test_changing_the_rule_or_its_q_changes_the_hash(self, planted_market):
+        funnel = config_for(planted_market, decision_rule=FUNNEL)
+        base = config_for(planted_market, decision_rule=baseline(0.05))
+        other_q = config_for(planted_market, decision_rule=baseline(0.10))
+        assert len({funnel.config_hash, base.config_hash, other_q.config_hash}) == 3
+        assert base.to_dict()["decision_rule"] == {"rule": "baseline", "q": 0.05, "method": "bh"}
+        assert gate.GateConfig.from_dict(base.to_dict()) == base
+
+    def test_a_rule_change_is_a_different_registration_and_look(self, ledger, planted_market):
+        gate_once(planted_market, decision_rule=baseline(0.05))
+        # Same everything but the rule: a new hash, so not covered by the first registration.
+        other = config_for(planted_market, decision_rule=baseline(0.10))
+        assert gate._entries_for(gate.REGISTRATION_NAME, other.config_hash) == []
+        with pytest.raises(gate.GateNotRegistered):
+            run(other, planted_market)
 
     @pytest.mark.parametrize("bad", [None, "baseline", {"rule": "baseline", "q": 0.05}])
-    def test_a_rule_that_is_not_a_decision_rule_is_refused_before_the_look(
-        self, ledger, planted_market, bad
+    def test_a_rule_that_is_not_a_decision_rule_is_refused_at_construction(
+        self, planted_market, bad
     ):
-        log_trials(planted_market.returns.shape[1])
-        config = config_for(planted_market)
-        register(config)
         with pytest.raises(TypeError, match="DecisionRule"):
-            run(config, planted_market, decision_rule=bad)
-        assert looks(config.config_hash) == []
+            config_for(planted_market, decision_rule=bad)
 
     def test_the_baseline_needs_the_bootstrap_p_values(self, ledger, planted_market):
         log_trials(planted_market.returns.shape[1])
-        config = config_for(planted_market, thresholds=Thresholds(stage1="rho"))
+        config = config_for(
+            planted_market, thresholds=Thresholds(stage1="rho"), decision_rule=baseline(0.05)
+        )
         register(config)
         with pytest.raises(ValueError, match="bootstrap"):
-            run(config, planted_market, decision_rule=baseline(0.05))
+            run(config, planted_market)
         assert looks(config.config_hash) == []
 
     def test_the_look_the_header_and_the_report_record_the_rule(
@@ -141,7 +140,7 @@ class TestTheRuleIsRequiredAndRecorded:
     ):
         result = gate_once(planted_market, decision_rule=baseline(0.05))
         assert result.header.decision_rule == baseline(0.05)
-        (look,) = looks(config_for(planted_market).config_hash)
+        (look,) = looks(config_for(planted_market, decision_rule=baseline(0.05)).config_hash)
         assert look["params"]["decision_rule"] == {"rule": "baseline", "q": 0.05, "method": "bh"}
         path, _ = write_report(result, tmp_path / "gate.json")
         back = read_report(path)
@@ -188,8 +187,8 @@ class TestDecisionRule:
 
 class TestRegisteredFile:
     def test_crsp_v1_loads_with_its_baseline_rule(self):
-        config, rule = gate.load_registered(ROOT / "scripts" / "gate_crsp_v1.json")
-        assert rule == baseline(0.05)
+        config = gate.load_registered(ROOT / "scripts" / "gate_crsp_v1.json")
+        assert config.decision_rule == baseline(0.05)
         assert config.thresholds.stage1 == "bootstrap" and config.n_boot == 1999
 
     def test_the_docs_say_which_column_decides(self):
