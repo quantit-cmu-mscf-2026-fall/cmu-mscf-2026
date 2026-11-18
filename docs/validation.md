@@ -223,9 +223,11 @@ Already in `evaluate`: `benjamini_hochberg`, `bonferroni`,
 Notes from QUANTIT-51 and QUANTIT-52 (Pin-Hua).
 
 **The haircut Sharpe is a graded score, not a gate** (stage 4 in
-`validation/framework.md`; the gate there is the deflated Sharpe). The trial
+`validation/framework.md`; the gate there is BH across the survivors). The trial
 count comes from `runlog.trial_count()`, and an empty ledger raises rather than
-quietly applying no haircut.
+quietly applying no haircut. Estimate the returns' lag-1 autocorrelation and
+pass it as `autocorrelation`: the default assumes none, which on autocorrelated
+returns lets a no-skill winner through far above the level.
 
 `haircut_sharpe` follows **Harvey & Liu's own reference code**
 ([`Haircut_SR.m`, `sample_random_multests.m`](https://people.duke.edu/~charvey/backtesting/)),
