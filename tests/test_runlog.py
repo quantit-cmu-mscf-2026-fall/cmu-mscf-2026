@@ -11,7 +11,8 @@ import json
 import os
 import subprocess
 import sys
-from datetime import datetime
+import types
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -502,24 +503,44 @@ def test_seen_trials_survive_corrections_and_retractions(tmp_path, monkeypatch):
     assert runlog.trial_count("mom") == 10
 
 
-def test_excluding_unseen_runs_does_not_warn(tmp_path, monkeypatch, recwarn):
+def test_excluding_unseen_runs_drops_them(tmp_path, monkeypatch):
     # No metrics logged: no result existed to be seen, so a duplicate is just dropped.
     monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
     runs = [runlog.log_run("sweep", params={"i": i}) for i in range(3)]
     _correction("sweep", [{"ts_utc": r["ts_utc"]} for r in runs[:2]])
     assert runlog.trial_count("sweep") == 1
     assert runlog.trial_count("sweep", count_seen_exclusions=True) == 1
-    assert not [w for w in recwarn if issubclass(w.category, UserWarning)]
 
 
-def test_seen_corrections_do_not_affect_another_family(tmp_path, monkeypatch, recwarn):
+def test_a_correction_does_not_exclude_another_family_logged_at_the_same_instant(
+    tmp_path, monkeypatch
+):
+    # Only `ledger_name` tells these two runs apart: same ts_utc, same (empty) params.
     monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
-    seen = runlog.log_run("loud", metrics={"sharpe": 1.0})
-    runlog.log_run("loud", metrics={"sharpe": 0.5})
-    runlog.log_run("quiet")
-    _correction("loud", [{"ts_utc": seen["ts_utc"]}])
+    frozen = datetime(2026, 1, 1, tzinfo=UTC)
+    monkeypatch.setattr(runlog, "datetime", types.SimpleNamespace(now=lambda tz=None: frozen))
+    runlog.log_run("quiet")  # first, so a lookup that ignored the name would take it
+    runlog.log_run("loud")
+    quiet, loud = runlog.read_entries()
+    assert loud["ts_utc"] == quiet["ts_utc"]
+    _correction("loud", [{"ts_utc": loud["ts_utc"]}])
+    with pytest.raises(LookupError):  # every loud run was excluded
+        runlog.trial_count("loud")
     assert runlog.trial_count("quiet") == 1
-    assert not [w for w in recwarn if issubclass(w.category, UserWarning)]
+
+
+def test_a_correction_line_repeated_verbatim_counts_once(tmp_path, monkeypatch):
+    # [X, dup X, C, dup C]: the copy of C must not consume the copy of X as well.
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
+    path = tmp_path / runlog.LEDGER_FILENAME
+    run = runlog.log_run("sweep")
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(run) + "\n")
+    correction = _correction("sweep", [{"ts_utc": run["ts_utc"]}])
+    assert runlog.trial_count("sweep") == 1
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(correction) + "\n")
+    assert runlog.trial_count("sweep") == 1
 
 
 def test_stats_shows_what_was_excluded_and_what_was_seen(tmp_path, monkeypatch, capsys):

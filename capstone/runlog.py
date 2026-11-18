@@ -204,7 +204,8 @@ class _Corrections:
     """The ledger's entries sorted into trials and exclusions.
 
     The ledger is append-only: a mistaken or duplicate run is never deleted.
-    A later entry named `CORRECTION_NAME` excludes it instead, and says why::
+    A later entry named `CORRECTION_NAME` marks it as excluded instead, and says why
+    (a seen target still counts as a trial; see below)::
 
         log_run(CORRECTION_NAME, params={
             "ledger_name": "evaluate-factor",
@@ -227,7 +228,9 @@ class _Corrections:
     the same JSON value (`1` does not match `true`): the timestamp names the
     run, and the params it lists tell apart runs logged in the same microsecond.
     Matching consumes the earliest unmatched entry for each item. A target with
-    recorded metrics remains a trial: seen results always count.
+    recorded metrics remains a trial: seen results always count. A correction
+    line repeated verbatim (the same entry, `ts_utc` included, as when a sync
+    appends a line twice) is read once, so the copy cannot consume a second run.
 
     Attributes:
         trials: entries that count, in ledger order.
@@ -249,9 +252,18 @@ class _Corrections:
     def __init__(self, numbered: list[tuple[int, dict]]):
         # position -> ("exclude", ledger_name, items) or ("retract", target positions)
         parsed: dict[int, tuple] = {}
+        seen_lines: set[str] = set()
         for pos, (line, entry) in enumerate(numbered):
             if entry.get("name") != CORRECTION_NAME:
                 continue
+            try:
+                key = json.dumps(entry, sort_keys=True)
+            except (TypeError, ValueError):
+                key = None
+            if key is not None:
+                if key in seen_lines:
+                    continue  # a verbatim repeat of an earlier correction line
+                seen_lines.add(key)
             params = entry.get("params") or {}
             if not isinstance(params, dict):
                 raise _malformed(line, "params is not an object")
