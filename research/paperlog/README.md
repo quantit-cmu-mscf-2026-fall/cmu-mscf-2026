@@ -21,11 +21,15 @@ translates Chinese-language papers into English.
    instead of returning five papers. Escalation stops early when a level stops yielding.
 2. **Sources.** arXiv (submissions and revisions), OpenAlex (English and Chinese queries,
    by publication date and by index date, cursor-paginated up to `max_pages_per_query`
-   pages; a query that hits the cap says so in the log and the next escalation level goes deeper),
+   pages; a query that hits the cap says so in the log, but the cap is not lifted
+   automatically: raise `max_pages_per_query` to fetch the truncated tail),
    and Semantic Scholar (papers citing your anchors, plus the references of newly
    adopted papers).
 3. **Deduplicate.** By arXiv ID, DOI, and fuzzy title, within the batch and against the
-   log. Records whose identifiers disagree are never merged.
+   log. Records with different arXiv IDs, or different journal DOIs, are never merged. An
+   arXiv preprint DOI (`10.48550/arxiv.*`) is the preprint's own identifier, so it does not
+   conflict with the journal DOI of the same work: such records merge when their titles match.
+   Titles that differ in a number or numeral (Part I / Part II) stay separate.
 4. **Prefilter.** A keyword gate that *routes* rather than drops: rejected papers keep
    their abstracts and are re-checked on every run, so a change to its terms or mode lets them through.
 5. **Screen.** Claude Haiku scores 0-5 against your rubric, tags, extracts methods,

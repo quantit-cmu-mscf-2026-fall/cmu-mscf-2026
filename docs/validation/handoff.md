@@ -213,12 +213,15 @@ The `reason` is required. Add any param of the run to an item to tell apart
 runs logged at the same time; it must match as the same JSON value, and the
 correction only applies to runs logged before it. A wrong correction is undone
 by a later one: `params={"retracts": ["<the correction's ts_utc>"],
-"reason": "..."}`. `trial_count` and `stats` leave the excluded runs and the
-correction itself out of the count, and a malformed correction raises
-`ValueError` naming the ledger file and line. A run that logged `metrics` has
-a result that may have been seen: `trial_count` warns when a correction drops
-one (`count_seen_exclusions=True` counts it), and `stats` prints the
-exclusions per name beside the count that ignores them.
+"reason": "..."}`. Each exclusion item targets one earlier matching ledger
+entry, so one item cannot remove every copy of a duplicated line. `trial_count`
+and `stats` leave excluded unseen runs and corrections out of the count; runs
+with non-empty `metrics` always remain trials because their results may have
+been seen. The legacy `count_seen_exclusions=True` argument is accepted;
+False raises `ValueError` instead of returning an unsafe count for inference.
+`stats` reports the same trial count, correction targets per name, excluded
+unseen runs and seen targets retained as trials. A malformed correction raises
+`ValueError` naming the ledger file and line.
 
 ## Avoiding merge conflicts
 
