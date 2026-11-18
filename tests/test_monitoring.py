@@ -205,6 +205,54 @@ def test_carried_names_use_earlier_attribution_then_flagged_equal_split():
     assert event["attribution_fallback"] is False
 
 
+def test_a_dropped_strategys_liquidation_pnl_keeps_its_earlier_coefficient():
+    earlier = toy("p0", "2021-01-04", {}, {7: 10.0}, {"a": {"7": 0.4}, "b": {"8": 0.4}})
+    earlier["allocation"] = {"weights": {"a": 0.5, "b": 0.25}}
+    held, prices = {7: 10, 8: 10}, {7: 10.0, 8: 10.0}
+    current = toy("p1", "2021-01-05", held, prices, {"a": {"7": 0.4}})
+    current["allocation"] = {"weights": {"a": 1.0}}  # b is dropped from the allocation
+    after = toy("p2", "2021-01-06", held, {7: 10.0, 8: 13.0}, {})
+    record = monitoring.attribute(current, [], after, [earlier], "synthetic")
+    b = record["strategies"]["b"]
+    assert b["coefficient"] == 0.25 and b["return"] == pytest.approx(b["contribution"] / 0.25)
+    assert "coefficient:b" in record["fallback_names"]
+    with pytest.raises(ValueError, match="no plan gives it an allocation coefficient"):
+        unfunded = earlier | {"allocation": {"weights": {"a": 0.5}}}
+        monitoring.attribute(current, [], after, [unfunded], "synthetic")
+
+
+def test_a_buy_followed_by_a_conversion_is_attributed_not_a_key_error(tmp_path):
+    books = {"a": {"1": 1.0}}
+    conversion = {
+        "version": ACCOUNT_EVENTS_VERSION,
+        "events": [
+            {
+                "event_id": "merge-1",
+                "permno": 1,
+                "kind": "conversion",
+                "ratio": 1.0,
+                "new_permno": 2,
+                "cash": 0.0,
+                "effective_session": DAYS[1],
+            }
+        ],
+    }
+    first = plan("p1", DAYS[0], {}, 1000.0, {1: 10.0, 2: 10.0}, books)
+    second = plan(
+        "p2",
+        DAYS[1],
+        {2: 10},
+        900.0,
+        {1: 10.0, 2: 12.0},
+        books,
+        account_corporate_events=conversion,
+    )
+    journal(tmp_path, [(first, [(1, 10, 10.0, 0.0)]), (second, [])])
+    (record,), _ = monitoring.session_returns(tmp_path)
+    assert math.isclose(record["account_return"], 20 / 1000)
+    assert math.isclose(record["strategies"]["a"]["contribution"], 20 / 1000)
+
+
 def test_a_name_nobody_ever_attributed_has_no_owner():
     with pytest.raises(ValueError, match="no strategy to attribute"):
         monitoring.split(5, [{}, {}])

@@ -164,7 +164,8 @@ def attribute(plan, fills, after, earlier, tag):
             f"settled receivables{' or corporate events' if events else ''} of plan "
             f"{plan['plan_id']}"
         )
-    names = sorted(set(held) | set(position) | set(received))
+    converted = {n for n, _, _ in moved}
+    names = sorted(set(held) | set(position) | set(received) | set(traded) | converted)
     pnl = {
         n: (position[n] * mark[n] if n in position else 0)
         - (held[n] * reference[n] if n in held else 0)
@@ -203,6 +204,23 @@ def attribute(plan, fills, after, earlier, tag):
         gross = sum(fractions[n].get(s, 0) * pnl[n] for n in names) + income[s]
         contribution = (gross - (fees * notional[s] / turnover if turnover else 0.0)) / equity
         coefficient = weights.get(s)
+        if not coefficient and contribution:
+            # Dropped from this plan's allocation but still credited P&L (a carried or
+            # liquidated name): use the coefficient of the latest plan that funded it.
+            coefficient = next(
+                (
+                    p.get("allocation", {}).get("weights", {}).get(s)
+                    for p in earlier
+                    if p.get("allocation", {}).get("weights", {}).get(s)
+                ),
+                None,
+            )
+            if not coefficient:
+                raise ValueError(
+                    f"strategy {s} is credited P&L in plan {plan['plan_id']} "
+                    "but no plan gives it an allocation coefficient"
+                )
+            fallbacks.append(f"coefficient:{s}")
         held_return = contribution / coefficient if coefficient else None
         strategies[s] = {
             "coefficient": coefficient,

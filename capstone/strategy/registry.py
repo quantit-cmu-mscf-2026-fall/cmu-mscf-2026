@@ -257,6 +257,16 @@ def check_confirm_record(record: Any, strategy_id: str):
         state = ConfirmState.from_dict(record["confirm_state"])
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError(f"the confirm record is not a serialized ConfirmState: {exc}") from exc
+    from capstone.incubate import IncubationSettings
+
+    policy = IncubationSettings().confirm_alpha
+    if state.config.alpha > policy:
+        raise ValueError(
+            f"the confirm record runs at alpha {state.config.alpha:.4g}; "
+            f"promotion needs alpha <= {policy:.4g}"
+        )
+    if state.n_obs < 1:
+        raise ValueError(f"the confirm record for {strategy_id} has no observations")
     threshold = 1 / state.config.alpha
     if not (
         state.decision == "promote" and state.reason == "confirmed" and state.e_value >= threshold
@@ -323,6 +333,8 @@ def _replay(events) -> tuple[dict[str, str], dict[str, dict], set[str]]:
                 or sid in promoted
             ):
                 raise _refused(f"line {n}: a role event is one incubation-only -> deploy")
+            if states.get(sid, "active") != "active":
+                raise _refused(f"line {n}: {sid} is {states[sid]}; only an active one is promoted")
             try:
                 check_confirm_record(event["confirm_record"], sid)
             except ValueError as exc:

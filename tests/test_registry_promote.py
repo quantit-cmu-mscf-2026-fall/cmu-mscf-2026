@@ -141,3 +141,37 @@ def test_a_deploy_entry_cannot_have_a_role_event(root):
     with pytest.raises(ValueError, match="one incubation-only -> deploy"):
         verify_lifecycle(genesis + canonical(event) + chr(10), entries)
     assert (root / LIFECYCLE_FILE).read_text(encoding="utf-8") == genesis
+
+
+def test_a_confirm_record_must_meet_the_policy_alpha_and_have_observations():
+    loose = promoting_record("momo")
+    loose["confirm_state"]["config"]["alpha"] = 0.5  # e-value is far above 1/0.5
+    with pytest.raises(ValueError, match="promotion needs alpha"):
+        check_confirm_record(loose, "momo")
+    empty = ConfirmState.start(
+        ConfirmConfig(scale=1.0, horizon=1260),
+        MonitorConfig(expected_mean=0.0, scale=1.0, horizon=1260),
+    )
+    with pytest.raises(ValueError, match="confirm"):
+        check_confirm_record({"strategy_id": "momo", "confirm_state": empty.to_dict()}, "momo")
+
+
+def test_replay_refuses_a_role_event_on_a_suspended_strategy(root):
+    registered(root, role=INCUBATION_ONLY)
+    promote(root, "momo", confirm_record=promoting_record("momo"), reviewer="reviewer-a", at=AT)
+    entries = read_registry(root)
+    genesis, role_line = lines(root)
+    state = {
+        "field": "state",
+        "id": "momo",
+        "from": "active",
+        "to": "suspended",
+        "reason": "r",
+        "reviewer": "reviewer-a",
+        "at": AT,
+        "prev_hash": digest(json.loads(genesis)),
+    }
+    role = json.loads(role_line)
+    role["prev_hash"] = digest(state)
+    with pytest.raises(ValueError, match="only an active one is promoted"):
+        verify_lifecycle(genesis + canonical(state) + chr(10) + canonical(role) + chr(10), entries)
