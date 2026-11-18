@@ -313,3 +313,29 @@ def test_a_negated_copy_of_a_zoo_member_is_not_partly_original(expression):
     _, share, closest = zoo_similarity(parse(expression), zoo)
     assert share == 1.0
     assert closest == "alpha_006"
+
+
+def test_negative_constants_built_in_code_round_trip_to_the_same_factor():
+    from capstone.factors.tree import Call, Unary
+
+    close = parse("close")
+    built = [
+        BinOp("*", Const(-1.0), close),
+        BinOp("*", close, Const(-2.5)),
+        BinOp("+", close, Const(-1.0)),
+        BinOp("*", Const(-0.0), close),
+        Call("signed_power", close, None, Const(-2.0)),
+    ]
+    for node in built:
+        again = parse(unparse(node))
+        assert identity_key(again) == identity_key(node)
+        assert factor_id(again) == factor_id(node)
+    assert factor_id(built[0]) == factor_id(BinOp("*", Unary("neg", Const(1.0)), close))
+    assert factor_id(built[3]) == factor_id(parse("-0.0 * close"))
+
+
+def test_a_negative_constant_does_not_change_zoo_similarity():
+    zoo = default_zoo()
+    built = BinOp("*", parse("ts_corr(open, volume, 10)"), Const(-1.0))
+    assert zoo_similarity(built, zoo) == zoo_similarity(parse(unparse(built)), zoo)
+    assert zoo_similarity(built, zoo)[2] == "alpha_006"

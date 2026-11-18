@@ -127,9 +127,14 @@ def walk(node: Node) -> Iterator[Node]:
             yield from walk(node.arg2)
 
 
+def _is_negative_const(node: Node) -> bool:
+    return isinstance(node, Const) and math.copysign(1.0, node.value) < 0
+
+
 def node_count(node: Node) -> int:
-    """Symbolic length: the number of nodes in the tree."""
-    return sum(1 for _ in walk(node))
+    """Symbolic length: the number of nodes in the tree. A negative constant counts
+    as the unary negation of a positive one, which is how `parse` reads it back."""
+    return sum(2 if _is_negative_const(n) else 1 for n in walk(node))
 
 
 def param_count(node: Node) -> int:
@@ -263,10 +268,13 @@ class _Parser:
             window = self.window(func)
         elif func in BINARY_PARAMETER_FUNCS:
             self.expect(",")
+            sign = -1.0 if self.peek() == ("op", "-") else 1.0  # unparse writes Const(-2.0) as -2.0
+            if sign < 0:
+                self.take()
             kind, value = self.take()
             if kind != "num":
                 raise ParseError(f"{func} exponent must be a numeric literal, got {value!r}")
-            arg2 = Const(_finite(value))
+            arg2 = Const(sign * _finite(value))
         elif FUNCS[func]:
             self.expect(",")
             window = self.window(func)
@@ -348,7 +356,7 @@ def _strip_negation(node: Node) -> tuple[bool, Node]:
             negated, node = not negated, node.operand
         elif isinstance(node, BinOp) and node.op == "-" and node.left == Const(0.0):
             negated, node = not negated, node.right
-        elif isinstance(node, Const) and node.value < 0:
+        elif _is_negative_const(node):  # incl. -0.0
             return not negated, Const(-node.value)
         else:
             return negated, node
