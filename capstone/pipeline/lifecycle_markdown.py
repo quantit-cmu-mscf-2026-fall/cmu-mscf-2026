@@ -6,6 +6,8 @@ import json
 
 
 def _cell(value):
+    if value is None:
+        value = ""
     text = ", ".join(map(str, value)) if isinstance(value, list) else str(value)
     return text.replace("|", r"\|").replace("\n", " ") or "-"
 
@@ -36,7 +38,7 @@ def _conceptual(document):
         for claim in run["claims"]:
             head = f"**{claim['packet_id']}** `{claim['status']}`"
             lines += ["", f"{head} claim {_short(claim['claim_id'])}"]
-            lines += [f"- {k}: {_cell(v)}" for k, v in (claim["claim"] or {}).items()]
+            lines += [f"- {k}: {_cell(v)}" for k, v in sorted((claim["claim"] or {}).items())]
             lines.append(f"- equation: `{claim['equation'] or '-'}`")
             lines += [f"- declared default: {_cell(d)}" for d in claim["declared_defaults"]]
             lines += [f"- blocker: `{b}`" for b in claim["blockers"]]
@@ -67,16 +69,23 @@ def _empirical(document):
     rows = []
     for row in document["empirical"]:
         if row["kind"] == "monitor":
-            for sid, event in row["strategies"].items():
+            found = row.get("blockers") or "-"
+            if not row["strategies"]:
+                rows.append(["monitor", row["stage"], "-", "-", "-", found])
+            for sid, event in sorted(row["strategies"].items()):
                 numbers = f"e_value {event['e_value']}, n_obs {event['n_obs']}"
                 numbers += f", {event['decision']}"
-                rows.append(["monitor", row["stage"], sid, event["session"], numbers, "-"])
+                rows.append(["monitor", row["stage"], sid, event["session"], numbers, found])
         elif "scenarios" in row:
-            for name, value in row["scenarios"].items():
-                numbers = {k: v for k, v in value.items() if k != "blockers"}
-                found = row["blockers"] + value.get("blockers", [])
-                cells = [row["kind"], row["stage"], row["id"], name]
-                rows.append([*cells, json.dumps(numbers, sort_keys=True), found or "-"])
+            cells = [row["kind"], row["stage"], row["id"]]
+            status = {"status": row["status"]} if "status" in row else {}
+            if not row["scenarios"]:
+                numbers = json.dumps({"status": row.get("status")})
+                rows.append([*cells, "-", numbers, row.get("blockers") or "-"])
+            for name, value in sorted(row["scenarios"].items()):
+                numbers = {k: v for k, v in value.items() if k != "blockers"} | status
+                found = row.get("blockers", []) + value.get("blockers", [])
+                rows.append([*cells, name, json.dumps(numbers, sort_keys=True), found or "-"])
         else:
             skip = {"kind", "stage", "blockers"}
             numbers = {k: v for k, v in row.items() if k not in skip}

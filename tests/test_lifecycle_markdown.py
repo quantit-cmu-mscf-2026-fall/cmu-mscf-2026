@@ -119,8 +119,62 @@ def test_a_pipe_in_a_cell_cannot_break_the_table_and_no_recommendation_says_none
     assert "- none" in markdown(quiet)
 
 
-def test_scenario_blockers_join_the_rows_blockers_and_the_rendering_is_deterministic():
+def test_scenario_blockers_join_the_rows_blockers():
     text = markdown(document())
     assert "| study | evaluate | study-1 | base |" in text
     assert "thin_sample, wide_band" in text
-    assert markdown(document()) == text
+
+
+def test_output_does_not_depend_on_insertion_order():
+    forward = document()
+    backward = copy.deepcopy(forward)
+    event = {"session": "d", "e_value": 1, "n_obs": 2, "decision": "hold"}
+    forward["empirical"][0]["strategies"] = {"a": event, "b": event}
+    backward["empirical"][0]["strategies"] = {"b": event, "a": event}
+    forward["empirical"][1]["scenarios"] = {"x": {"k": 1}, "y": {"k": 2}}
+    backward["empirical"][1]["scenarios"] = {"y": {"k": 2}, "x": {"k": 1}}
+    assert markdown(forward) == markdown(backward)
+
+
+def test_blocked_and_empty_monitor_rows_keep_their_blockers():
+    doc = document()
+    event = {"session": "d", "e_value": 1, "n_obs": 2, "decision": "hold"}
+    doc["empirical"] = [
+        {"kind": "monitor", "stage": "m1", "strategies": {}, "blockers": ["no_sessions"]},
+        {"kind": "monitor", "stage": "m2", "strategies": {"s": event}, "blockers": ["stale"]},
+    ]
+    text = markdown(doc)
+    assert "| monitor | m1 | - | - | - | no_sessions |" in text
+    assert "| monitor | m2 | s | d | e_value 1, n_obs 2, hold | stale |" in text
+
+
+def test_a_row_with_no_scenarios_keeps_its_status_and_blockers():
+    doc = document()
+    doc["empirical"] = [
+        {
+            "kind": "candidates",
+            "stage": "evaluate",
+            "id": "s-1",
+            "status": "rejected",
+            "blockers": ["thin_sample"],
+            "scenarios": {},
+        }
+    ]
+    text = markdown(doc)
+    assert '| candidates | evaluate | s-1 | - | {"status": "rejected"} | thin_sample |' in text
+
+
+def test_scenario_rows_show_status_and_tolerate_missing_blockers():
+    doc = document()
+    doc["empirical"] = [
+        {"kind": "study", "stage": "e", "id": "i", "status": "ok", "scenarios": {"b": {"k": 1}}}
+    ]
+    assert '| study | e | i | b | {"k": 1, "status": "ok"} | - |' in markdown(doc)
+
+
+def test_none_fields_render_as_dashes():
+    doc = document()
+    doc["lineage"]["chains"][0]["program_id"] = None
+    doc["conceptual"][0]["claims"][0]["claim"]["horizon"] = None
+    text = markdown(doc)
+    assert "None" not in text
