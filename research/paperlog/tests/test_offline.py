@@ -999,6 +999,7 @@ def test_numbering_is_compared_in_title_order_and_pronouns_are_not_numerals():
         (f"{base}, Volume 2, Part I", f"{base}, Volume 1, Part II"),
         (long, f"{long}, Part 1"),
         ("Chapter 2, Part I", "Chapter 1, Part II"),
+        ("Bank Capital under Basel II", "Bank Capital under Basel III"),
     ]:
         one, two = Paper(title=a), Paper(title=b)
         assert len(dedupe.dedupe_batch([one, two])) == 2, (a, b)
