@@ -14,7 +14,7 @@ import pandas as pd
 import pytest
 
 from capstone import calibration, funnel, grading
-from capstone.evaluate import bh_adjusted, deflated_sharpe_ratio, sharpe_test
+from capstone.evaluate import bh_adjusted, deflated_sharpe_ratio, haircut_sharpe, sharpe_test
 from capstone.synth import make_return_matrix
 
 N_FAMILIES = 10
@@ -140,6 +140,23 @@ class TestGradedScores:
         before = funnel.screen(stats, th)
         grading.graded_scores(returns, best, p1, 50, 0.3, 0)
         pd.testing.assert_frame_equal(before, funnel.screen(stats, th))
+
+
+class TestHaircut:
+    def test_it_is_the_row_minimum_of_the_three_adjusted_sharpes(self):
+        sharpe = pd.Series([0.4, 0.8, 1.2, 1.6], index=list("abcd"))
+        n_obs = pd.Series(2000, index=sharpe.index)
+        frame = haircut_sharpe(
+            sharpe, 2000, n_trials=60, frequency="daily", avg_correlation=0.3, seed=5
+        )
+        adjusted = frame[["sharpe_bonferroni", "sharpe_holm", "sharpe_bhy"]]
+        # The case discriminates: the three adjustments differ, row by row.
+        assert ((adjusted.max(axis=1) - adjusted.min(axis=1)) > 1e-3).all()
+        out = grading._haircut(sharpe, n_obs, 60, 0.3, 5)
+        pd.testing.assert_series_equal(
+            out, adjusted.min(axis=1).reindex(sharpe.index), check_names=False
+        )
+        assert (out < adjusted.max(axis=1).reindex(sharpe.index)).all()
 
 
 class TestFamilyLocalFdr:
