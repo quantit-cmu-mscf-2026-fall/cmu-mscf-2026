@@ -32,6 +32,7 @@ commit.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import replace
 from pathlib import Path
 
@@ -55,7 +56,9 @@ DEPARTURE_REASON = "registry_retired"
 ACTIONS = Path("actions") / "events.jsonl"
 MONITOR = "monitor"
 RECOMMEND = {"retire": "retirement recommended", "promote": "promotion eligible"}
+# The CLI behind this command is a planned follow-up; until it lands, call the functions here.
 COMMAND = "python -m capstone.pipeline.lifecycle"
+ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}(?:$|[T ])")
 
 
 class Refused(ValueError):
@@ -63,7 +66,8 @@ class Refused(ValueError):
 
 
 def _entry(root, strategy_id):
-    entries = read_registry(root)  # verifies the lifecycle chain
+    # verifies the lifecycle chain; a crash-pending last event is the action's to complete
+    entries = read_registry(root, resume=True)
     for entry in entries:
         if entry.id == strategy_id:
             return entries, entry
@@ -71,10 +75,17 @@ def _entry(root, strategy_id):
 
 
 def _date(at):
+    """The date of an explicit ISO timestamp (`YYYY-MM-DD...`); "NaT", "now", "today" and
+    other implicit or invalid values are refused."""
+    if not (isinstance(at, str) and ISO_DATE.match(at)):
+        raise Refused(f"--at {at!r} is not an explicit ISO date or timestamp")
     try:
-        return str(pd.Timestamp(at).date())
+        stamp = pd.Timestamp(at)
     except (TypeError, ValueError) as error:
         raise Refused(f"--at {at!r} is not a timestamp") from error
+    if pd.isna(stamp):
+        raise Refused(f"--at {at!r} is not a timestamp")
+    return str(stamp.date())
 
 
 def _verified(root, args, command, result):
@@ -112,12 +123,13 @@ def holding_portfolios(root, entries, strategy_id):
 
 def retire(args):
     root, sid = Path(args.registry), args.id
+    available_at = _date(args.at)
     entries, entry = _entry(root, sid)
     portfolios = holding_portfolios(root, entries, sid)
     departure = {
         "strategy_id": sid,
         "kind": "departure",
-        "available_at": _date(args.at),
+        "available_at": available_at,
         "reason": DEPARTURE_REASON,
     }
 
@@ -146,6 +158,7 @@ def retire(args):
 def suspend(args):
     root = Path(args.registry)
     state = "active" if args.resume else "suspended"
+    _date(args.at)
     _entry(root, args.id)
     set_state(root, args.id, state, reason=args.reason, reviewer=args.reviewer, at=args.at)
     return _verified(root, args, "resume" if args.resume else "suspend", {"state": state})
@@ -180,6 +193,7 @@ def promote_entry(args):
             "promote needs a confirm record: --confirm-record <store>/<id>.json or --run ROOT "
             "holding the incubation monitor store"
         )
+    _date(args.at)
     _entry(root, args.id)
     record = confirm_record(Path(path), args.id)
     entry = promote(root, args.id, confirm_record=record, reviewer=args.reviewer, at=args.at)

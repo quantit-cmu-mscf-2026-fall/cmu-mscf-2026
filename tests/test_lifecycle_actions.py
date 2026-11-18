@@ -8,10 +8,14 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from test_registry_promote import promoting_record
+from test_saved_portfolio import case, chronological, receipt  # noqa: F401  (case is a fixture)
 
 from capstone.artifacts import canonical, digest
+from capstone.faults import InjectedFault, _fault_hits, _fault_plan
 from capstone.pipeline import lifecycle_actions as la
 from capstone.strategy.registry import (
+    INCUBATION_ONLY,
     LIFECYCLE_FILE,
     MODULE,
     REGISTRY_FILE,
@@ -19,6 +23,7 @@ from capstone.strategy.registry import (
     SPEC_DIR,
     read_registry,
 )
+from capstone.strategy.saved_portfolio import SavedProgramPortfolioSpec
 
 
 @dataclass(frozen=True)
@@ -178,7 +183,7 @@ def test_a_departure_cannot_precede_a_recorded_decision(tmp_path, portfolios):
 
 def test_a_bad_timestamp_is_refused(tmp_path, portfolios):
     root = make_root(tmp_path)
-    with pytest.raises(la.Refused, match="not a timestamp"):
+    with pytest.raises(la.Refused, match="not an explicit ISO"):
         la.retire(args(root, at="not-a-date"))
 
 
@@ -254,3 +259,110 @@ def test_nothing_acts_on_import_or_without_args():
     assert "def main" not in Path(la.__file__).read_text(encoding="utf-8")
     with pytest.raises(AttributeError):
         la.retire(SimpleNamespace())
+
+
+@pytest.fixture
+def crash(monkeypatch):
+    """`crash(True)` arms the injected fault between a lifecycle event and its entry."""
+
+    def arm(on):
+        if on:
+            monkeypatch.setenv("CAPSTONE_FAULT_INJECTION", "1")
+            monkeypatch.setenv("CAPSTONE_FAULT_AT", "registry:after_event")
+        else:
+            monkeypatch.delenv("CAPSTONE_FAULT_INJECTION", raising=False)
+        _fault_plan.cache_clear()
+        _fault_hits.clear()
+
+    yield arm
+    arm(False)
+
+
+def test_retire_resumes_after_a_crash_between_event_and_entry(tmp_path, portfolios, crash):
+    root = make_root(tmp_path)
+    crash(True)
+    with pytest.raises(InjectedFault):
+        la.retire(args(root))
+    crash(False)
+    events = lifecycle_text(root).count(chr(10))
+    result = la.retire(args(root))
+    assert result["state"] == "retired" and result["departures"] == ["book"]
+    assert state_of(root, "alpha") == "retired"
+    assert lifecycle_text(root).count(chr(10)) == events  # completed without a second event
+
+
+def test_suspend_resumes_after_a_crash_between_event_and_entry(tmp_path, crash):
+    root = make_root(tmp_path)
+    crash(True)
+    with pytest.raises(InjectedFault):
+        la.suspend(args(root))
+    crash(False)
+    events = lifecycle_text(root).count(chr(10))
+    assert la.suspend(args(root))["state"] == "suspended"
+    assert state_of(root, "alpha") == "suspended"
+    assert lifecycle_text(root).count(chr(10)) == events
+
+
+def test_promote_resumes_after_a_crash_between_event_and_entry(tmp_path, crash):
+    root = make_root(tmp_path, (("inc", MODULE, INCUBATION_ONLY),))
+    record = tmp_path / "record.json"
+    record.write_text(json.dumps(promoting_record("inc")), encoding="utf-8")
+    call = args(root, sid="inc", confirm_record=record)
+    crash(True)
+    with pytest.raises(InjectedFault):
+        la.promote_entry(call)
+    crash(False)
+    events = lifecycle_text(root).count(chr(10))
+    assert la.promote_entry(call)["role"] == "deploy"
+    assert read_registry(root)[0].role == "deploy"
+    assert lifecycle_text(root).count(chr(10)) == events
+
+
+@pytest.mark.parametrize("bad", ["NaT", "now", "today", "", "2020-13-45", None, 20200302])
+@pytest.mark.parametrize("action", ["retire", "suspend", "promote"])
+def test_an_invalid_or_implicit_date_writes_nothing(tmp_path, portfolios, action, bad):
+    root = make_root(
+        tmp_path,
+        (
+            ("alpha", MODULE, ""),
+            ("book", SAVED_PORTFOLIO_MODULE, ""),
+            ("inc", MODULE, INCUBATION_ONLY),
+        ),
+    )
+    record = tmp_path / "record.json"
+    record.write_text(json.dumps(promoting_record("inc")), encoding="utf-8")
+    spec_files = {p.name: p.read_bytes() for p in (root / SPEC_DIR).glob("*")}
+    before = (lifecycle_text(root), (root / REGISTRY_FILE).read_bytes(), portfolios["book"])
+    with pytest.raises(la.Refused):
+        if action == "retire":
+            la.retire(args(root, at=bad))
+        elif action == "suspend":
+            la.suspend(args(root, at=bad))
+        else:
+            la.promote_entry(args(root, sid="inc", at=bad, confirm_record=record))
+    assert (lifecycle_text(root), (root / REGISTRY_FILE).read_bytes(), portfolios["book"]) == before
+    assert {p.name: p.read_bytes() for p in (root / SPEC_DIR).glob("*")} == spec_files
+
+
+def test_retire_persists_a_departure_in_a_real_saved_portfolio(tmp_path, case):  # noqa: F811
+    _, (high, low), _ = case
+    saved = chronological(
+        case, (high, low), [receipt(high, "2000-01-28"), receipt(low, "2000-01-28")]
+    )
+    root = make_root(
+        tmp_path,
+        ((high.id, MODULE, ""), (low.id, MODULE, ""), (saved.id, SAVED_PORTFOLIO_MODULE, "")),
+    )
+    (root / SPEC_DIR / f"{saved.id}.toml").write_bytes(saved.to_toml().encode("utf-8"))
+    result = la.retire(args(root, sid=low.id, at="2000-04-03"))
+    assert result["departures"] == [saved.id]
+    stored = SavedProgramPortfolioSpec.from_toml(
+        (root / SPEC_DIR / f"{saved.id}.toml").read_text(encoding="utf-8"), returns=saved.returns
+    )
+    assert stored.id == saved.id  # membership is not part of the definition's identity
+    assert stored.membership[-1] == {
+        "strategy_id": low.id,
+        "kind": "departure",
+        "available_at": "2000-04-03",
+        "reason": la.DEPARTURE_REASON,
+    }

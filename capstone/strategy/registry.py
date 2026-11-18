@@ -214,12 +214,48 @@ def parse_registry(text: str) -> tuple[RegistryEntry, ...]:
     return tuple(_parse(text)[1])
 
 
-def read_registry(root: Path) -> tuple[RegistryEntry, ...]:
+def read_registry(root: Path, *, resume: bool = False) -> tuple[RegistryEntry, ...]:
     """The entries of `<root>/deploy/strategies.yml`, in file order, checked
-    against `<root>/deploy/lifecycle.jsonl` (absent: no events)."""
+    against `<root>/deploy/lifecycle.jsonl` (absent: no events) and the lineage of
+    every re-anchored entry. `resume=True` returns the entries as the file has them
+    when a crash left the last event without its entry (`LifecycleRewritePending`),
+    for the action that completes it (`set_state` / `promote`); otherwise that raises."""
     entries = parse_registry(_read(root, REGISTRY_FILE))
-    verify_lifecycle(_lifecycle_text(root), entries)
+    try:
+        events = verify_lifecycle(_lifecycle_text(root), entries)
+    except LifecycleRewritePending:
+        if not resume:
+            raise
+        events = ()
+    check_lineage(entries, events)
     return entries
+
+
+def check_lineage(entries, events) -> None:
+    """Every `reanchor-of:<parent>` entry must be what `register_version` makes: a
+    program registered incubation-only, with the gate report of an existing program
+    parent. A forged label (hand-written, or passed to `register`) is refused."""
+    registered = {e["id"]: e for e in events if e["field"] == "registered"}
+    by_id = {entry.id: entry for entry in entries}
+    for entry in entries:
+        if not (isinstance(entry.version, str) and entry.version.startswith(LINEAGE_PREFIX)):
+            continue
+        parent = by_id.get(lineage_parent(entry.version) or "")
+        first = registered.get(entry.id)
+        if (
+            parent is None
+            or parent.id == entry.id
+            or parent.module != PROGRAM_MODULE
+            or entry.module != PROGRAM_MODULE
+            or entry.gate_report != parent.gate_report
+            or first is None
+            or first["role"] != INCUBATION_ONLY
+        ):
+            raise ValueError(
+                f"strategy {entry.id} has version {entry.version!r}, but is not an "
+                "incubation-only program registered through register_version "
+                "from an existing program parent with its gate report"
+            )
 
 
 def _read(root: Path, path: Path) -> str:
@@ -325,6 +361,7 @@ def register(
     reviewer: str = "",
 ) -> RegistryEntry:
     """Write the spec's file and its registry entry; return the entry in the file.
+    A `reanchor-of:` version label is refused here: only `register_version` makes one.
 
     The module is the spec class's for a program or saved portfolio, else the
     contract (whose `load_spec` reads every older spec schema); the gate report
@@ -338,6 +375,12 @@ def register(
     or changes `role`; a suspended or retired id is refused, since
     registering never changes a state.
     """
+    if isinstance(version, str) and version.startswith(LINEAGE_PREFIX):
+        raise ValueError(f"version {version!r} is reserved for register_version")
+    return _register(spec, root, enabled, role, gate_report, version, at, reviewer)
+
+
+def _register(spec, root, enabled, role, gate_report, version, at, reviewer) -> RegistryEntry:
     module = type(spec).__module__
     module = module if module in REPORT_SCHEMAS else MODULE  # the contract, as before
     report = spec.gate_report if gate_report is None else gate_report
@@ -414,15 +457,7 @@ def register_version(spec, root: Path, *, parent_id: str, at: str, reviewer: str
     held = registry_spec(root, parent_id, PROGRAM_MODULE)
     if replace(spec, anchor=held.anchor, data_version=held.data_version).id != parent_id:
         raise ValueError(f"{spec.id} is not a re-anchoring of {parent_id}")
-    return register(
-        spec,
-        root,
-        role=INCUBATION_ONLY,
-        gate_report=parent.gate_report,
-        version=version,
-        at=at,
-        reviewer=reviewer,
-    )
+    return _register(spec, root, False, INCUBATION_ONLY, parent.gate_report, version, at, reviewer)
 
 
 def read_lifecycle(root: Path) -> tuple[dict[str, Any], ...]:

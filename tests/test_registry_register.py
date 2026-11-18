@@ -280,3 +280,49 @@ def test_register_version_refuses_an_id_registered_otherwise(root):
     register(child, root, at=AT)  # as a plain program, not as a version
     with pytest.raises(ValueError, match="but not as"):
         register_version(child, root, parent_id=parent.id, at=AT, reviewer="r")
+
+
+def test_register_refuses_a_forged_reanchor_label_and_changes_nothing(root):
+    parent = ProgramSpec("alpha")
+    write_report(root, [parent.id])
+    register(parent, root, at=AT)
+    other = ProgramSpec("unrelated")
+    before = snapshot(root)
+    with pytest.raises(ValueError, match="reserved for register_version"):
+        register(other, root, version=f"reanchor-of:{parent.id}", at=AT, reviewer="r")
+    assert snapshot(root) == before
+
+
+def test_read_registry_refuses_a_forged_lineage(root):
+    parent, child = parent_and_child(root)
+    entry = register_version(child, root, parent_id=parent.id, at=AT, reviewer="r")
+    assert read_registry(root)[-1] == entry
+    path = root / REGISTRY_FILE
+    good = path.read_bytes()
+    # the label names a parent that is not registered
+    path.write_bytes(good.replace(f"reanchor-of:{parent.id}".encode(), b"reanchor-of:nobody"))
+    with pytest.raises(ValueError):
+        read_registry(root)
+
+
+def test_read_registry_refuses_a_reanchor_label_without_register_version(root):
+    parent, child = parent_and_child(root)
+    path = root / REGISTRY_FILE
+    write_report(root, [child.id])
+    child_entry = register(child, root, at=AT)  # a plain program entry for the would-be child
+    registry_before = path.read_bytes()
+    lifecycle = root / LIFECYCLE_FILE
+    # hand-edit: label the plain registration as a re-anchoring (event and entry both)
+    label = f"reanchor-of:{parent.id}".encode()
+
+    def relabel(data, old):
+        head, _, tail = data.rpartition(old)  # the child's, the last one
+        return head + old.replace(b'""', b'"' + label + b'"') + tail
+
+    path.write_bytes(
+        registry_before + b'    version: "' + label + b'"' + bytes([10])
+    )  # the last entry
+    lifecycle.write_bytes(relabel(lifecycle.read_bytes(), b'"version":""'))
+    assert child_entry.role == "deploy"
+    with pytest.raises(ValueError, match="register_version"):
+        read_registry(root)
