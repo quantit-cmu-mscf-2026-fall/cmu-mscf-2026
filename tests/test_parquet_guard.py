@@ -238,3 +238,18 @@ def test_filter_covers_every_date_leaf_and_retains_nulls_and_payment_exception(t
     frame.loc[2, "other"] = datetime.date(2021, 1, 1)
     filtered = ds.dataset(pa.Table.from_pandas(frame)).to_table(filter=expression).to_pandas()
     pd.testing.assert_frame_equal(filtered, frame.iloc[:2])
+
+
+@pytest.mark.parametrize("kind", ["list_view", "large_list_view"])
+def test_view_typed_date_lists_are_refused(tmp_path, kind):
+    view = getattr(pa, kind)(pa.date32())
+    table = pa.table(
+        {
+            "event_date": [datetime.date(2020, 1, 1)],
+            "x": pa.array([[datetime.date(2023, 1, 1)]], type=view),
+        }
+    )
+    path = tmp_path / "input.parquet"
+    pq.write_table(table, path)
+    with pytest.raises(ArchivedInputBlocked, match="archive_date_type_unqualified"):
+        verify_discovery_dates(path, "events")
