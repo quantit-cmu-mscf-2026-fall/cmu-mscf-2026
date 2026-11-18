@@ -137,6 +137,14 @@ class TestForGate:
         with pytest.raises(ValueError, match="at least 2 variants"):
             power.for_gate(config_for(world), search, singles, 12, CHEAP)
 
+    def test_a_family_missing_a_column_names_it(self, world):
+        search, family, *_ = world
+        short = family.drop(search.columns[[1, 4]])
+        with pytest.raises(ValueError, match="no label") as raised:
+            power.for_gate(config_for(world), search, short, 12, CHEAP)
+        assert str(search.columns[1]) in str(raised.value)
+        assert str(search.columns[4]) in str(raised.value)
+
     def test_reporting_power_writes_nothing_and_changes_no_hash(self, world, ledger):
         search, family, *_ = world
         config = config_for(world)
