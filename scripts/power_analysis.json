@@ -1,0 +1,12 @@
+{
+  "description": "The funnel's power at an illustrative run shape: 294 variants in 15 families, 31 years of search, a 5-year holdout. Stage 3 is not simulated. Edit the shape to match a real batch.",
+  "search_years": 31,
+  "holdout_years": 5,
+  "variants": [6, 12, 12, 12, 18, 18, 24, 24, 24, 24, 24, 24, 24, 24, 24],
+  "within_corr": 0.76,
+  "across_corr": 0.13,
+  "n_trials": 294,
+  "n_sims": 400,
+  "sharpe_grid": [0.0, 0.1, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.7, 0.75, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.75, 2.0],
+  "seed": 0
+}
