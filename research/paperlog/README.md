@@ -103,6 +103,24 @@ export PAPERLOG_DB=/path/to/papers.db      # default: ./papers.db
 export PAPERLOG_CONFIG=/path/to/config.yaml # default: the config.yaml in this folder
 ```
 
+`run` writes its digest and CSV relative to the current directory by default
+(`--digest-dir digests`, `--csv papers.csv`). Point both next to the log:
+`paperlog run --digest-dir <log folder>/digests --csv <log folder>/papers.csv`, or
+`--csv ''` to skip the CSV.
+
+**One writer at a time.** The log is a SQLite file synced through Drive, and two runs
+writing to it at once, or a run while Drive is still syncing it, can corrupt it.
+- One agreed person runs the weekly collection. The writers are `run`, `add`,
+  `rescreen`, `review` and `pending --claim`, and the API's `add`, `mark` and
+  `mark_ingested`; the factor pipeline is a writer when it claims papers. Anyone
+  else writes only after checking with the runner.
+- Every CLI command, even `stats` or `pending`, may update the log's schema when it
+  opens it. Run commands on the Drive file only as the agreed writer. The API's
+  read functions (`papers`, `get`, `pending`, `history`, `adopted`) open it read-only.
+- Before writing, check the file isn't mid-sync: no `papers.db-journal` or
+  `papers.db-wal` beside it, and not modified in the last 10 minutes.
+- To only read, copy the file first and query the copy.
+
 **Reading the log from other code:**
 
 ```python
