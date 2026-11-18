@@ -168,7 +168,7 @@ looked at once, at the final decision.
   independent no-skill candidates the in-sample winner's out-of-sample rank is
   uniform. PBO climbs toward 1 only when candidates are coupled, such as variants
   of one idea. Measured on `make_return_matrix` nulls: about 0.47 on average,
-  but anywhere from 0.06 to 0.78 for a single set
+  but anywhere from 0.08 to 0.89 for a single set
   ([pbo-and-haircut.md](pbo-and-haircut.md)).
 - **Correct p-values with the ledger's registered trial count as it is.**
   Holm, BY, the haircut Sharpe and the search adjustment take the full count.
