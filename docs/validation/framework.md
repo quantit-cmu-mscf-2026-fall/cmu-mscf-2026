@@ -289,6 +289,11 @@ is a count: 0, 1 or 2 real families, at an annual Sharpe of 0.5, 1.0 or 1.5.
 The decision rule is a hashed field of `GateConfig` (`decision_rule`): the
 rule and its q (baseline, BH at 0.05) are in the config hash, so changing
 either re-registers the gate; the gate run takes them from the config.
+**Superseded hashes (2026-11-18).** `8bda49ec…` and `5e89d78a…` are superseded by `5f590f13…`.
+The thresholds, q and data are unchanged; only the set of hashed fields grew (`min_holdout_coverage`,
+then `decision_rule`). A ledger entry recorded under an older hash refers to the same registered
+rule. It is not a different or tampered config; read it as this registration's earlier hash.
+
 `min_holdout_coverage = 0.5` is a guard against a survivor seen on a sliver of
 the holdout, not a calibrated value: nothing was tuned to choose half. The run
 registers the file's config with
