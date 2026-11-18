@@ -468,6 +468,26 @@ class TestMedianTiesAndUnusableSplits:
 
             assert not (result["winner_oos_sharpe"] == 0.0).any(), seed
 
+    def test_idle_winner_has_no_oos_sharpe_and_ranks_last_over_many_seeds(self):
+        # Column 0 earns +0.003 a day for 400 days, then is exactly 0.0. Split 0
+        # trains on blocks 0-3 and tests on 4-7, so column 0's OOS half is all
+        # zeros: its Sharpe must be NaN and it must rank last (1/11), on any
+        # BLAS summation order. Rounding residue used to give it a finite value.
+        checked = 0
+        for seed in range(200):
+            rng = np.random.default_rng(seed)
+            matrix = pd.DataFrame(rng.normal(0, 0.01, (800, 10)))
+            matrix.iloc[:400, 0] += 0.003
+            matrix.iloc[400:, 0] = 0.0
+
+            result = cscv(matrix, n_blocks=8)
+
+            if result["winner_columns"][0] == 0:
+                checked += 1
+                assert np.isnan(result["winner_oos_sharpe"][0]), seed
+                assert result["oos_ranks"].iloc[0] == pytest.approx(1 / 11), seed
+        assert checked > 100
+
 
 # REVIEW.md item 3: null calibration and power on `synth.make_return_matrix`,
 # with the correlated (`rho`) and autocorrelated (`ar1`) nulls switched on.
