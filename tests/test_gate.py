@@ -18,6 +18,7 @@ import json
 import subprocess
 import sys
 from datetime import UTC, datetime
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -210,6 +211,46 @@ class TestGateConfig:
 
     def test_no_draws_are_needed_without_the_bootstrap(self, market):
         assert config_for(market, n_boot=0, thresholds=Thresholds(stage1="rho")).n_boot == 0
+
+
+REAL = dict(
+    holdout_start="2024-01-01",
+    holdout_end="2025-12-31",
+    data_version="crsp-2025",
+    generator="test-gen",
+)
+
+
+class TestRealDataCannotSearchTheHoldout:
+    """docs/validation.md: the holdout (2021-2025) is for the final stage only."""
+
+    @pytest.mark.parametrize("search_end", ["2021-01-01", "2023-12-31"])
+    def test_a_real_data_search_into_the_holdout_is_refused(self, search_end):
+        with pytest.raises(ValueError, match="real holdout begins"):
+            GateConfig(search_end=search_end, **REAL)
+
+    def test_it_cannot_be_registered_or_run(self, ledger, market):
+        # Refused at construction, so there is no config to register.
+        with pytest.raises(ValueError, match="2021-01-01"):
+            register(GateConfig(search_end="2023-12-31", **REAL))
+        assert not (ledger / "runs.jsonl").exists()
+
+    def test_the_last_search_day_before_the_holdout_is_accepted(self):
+        config = GateConfig(search_end="2020-12-31", **{**REAL, "holdout_start": "2021-01-01"})
+        assert config.search_end == "2020-12-31"
+
+    def test_synthetic_data_may_search_any_dates(self):
+        config = GateConfig(search_end="2023-12-31", **{**REAL, "data_version": "synthetic"})
+        assert config.data_version == gate.SYNTHETIC_DATA_VERSION
+
+    def test_the_docs_name_the_same_date(self):
+        root = Path(__file__).resolve().parent.parent
+        for doc in ("docs/validation.md", "docs/handoff/acceptance-gate.md"):
+            text = (root / doc).read_text(encoding="utf-8")
+            assert gate.HOLDOUT_OPENS.isoformat() in text, doc
+        assert "HOLDOUT_OPENS" in (root / "docs/handoff/acceptance-gate.md").read_text(
+            encoding="utf-8"
+        )
 
 
 class TestRegistration:

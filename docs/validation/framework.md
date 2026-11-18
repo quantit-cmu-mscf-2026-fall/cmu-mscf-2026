@@ -283,11 +283,20 @@ is a count: 0, 1 or 2 real families, at an annual Sharpe of 0.5, 1.0 or 1.5.
 | Funnel, reported alongside | stage 1 BH at **q₁ = 0.10** on bootstrap family p-values; stage 2 no gate; stage 4 BH across survivors at **q₄ = 0.50** |
 | Stage 1's p-value | `stage1 = "bootstrap"`, 1,999 draws |
 | α₃ | not registered: stage 3 isn't built, so the config has no `factors_digest` |
-| Registered config | `scripts/gate_crsp_v1.json`: the `GateConfig` above, hash `5e89d78ae00e9537af3db3aa20810c5804c1d6c3ae892cf91600ce962e179009` |
+| Stage 4 coverage | a survivor needs a return on at least **half** of the holdout's business days (`min_holdout_coverage = 0.5`), or it fails stage 4 untested, staying in the family at p = 1 |
+| Registered config | `scripts/gate_crsp_v1.json`: the `GateConfig` above, hash `5f590f13f63e94f33fbdf960089c1fc01881a6fedf2437d8afbc3a0c396af7da` (`8bda49ec…` before `decision_rule` was added to the hashed config; `5e89d78a…` before the coverage field) |
 
-`GateConfig` has no field for the decision rule, so its hash covers the
-funnel only. The rule and its q (baseline, BH at 0.05) are fixed here and in
-the same file's `decision_rule`; the gate run takes them from there. The run
+The decision rule is a hashed field of `GateConfig` (`decision_rule`): the
+rule and its q (baseline, BH at 0.05) are in the config hash, so changing
+either re-registers the gate; the gate run takes them from the config.
+**Superseded hashes (2026-11-18).** `8bda49ec…` and `5e89d78a…` are superseded by `5f590f13…`.
+The decision rule, q, stage thresholds and data are unchanged. `5e89d78a…` → `8bda49ec…` added the
+stage-4 coverage guard (`min_holdout_coverage`), and `8bda49ec…` → `5f590f13…` moved `decision_rule` into
+the hashed config. A ledger entry recorded under an older hash refers to this registration at that
+step. It is not a different or tampered config.
+
+`min_holdout_coverage = 0.5` is a guard against a survivor seen on a sliver of
+the holdout, not a calibrated value: nothing was tuned to choose half. The run
 registers the file's config with
 `gate.register(GateConfig.from_dict(json.load(f)["gate_config"]))` on the
 run's ledger before scoring, replacing the crsp-v1 manifest's earlier q₄ = 0.30
