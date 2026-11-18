@@ -12,6 +12,7 @@ from datetime import date, timedelta
 
 import pandas as pd
 import pytest
+from holdout_fakes import make_protocol
 
 from capstone import holdout_authority as ha
 from capstone import holdout_live as live
@@ -95,6 +96,21 @@ def test_the_old_guard_still_refuses_a_live_read(monkeypatch):
         ha.guard_shared_read("crsp_daily_live", ["date"], shift(END, 30), "date", False, None)
 
 
+def spend_real_look():
+    """Put a real `holdout-look` in the (temporary) ledger, as a spent look would."""
+    protocol = make_protocol(dataset=ha.REAL_DATASET)
+    ha._log_look(
+        protocol,
+        {"approved_by": "synthetic gate owner", "cosigned_by": None},
+        {"candidates": ["a" * 16], "dates": [ha.REAL_PERIOD[0], END], "id": "r" * 64},
+    )
+
+
+@pytest.fixture(autouse=True)
+def ledger(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path / "ledger"))
+
+
 @pytest.fixture
 def cache(tmp_path, monkeypatch):
     """A synthetic CRSP-shaped fixture file with rows before, inside and after the
@@ -111,6 +127,7 @@ def cache(tmp_path, monkeypatch):
         }
     )
     rows.to_parquet(tmp_path / "cache" / "crsp_daily_live.parquet")
+    spend_real_look()
     return tmp_path / "cache"
 
 
@@ -135,3 +152,37 @@ def test_load_live_refuses_before_any_read_or_sync(cache, monkeypatch):
     monkeypatch.setenv("CAPSTONE_HOLDOUT_GUARD", "on")
     with pytest.raises(ha.HoldoutSealed):  # the old route: still refused
         shared_data.load("crsp_daily_live", start=AFTER, end=shift(END, 40), auto_sync=False)
+
+
+def test_load_live_needs_the_real_look_to_be_spent(cache, tmp_path, monkeypatch):
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path / "empty-ledger"))
+    import pyarrow.parquet as pq
+
+    monkeypatch.setattr(
+        pq, "read_table", lambda *a, **k: pytest.fail("a read happened before the look was spent")
+    )
+    with pytest.raises(live.LiveReadRefused, match="live_read_look_unspent"):
+        shared_data.load_live("crsp_daily_live", start=AFTER, end=None, auto_sync=False)
+    assert "live_read_look_unspent" in live.LIVE_READ_REASONS
+
+
+def test_a_synthetic_look_does_not_open_the_live_route(cache, tmp_path, monkeypatch):
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path / "other-ledger"))
+    protocol = make_protocol()
+    ha._log_look(
+        protocol,
+        {"approved_by": "synthetic gate owner", "cosigned_by": None},
+        {"candidates": ["a" * 16], "dates": [ha.REAL_PERIOD[0], END], "id": "s" * 64},
+    )
+    with pytest.raises(live.LiveReadRefused, match="live_read_look_unspent"):
+        shared_data.load_live("crsp_daily_live", start=AFTER, end=None, auto_sync=False)
+
+
+def test_load_live_rechecks_the_frame_after_the_read(cache, monkeypatch):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    leaked = pa.table({"date": pd.to_datetime([END, AFTER]), "permno": [1, 1]})
+    monkeypatch.setattr(pq, "read_table", lambda *a, **k: leaked)
+    with pytest.raises(live.LiveReadRefused, match="live_read_touches_holdout"):
+        shared_data.load_live("crsp_daily_live", start=AFTER, end=None, auto_sync=False)
