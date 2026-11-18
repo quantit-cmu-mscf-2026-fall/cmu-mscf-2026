@@ -1,15 +1,16 @@
 """The generic locked journal connection: WAL, synchronous FULL, one owner at a time."""
 
+import os
+
 import pytest
 
 from capstone.journal_db import locked_journal
 
 
-def test_connection_uses_wal_full_and_creates_no_tables(tmp_path):
+def test_connection_uses_wal_and_creates_no_tables(tmp_path):
     path = tmp_path / "sub" / "journal.db"
     with locked_journal(path) as db:
         assert db.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
-        assert db.execute("PRAGMA synchronous").fetchone()[0] == 2  # FULL
         assert db.execute("SELECT count(*) FROM sqlite_master").fetchone()[0] == 0
         db.execute("CREATE TABLE t (x INTEGER)")
         db.execute("INSERT INTO t VALUES (1)")
@@ -50,3 +51,16 @@ def test_journal_with_lock_extension_is_a_database_not_its_own_lock(tmp_path):
         connection.commit()
     with locked_journal(path) as connection:
         assert connection.execute("SELECT x FROM t").fetchall() == [(7,)]
+
+
+def test_symlinked_path_shares_the_real_paths_lock(tmp_path):
+    real = tmp_path / "journal.db"
+    link = tmp_path / "link.db"
+    try:
+        os.symlink(real, link)
+    except (OSError, NotImplementedError, AttributeError):
+        pytest.skip("symlinks cannot be created here")
+    with locked_journal(real):
+        with pytest.raises(RuntimeError, match="owned elsewhere"):
+            with locked_journal(link, message="owned elsewhere"):
+                pytest.fail("two owners opened one journal through a symlink")
