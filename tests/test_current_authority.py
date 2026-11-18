@@ -165,3 +165,83 @@ def test_the_sealed_holdout_is_never_opened_by_a_current_authorization(store):
     authorize(start="2026-01-01")  # after the sealed period: fine
     authorize(start="2019-01-01", end="2020-12-31")  # before it: not the holdout
     assert current_authority.real_holdout_spent() is False
+
+
+def test_a_plain_string_of_fields_is_refused_not_split_into_letters(store):
+    with pytest.raises(HoldoutSealed, match="not one string"):
+        authorize(fields="close")
+    assert not store.exists()
+    record = authorize(fields=["close"])
+    with pytest.raises(HoldoutSealed, match="not one string"):
+        current_authority.require_valid_at(
+            record, vendor="synthetic-vendor", start="2026-02-01", end="2026-03-01", fields="close"
+        )
+
+
+@pytest.mark.parametrize("value", ["   ", "relative/store", "."])
+def test_the_store_root_must_be_a_nonblank_absolute_path(tmp_path, monkeypatch, value):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv(current_authority.ROOT_ENV, value)
+    with pytest.raises(HoldoutSealed, match="no current feed is configured|absolute"):
+        authorize()
+    assert not (tmp_path / "relative").exists()
+    assert not (tmp_path / "authorizations").exists()
+
+
+def test_only_the_hashed_fields_are_tamper_evident(store):
+    record = authorize()
+    path = store / "authorizations" / f"{record}.json"
+    row = json.loads(path.read_text("utf-8"))
+    path.write_text(json.dumps(row | {"at": "1999-01-01T00:00:00+00:00"}), "utf-8")
+    assert current_authority.authorization(record)["at"] == "1999-01-01T00:00:00+00:00"
+    path.write_text(json.dumps(row | {"authorized_by": "Someone Else"}), "utf-8")
+    with pytest.raises(HoldoutSealed, match="record changed"):
+        current_authority.authorization(record)
+
+
+def test_revoking_an_unknown_record_is_refused_and_writes_nothing(store):
+    authorize()
+    with pytest.raises(HoldoutSealed, match="no current authorization"):
+        current_authority.revoke_current("f" * 64, revoked_by="A. Signer", reason="mistake")
+    assert not (store / "revocations.jsonl").exists()
+
+
+def _write_record(store, row):
+    record = current_authority.record_identity(row)
+    (store / "authorizations").mkdir(parents=True, exist_ok=True)
+    path = store / "authorizations" / f"{record}.json"
+    path.write_text(json.dumps(row | {"record_id": record}), "utf-8")
+    return record
+
+
+def test_a_record_must_carry_exactly_its_schemas_keys(store):
+    base = {
+        "vendor": "synthetic-vendor",
+        "dataset_id": current_authority.current_dataset("synthetic-vendor"),
+        "start": "2026-01-05",
+        "end": None,
+        "fields": ["close"],
+        "authorized_by": "A. Signer",
+        "at": "2026-01-05T21:00:00+00:00",
+    }
+    for row in (
+        base | {"schema_version": 2},  # schema 2 needs `issue`
+        base | {"schema_version": 1, "issue": 1},  # schema 1 has no `issue`
+        base | {"schema_version": 2, "issue": 1, "extra": "x"},
+        base | {"schema_version": 3, "issue": 1},  # unknown schema
+    ):
+        record = _write_record(store, row)
+        with pytest.raises(HoldoutSealed, match="record changed"):
+            current_authority.authorization(record)
+
+
+def test_a_revocation_line_must_carry_exactly_its_keys(store):
+    record = authorize()
+    current_authority.revoke_current(record, revoked_by="A. Signer", reason="rotated")
+    log = store / "revocations.jsonl"
+    row = json.loads(log.read_text("utf-8").splitlines()[0])
+    for changed in (row | {"extra": 1}, {k: v for k, v in row.items() if k != "reason"}):
+        log.write_text(json.dumps(changed), "utf-8")
+        with pytest.raises(HoldoutSealed, match="revocation log changed"):
+            current_authority.revocations(record)

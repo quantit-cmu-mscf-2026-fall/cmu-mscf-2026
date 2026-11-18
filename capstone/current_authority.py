@@ -9,8 +9,10 @@ extracting sponsor data); this is only the shape of the record a signer would wr
 
 Current data after the research window is not a holdout: it is read every
 session. A named person authorizes a vendor's feed over [start, end] (end may be
-open) for a declared set of fields; the record is immutable, tamper-evident
-(`record_id` = digest of its content) and may be validated any number of times.
+open) for a declared set of fields; the record is immutable (`record_id` = digest of
+its hashed content) and may be validated any number of times. Only the hashed fields
+are tamper-evident: `at` is kept in the record
+but is not hashed (schema 2), so it can be rewritten unnoticed.
 Revocation is appended (never deleted) with an effective date.
 
 Record ids, schema 2: the content hashed is vendor, window, fields, signer and an
@@ -68,9 +70,11 @@ def current_dataset(vendor):
 
 def store_root():
     """The configured store; with none configured no current feed is authorized."""
-    root = os.environ.get(ROOT_ENV)
+    root = (os.environ.get(ROOT_ENV) or "").strip()
     if not root:
         raise HoldoutSealed(f"no current feed is configured: set {ROOT_ENV} to a store directory")
+    if not Path(root).is_absolute():
+        raise HoldoutSealed(f"{ROOT_ENV} must be an absolute path, or the store follows the cwd")
     return Path(root)
 
 
@@ -97,6 +101,8 @@ def _now():
 
 def authorize_current(vendor, *, start, end, fields, authorized_by):
     """Explicit operator action; returns the immutable authorization's record_id."""
+    if isinstance(fields, str):
+        raise HoldoutSealed("current fields are a list of names, not one string")
     names = sorted(set(fields))
     if not names or any(not isinstance(n, str) or not n for n in names):
         raise HoldoutSealed("a current authorization declares its fields")
@@ -197,6 +203,8 @@ def revocations(record_id):
 def require_valid_at(record_id, *, vendor, start, end, fields):
     """Frozen check: the authorization covered [start, end] and was unrevoked at end."""
     row = authorization(record_id)
+    if isinstance(fields, str):
+        raise HoldoutSealed("current fields are a list of names, not one string")
     first, last = _day(start), _day(end)
     if row["dataset_id"] != current_dataset(vendor):
         raise HoldoutSealed("current authorization belongs to another vendor")
