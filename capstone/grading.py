@@ -21,10 +21,10 @@ import pandas as pd
 
 from capstone.evaluate import (
     MIN_LOCAL_FDR_CANDIDATES,
+    _pfdr,
     bh_adjusted,
     by_adjusted,
     deflated_sharpe_ratio,
-    _pfdr,
     estimate_pi0,
     haircut_sharpe,
     holm_adjusted,
