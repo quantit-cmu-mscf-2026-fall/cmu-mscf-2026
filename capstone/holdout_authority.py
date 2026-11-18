@@ -381,8 +381,9 @@ def real_look_spent():
     """
     return any(
         entry.get("name") == LOOK_RUN_NAME
-        and "synthetic" not in entry.get("tags", [])
-        and entry.get("params", {}).get("dataset") == REAL_DATASET
+        and "synthetic" not in (entry.get("tags") or [])
+        and isinstance(entry.get("params"), dict)
+        and entry["params"].get("dataset") == REAL_DATASET
         for entry in runlog.read_entries()
     )
 
