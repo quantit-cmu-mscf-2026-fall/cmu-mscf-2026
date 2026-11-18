@@ -21,6 +21,7 @@ import pandas as pd
 
 from capstone.evaluate import (
     MIN_LOCAL_FDR_CANDIDATES,
+    _pfdr,
     bh_adjusted,
     by_adjusted,
     deflated_sharpe_ratio,
@@ -109,12 +110,30 @@ def graded_scores(
 
 
 def search_fdr_estimate(p1: pd.Series, passed: pd.Series) -> float:
-    """Storey's plug-in FDR of the stage-1 rejections: pi0 m t / R, capped at 1."""
-    n_passed = int(passed.sum())
-    if n_passed == 0:
+    """Storey's positive FDR of the stage-1 rejections, capped at 1.
+
+    The rejection region is [0, t], with t the largest passing p-value, and the
+    estimate is pi0 * t / ((R / m) * (1 - (1 - t)^m)) for R p-values at or below
+    t among m (`evaluate._pfdr`, Storey 2002 Algorithm 1(c)). The last factor
+    is the chance of making any rejection at all. Without it the estimate is
+    pi0 * m * t / R, which at BH's own cutoff cannot exceed pi0 * q, so it
+    could never say "stage 1 is passing noise". With it, a lone pass among
+    all-null candidates reads near 1. NaN when nothing passed.
+
+    Like `evaluate.estimate_pi0`, it assumes independent candidates: when a
+    shared factor lifts many candidates at once (`rho` near 0.5), the batch
+    passes together and the estimate reads low, so treat a low value under
+    strong correlation as unverified.
+    """
+    p = p1.dropna()
+    if int(passed.reindex(p.index, fill_value=False).sum()) == 0:
         return float("nan")
-    threshold = float(p1[passed].max())
-    return float(min(1.0, estimate_pi0(p1, 0.5) * len(p1) * threshold / n_passed))
+    threshold = float(p[passed.reindex(p.index, fill_value=False)].max())
+    values = p.to_numpy(dtype=float)
+    if threshold <= 0.0:  # the limit as t -> 0 is pi0 / R (and 1 - (1 - t)^m would be 0)
+        rejected = max(int(np.sum(values <= 0.0)), 1)
+        return float(min(1.0, estimate_pi0(p, 0.5) / rejected))
+    return _pfdr(values, 0.5, threshold)
 
 
 def pbo(search: pd.DataFrame) -> float:
@@ -147,11 +166,12 @@ def stage4_stat(stats: pd.DataFrame, alive: pd.Series, th: Thresholds) -> pd.Ser
 
 
 def expected_mean(card: pd.DataFrame) -> pd.Series:
-    """Per-period mean incubation should expect: never the raw in-sample mean.
+    """Per-period mean incubation should expect: at most the raw in-sample mean.
 
     min(search mean x max(haircut Sharpe / Sharpe, 0), holdout mean, search
     mean), skipping NaN terms (a family with no haircut keeps the other two).
-    See the module docstring for why.
+    The raw search mean itself is returned only when the other two terms are
+    both missing. See the module docstring for why.
     """
     ratio = (card["haircut_sharpe"] / card["sharpe"]).clip(lower=0.0)
     haircut_mean = card["is_mean"] * ratio

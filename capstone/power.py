@@ -498,6 +498,12 @@ def spec_for_gate(
     Stage 3 is not modelled here (it is reported as no gate, as in
     `power_analysis`).
     """
+    missing = [c for c in search.columns if c not in family.index]
+    if missing:
+        raise ValueError(
+            f"family has no label for {len(missing)} search column(s): {missing[:5]}"
+            + (" ..." if len(missing) > 5 else "")
+        )
     codes, names = pd.factorize(family.reindex(search.columns))
     corr = search.corr().to_numpy()
     same = codes[:, None] == codes[None, :]

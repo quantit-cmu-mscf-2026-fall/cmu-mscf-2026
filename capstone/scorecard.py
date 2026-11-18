@@ -118,14 +118,14 @@ class GateHeader:
 
     `factors_digest` names stage 3's factor frame (None: not measured).
     `trial_count` is the ledger count for `trial_scope`; `search_fdr_estimate`
-    is Storey's plug-in FDR of the stage-1 rejections on the family p-values
+    is Storey's positive FDR of the stage-1 rejections on the family p-values
     (NaN when nothing passed stage 1); `pbo` is CSCV on the search period's
     variants (NaN when infeasible); `avg_correlation` is across every
     variant on the search period. `registered_utc` is when the config went
     on the ledger. `min_detectable_sharpe` is, per stage and end to end, the
-    annualised Sharpe a real family needs to pass at 50% and 80% power under
-    this gate's own configuration (`capstone.power`, `power_sims` simulated
-    worlds); reported only, never read by a decision, and None (with
+    annualised Sharpe a real family needs to pass the funnel at 50% and 80%
+    power under this gate's own configuration (`capstone.power`, `power_sims`
+    simulated worlds); reported only, never read by a decision, and None (with
     `power_sims` 0) when no power budget was run.
     """
 
