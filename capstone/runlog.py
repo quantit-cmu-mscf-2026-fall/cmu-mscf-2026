@@ -17,13 +17,12 @@ import argparse
 import json
 import os
 import subprocess
-import warnings
 from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 
 LEDGER_FILENAME = "runs.jsonl"
-# The name of an entry that leaves earlier entries out of the trial count.
+# The name of an entry that can leave earlier unseen entries out of the count.
 CORRECTION_NAME = "ledger-correction"
 
 
@@ -205,7 +204,8 @@ class _Corrections:
     """The ledger's entries sorted into trials and exclusions.
 
     The ledger is append-only: a mistaken or duplicate run is never deleted.
-    A later entry named `CORRECTION_NAME` excludes it instead, and says why::
+    A later entry named `CORRECTION_NAME` marks it as excluded instead, and says why
+    (a seen target still counts as a trial; see below)::
 
         log_run(CORRECTION_NAME, params={
             "ledger_name": "evaluate-factor",
@@ -223,14 +223,19 @@ class _Corrections:
 
     A retraction can be retracted in turn, which restores what it undid.
 
-    An exclusion item excludes the entry logged under `ledger_name` at `ts_utc`,
+    Each exclusion item targets one entry logged under `ledger_name` at `ts_utc`,
     *before* the correction, whose params hold every other key of the item as
     the same JSON value (`1` does not match `true`): the timestamp names the
     run, and the params it lists tell apart runs logged in the same microsecond.
+    Matching consumes the earliest unmatched entry for each item. A target with
+    recorded metrics remains a trial: seen results always count. A correction
+    line repeated verbatim (the same entry, `ts_utc` included, as when a sync
+    appends a line twice) is read once, so the copy cannot consume a second run.
 
     Attributes:
         trials: entries that count, in ledger order.
-        excluded: entries an active correction excludes, in ledger order.
+        excluded: targets of active corrections, in ledger order; seen targets
+            also remain in `trials`.
         corrections: how many correction entries the ledger holds.
         retracted: how many of those a later active retraction undid.
         unmatched: active exclusion items that matched no earlier run.
@@ -247,9 +252,18 @@ class _Corrections:
     def __init__(self, numbered: list[tuple[int, dict]]):
         # position -> ("exclude", ledger_name, items) or ("retract", target positions)
         parsed: dict[int, tuple] = {}
+        seen_lines: set[str] = set()
         for pos, (line, entry) in enumerate(numbered):
             if entry.get("name") != CORRECTION_NAME:
                 continue
+            try:
+                key = json.dumps(entry, sort_keys=True)
+            except (TypeError, ValueError):
+                key = None
+            if key is not None:
+                if key in seen_lines:
+                    continue  # a verbatim repeat of an earlier correction line
+                seen_lines.add(key)
             params = entry.get("params") or {}
             if not isinstance(params, dict):
                 raise _malformed(line, "params is not an object")
@@ -312,15 +326,22 @@ class _Corrections:
                 params = entry.get("params")
                 params = params if isinstance(params, dict) else {}
                 for at, n, item in rules.get((name, ts), ()):
-                    if at > pos and all(
-                        k in params and _same_json(params[k], v)
-                        for k, v in item.items()
-                        if k != "ts_utc"
+                    if (
+                        (at, n) not in used
+                        and at > pos
+                        and all(
+                            k in params and _same_json(params[k], v)
+                            for k, v in item.items()
+                            if k != "ts_utc"
+                        )
                     ):
                         hit = (at, n)
                         used.add(hit)
                         break
-            (self.excluded if hit else self.trials).append(entry)
+            if hit:
+                self.excluded.append(entry)
+            if not hit or _is_seen(entry):
+                self.trials.append(entry)
         self.unmatched = sum(len(r[2]) for r in active.values() if r[0] == "exclude") - len(used)
 
 
@@ -346,7 +367,7 @@ def trial_count(
     *,
     include_tags: list[str] | None = None,
     exclude_tags: list[str] | None = None,
-    count_seen_exclusions: bool = False,
+    count_seen_exclusions: bool = True,
 ) -> int:
     """How many trials the ledger has logged, for a multiple-testing correction.
 
@@ -366,14 +387,13 @@ def trial_count(
         exclude_tags: drop entries carrying any of these tags. Use it to keep
             methodology runs out of a strategy's family size; the convention
             is to tag those "synthetic".
-        count_seen_exclusions: count a run a correction excludes anyway when it
-            recorded `metrics`, i.e. its result may have been seen. The default
-            honours every active correction but warns when that drops such a
-            run. Whether a seen run may be excluded at all is a team policy
-            question; this is the count that does not depend on the answer.
+        count_seen_exclusions: retained for callers that explicitly passed True.
+            Seen runs always count; False is refused rather than returning an
+            unsafe count for inference. Inspect `stats` for correction targets.
 
     Corrections (`_Corrections`) apply first: an entry an active ledger
-    correction excludes is not a trial, and neither is the correction itself.
+    correction excludes is not a trial only if it recorded no metrics. Seen
+    results always count. The correction itself is never a trial.
 
     Returns:
         The number of matching entries. Entries written without a `name` are
@@ -391,28 +411,16 @@ def trial_count(
             excluded everything, so it fails loudly instead of returning 0.
         TypeError: if a tag filter is a bare string. `set("synthetic")` is a
             set of letters, which would silently match nothing.
-        ValueError: from `read_entries`, if a ledger line is malformed, or
-            if a ledger correction is.
+        ValueError: if `count_seen_exclusions` is not True, a ledger line is
+            malformed, or a ledger correction is.
     """
     for arg, tags in (("include_tags", include_tags), ("exclude_tags", exclude_tags)):
         if isinstance(tags, str):
             raise TypeError(f"{arg} takes a list of tags, not a string: [{tags!r}]")
+    if count_seen_exclusions is not True:
+        raise ValueError("seen runs always count; count_seen_exclusions must be True")
     ledger = _Corrections(_read_numbered())
     entries = [e for e in ledger.trials if _in_scope(e, name, include_tags, exclude_tags)]
-    seen = [
-        e for e in ledger.excluded if _is_seen(e) and _in_scope(e, name, include_tags, exclude_tags)
-    ]
-    if count_seen_exclusions:
-        entries += seen
-    elif seen:
-        warnings.warn(
-            f"{len(seen)} run(s) left out of this count were excluded by a ledger "
-            "correction although they recorded metrics, so their results may have "
-            "been seen. trial_count(..., count_seen_exclusions=True) counts them; "
-            "`python -m capstone.runlog stats` lists them by name.",
-            UserWarning,
-            stacklevel=2,
-        )
     if not entries:
         where = ledger_path()
         scope = f"named {name!r} " if name is not None else ""
@@ -430,10 +438,8 @@ def _cmd_stats() -> None:
     """Print the numbers a correction needs: how many trials, by whom, of what.
 
     Runs per name are trials: ledger corrections applied, as in `trial_count`.
-    What the corrections excluded is listed too, with the runs among them that
-    had recorded metrics (results possibly seen) apart: the open policy question
-    is whether those may be excluded, so the count that ignores the answer is
-    printed beside the one that honours it.
+    Correction targets are listed separately: unseen targets are excluded,
+    while targets with recorded metrics remain in the trial count.
     """
     numbered = _read_numbered()
     entries = [entry for _, entry in numbered]
@@ -444,16 +450,16 @@ def _cmd_stats() -> None:
     seen = [e for e in ledger.excluded if _is_seen(e)]
     print(f"total runs: {len(entries)}")
     print(f"trials (corrections applied): {len(trials)}")
-    print(f"excluded by corrections: {len(ledger.excluded)}")
-    print(f"  of which results already recorded (seen): {len(seen)}")
-    print(f"trials if seen exclusions were counted: {len(trials) + len(seen)}")
+    print(f"targeted by corrections: {len(ledger.excluded)}")
+    print(f"excluded unseen runs: {len(ledger.excluded) - len(seen)}")
+    print(f"seen correction targets retained as trials: {len(seen)}")
     print(f"correction entries: {ledger.corrections} ({ledger.retracted} retracted)")
     print(f"correction items matching no earlier run: {ledger.unmatched}")
     print(f"distinct names: {len(names)}")
     for name, count in names.most_common():
         print(f"  {name}: {count}")
     if ledger.excluded:
-        print("excluded per name (of which seen):")
+        print("correction targets per name (of which seen, retained):")
         excluded = Counter(entry.get("name", "?") for entry in ledger.excluded)
         seen_names = Counter(entry.get("name", "?") for entry in seen)
         for name, count in excluded.most_common():

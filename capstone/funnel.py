@@ -447,7 +447,11 @@ def family_statistics(
 
 
 def _final_gate(
-    stats: pd.DataFrame, alive: pd.Series, th: Thresholds, prefix: str = "ho_"
+    stats: pd.DataFrame,
+    alive: pd.Series,
+    th: Thresholds,
+    prefix: str = "ho_",
+    covered: pd.Series | None = None,
 ) -> pd.Series:
     """Stage 4 on the holdout, for the candidates still alive.
 
@@ -458,17 +462,25 @@ def _final_gate(
     A candidate whose holdout was observed but gives no p-value (a variant
     that went flat out of sample) fails: under BH it counts as p = 1, so it
     stays in the family size; under DSR it does not pass.
+
+    `covered` (default: everyone) marks the live candidates whose holdout was
+    observed enough to test (the gate's registered minimum coverage). A live
+    candidate that is not covered is not read: it fails, like a flat one, and
+    still counts in the family (BH at p = 1; DSR's survivor count).
     """
     n_alive = int(alive.sum())
     if n_alive == 0:
         return alive.copy()
-    missing = ~(stats.loc[alive, f"{prefix}n_obs"] > 0)
+    readable = alive
+    if covered is not None:
+        readable = alive & covered.reindex(stats.index, fill_value=False).astype(bool)
+    missing = ~(stats.loc[readable, f"{prefix}n_obs"] > 0)
     if missing.any():
         raise ValueError(
             f"{int(missing.sum())} candidates reach stage 4 with no holdout statistics; "
             "compute family_statistics with holdout_start"
         )
-    p = stats.loc[alive, f"{prefix}p"]
+    p = stats.loc[alive, f"{prefix}p"].where(readable[alive])
     if th.final == "bh":
         passed = benjamini_hochberg(p.fillna(1.0), th.q4)
         return passed.reindex(stats.index, fill_value=False)

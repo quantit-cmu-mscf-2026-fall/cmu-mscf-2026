@@ -30,6 +30,12 @@ from pathlib import Path
 
 import pandas as pd
 
+from capstone.holdout_authority import (
+    HoldoutSealed,
+    guard_enabled,
+    require_discovery_query,
+)
+
 CACHE_DIR = Path(__file__).resolve().parent.parent / "data_cache"
 
 # CRSP share codes 10 and 11 = ordinary common shares of US-incorporated firms.
@@ -89,6 +95,7 @@ def crsp_daily(
     (`crsp.dsenames`), which is time-varying: a company that changed listing is
     correctly included only for the period it qualified.
     """
+    require_discovery_query(end)
     where = [
         "d.date between %(start)s and %(end)s",
         f"n.shrcd in {tuple(share_codes)}",
@@ -135,6 +142,7 @@ def sp500_members(conn, start: str, end: str) -> pd.DataFrame:
     constituent list instead is the single most effective way to make a backtest
     look excellent for no reason.
     """
+    require_discovery_query(end)
     query = """
         select permno, start as mbr_start, ending as mbr_end
         from crsp.dsp500list
@@ -154,10 +162,34 @@ def cached_crsp_daily(conn, start: str, end: str, *, name: str, **kwargs) -> pd.
     Cache aggressively while iterating; delete the file to refresh. The cache
     lives in data_cache/, which is gitignored — CRSP data must not enter the
     public repository.
+
+    With the holdout guard on (`CAPSTONE_HOLDOUT_GUARD`), the query dates must end by
+    2020-12-31 and a cache hit is read with the dates as a parquet filter, so rows
+    past `end` that an earlier, wider pull left in the file never reach memory.
     """
+    require_discovery_query(start)
+    require_discovery_query(end)
     path = _cache_path(f"crsp_{name}")
     if path.exists():
-        return pd.read_parquet(path)
+        if not guard_enabled():
+            return pd.read_parquet(path)
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        with path.open("rb") as source:
+            schema = pq.ParquetFile(source).schema_arrow
+            if len(schema.get_all_field_indices("date")) != 1:
+                raise HoldoutSealed("cached CRSP needs one authoritative date column")
+            kind = schema.field("date").type
+            if not (pa.types.is_date(kind) or (pa.types.is_timestamp(kind) and kind.tz is None)):
+                raise HoldoutSealed("cached CRSP date schema is not bounded timezone-naive dates")
+            bounds = [pd.Timestamp(start), pd.Timestamp(end)]
+            if pa.types.is_date(kind):
+                bounds = [value.date() for value in bounds]
+            source.seek(0)
+            return pq.read_table(
+                source, filters=[("date", ">=", bounds[0]), ("date", "<=", bounds[1])]
+            ).to_pandas()
     frame = crsp_daily(conn, start, end, **kwargs)
     frame.to_parquet(path)
     return frame
