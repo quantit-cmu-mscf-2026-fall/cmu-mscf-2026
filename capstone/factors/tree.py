@@ -362,34 +362,59 @@ def _strip_negation(node: Node) -> tuple[bool, Node]:
             return negated, node
 
 
+def _sum_terms(node: Node, negate: bool = False) -> list[Node]:
+    """The signed terms of a run of `+` and `-`: `a - b` is `a + -b`, however grouped."""
+    if isinstance(node, BinOp) and node.op == "+":
+        return _sum_terms(node.left, negate) + _sum_terms(node.right, negate)
+    if isinstance(node, BinOp) and node.op == "-" and node.left != Const(0.0):
+        return _sum_terms(node.left, negate) + _sum_terms(node.right, not negate)
+    return [Unary("neg", node)] if negate else [node]
+
+
+def _scales(node: Node, keep_parameters: bool) -> bool:
+    """A division by a constant, which the shape key reads as no operation at all."""
+    return (
+        not keep_parameters
+        and isinstance(node, BinOp)
+        and node.op == "/"
+        and isinstance(_strip_negation(node.right)[1], Const)
+    )
+
+
 def _signed_key(node: Node, keep_parameters: bool) -> str:
     """Key with every negation hoisted to the front: `-1 * x`, `x * -1`, `-(x)` and
-    `0 - x` are the same factor, and a product's sign is the parity of its negations."""
-    negated, node = _strip_negation(node)
-    if isinstance(node, BinOp) and node.op == "*":
-        factors: list[Node] = []
-        pending = [node]
-        while pending:  # flatten the product through any negations inside it
-            flipped, part = _strip_negation(pending.pop())
-            negated ^= flipped
-            if isinstance(part, BinOp) and part.op == "*":
-                pending += [part.right, part.left]
-            else:
-                factors.append(part)
-        kept = [f for f in factors if f != Const(1.0)] or factors[:1]  # 1 * x is x
-        if len(kept) > 1:
-            terms = sorted(_key(f, keep_parameters) for f in kept)
-            body = f"(* {' '.join(terms)})"
+    `0 - x` are the same factor, and a product's sign is the parity of its negations.
+    The shape key also drops multiplication and division by a constant, keeping the
+    sign: a rescaled copy has the same cross-sectional ranks, so the same shape."""
+    negated = False
+    factors: list[Node] = []
+    pending = [node]
+    while pending:  # flatten the product through any negations inside it
+        flipped, part = _strip_negation(pending.pop())
+        negated ^= flipped
+        if isinstance(part, BinOp) and part.op == "*":
+            pending += [part.right, part.left]
+        elif _scales(part, keep_parameters):
+            negated ^= _strip_negation(part.right)[0]
+            pending.append(part.left)
         else:
-            body = _key(kept[0], keep_parameters)
+            factors.append(part)
+    if keep_parameters:
+        kept = [f for f in factors if f != Const(1.0)]  # 1 * x is x
     else:
-        body = _key(node, keep_parameters)
+        kept = [f for f in factors if not isinstance(f, Const)]
+    kept = kept or factors[:1]
+    if len(kept) > 1:
+        terms = sorted(_key(f, keep_parameters) for f in kept)
+        body = f"(* {' '.join(terms)})"
+    else:
+        body = _key(kept[0], keep_parameters)
     return f"(neg {body})" if negated else body
 
 
 def _key(node: Node, keep_parameters: bool) -> str:
     negated, stripped = _strip_negation(node)
-    if negated or (isinstance(node, BinOp) and node.op == "*"):
+    if negated or (isinstance(node, BinOp) and node.op == "*") or _scales(node, keep_parameters):
         return _signed_key(node, keep_parameters)
     node = stripped
     if isinstance(node, Call) and node.func == "shift":
@@ -399,8 +424,8 @@ def _key(node: Node, keep_parameters: bool) -> str:
     if isinstance(node, Const):
         return f"C:{node.value!r}" if keep_parameters else "C"
     if isinstance(node, BinOp):
-        if node.op == "+":  # a + b + c in any order and grouping is one factor
-            terms = sorted(_key(t, keep_parameters) for t in _chain(node, "+"))
+        if node.op in "+-":  # a + b - c in any order and grouping is one factor
+            terms = sorted(_key(t, keep_parameters) for t in _sum_terms(node))
             return f"(+ {' '.join(terms)})"
         left, right = _key(node.left, keep_parameters), _key(node.right, keep_parameters)
         return f"({node.op} {left} {right})"
@@ -418,14 +443,16 @@ def _key(node: Node, keep_parameters: bool) -> str:
 def identity_key(node: Node) -> str:
     """Same factor, same key: windows and constants kept; the order and grouping of
     `+` and `*` operands, the argument order of ts_corr and ts_cov, nested shifts and
-    the spelling of a negation (`-1 * x`, `x * -1`, `-(x)`, `0 - x`) are ignored.
-    Identity canonicalises order and negation, not arithmetic: `close / 2` and
-    `close * 0.5` get different ids by design."""
+    the spelling of a negation (`-1 * x`, `x * -1`, `-(x)`, `0 - x`) and subtraction
+    as adding a negation (`a - b`, `a + -b`) are ignored. Identity canonicalises order
+    and sign, not arithmetic: `close / 2` and `close * 0.5` get different ids, and so
+    do `2 * x` and `3 * x`, because a constant inside a sum changes the factor."""
     return _key(node, keep_parameters=True)
 
 
 def structural_key(node: Node) -> str:
-    """Same shape, same key: windows and constants dropped as well."""
+    """Same shape, same key: windows and constants dropped as well, and so is
+    multiplication or division by a constant (the sign stays, as a negation)."""
     return _key(node, keep_parameters=False)
 
 

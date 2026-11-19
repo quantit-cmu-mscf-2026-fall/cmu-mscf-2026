@@ -339,3 +339,52 @@ def test_a_negative_constant_does_not_change_zoo_similarity():
     built = BinOp("*", parse("ts_corr(open, volume, 10)"), Const(-1.0))
     assert zoo_similarity(built, zoo) == zoo_similarity(parse(unparse(built)), zoo)
     assert zoo_similarity(built, zoo)[2] == "alpha_006"
+
+
+SCALED_CORR = [
+    "2 * ts_corr(open, volume, 10)",
+    "ts_corr(open, volume, 10) * 0.5",
+    "ts_corr(open, volume, 10) / 3",
+    "-1 * ts_corr(open, volume, 10)",
+    "-2 * ts_corr(open, volume, 10)",
+    "ts_corr(open, volume, 10) * -2",
+    "ts_corr(open, volume, 10) / -3",
+    "-(ts_corr(open, volume, 10)) / 4",
+    "-2 * ts_corr(open, volume, 10) / 5",
+]
+
+
+@pytest.mark.parametrize("expression", SCALED_CORR)
+def test_a_rescaled_copy_of_a_zoo_member_is_not_partly_original(expression):
+    _, share, closest = zoo_similarity(parse(expression), default_zoo())
+    assert share == 1.0
+    assert closest == "alpha_006"
+
+
+def test_rescaling_keeps_the_sign_in_the_shape_key():
+    base = structural_key(parse("ts_corr(open, volume, 10)"))
+    assert structural_key(parse("3 * ts_corr(open, volume, 10)")) == base
+    assert structural_key(parse("ts_corr(open, volume, 10) / 3")) == base
+    negated = structural_key(parse("-ts_corr(open, volume, 10)"))
+    assert negated != base
+    for e in ("-2 * ts_corr(open, volume, 10)", "ts_corr(open, volume, 10) / -3"):
+        assert structural_key(parse(e)) == negated
+    assert structural_key(parse("-2 * ts_corr(open, volume, 10) / -3")) == base
+
+
+def test_rescaling_changes_the_id_but_not_the_shape():
+    assert factor_id(parse("2 * close")) != factor_id(parse("3 * close"))
+    assert structural_key(parse("2 * close")) == structural_key(parse("3 * close"))
+    assert factor_id(parse("close / 2")) != factor_id(parse("close"))
+    # a constant inside a sum is not a rescaling
+    assert structural_key(parse("close + 2")) != structural_key(parse("close"))
+    assert structural_key(parse("2 / close")) != structural_key(parse("close"))
+
+
+def test_subtracting_is_adding_a_negation():
+    assert factor_id(parse("close - open")) == factor_id(parse("close + -open"))
+    assert factor_id(parse("close - open")) == factor_id(parse("-open + close"))
+    assert factor_id(parse("close - open")) != factor_id(parse("open - close"))
+    assert factor_id(parse("close - (open + volume)")) == factor_id(parse("close - open - volume"))
+    assert factor_id(parse("close - 0 - open")) != factor_id(parse("close - open"))
+    assert factor_id(parse("close + 0 - open")) != factor_id(parse("close - open"))
