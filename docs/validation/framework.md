@@ -289,6 +289,23 @@ is a count: 0, 1 or 2 real families, at an annual Sharpe of 0.5, 1.0 or 1.5.
 The decision rule is a hashed field of `GateConfig` (`decision_rule`): the
 rule and its q (baseline, BH at 0.05) are in the config hash, so changing
 either re-registers the gate; the gate run takes them from the config.
+
+**One look per dataset, not per config.** Re-registering is how a *threshold*
+changes; it is not how a *look* is obtained. The holdout look is spent on
+`GateConfig.look_key` — `"<data_version>#<holdout_round>"` — so no change to
+the seed, the draws, a threshold, the decision rule, the coverage floor, the
+trial scope, the generator, the holdout dates, or the candidate set opens the
+holdout again. Only genuinely new data (a new `data_version`) or a **declared**
+second round (`holdout_round`, default 0) does, and a declared round is itself
+spent once. `gate.holdout_looks()` lists every look on the raw ledger for audit.
+
+Keying the budget on the config hash instead made every hashed field a way to
+buy another look, including fields that cannot change which candidates are
+selected. Measured on signal-free data at `daccc5d`: four looks under one
+dataset from nothing but `seed` 0, 1, 2, 3 — two of which accepted a family.
+`tests/test_gate_look_budget.py` enumerates every hashed field and pins the
+refusal; its `test_every_hashed_field_is_classified` fails when a new hashed
+field is added without deciding which bucket it belongs in.
 **Superseded hashes (2026-11-18).** `8bda49ec…` and `5e89d78a…` are superseded by `5f590f13…`.
 The decision rule, q, stage thresholds and data are unchanged. `5e89d78a…` → `8bda49ec…` added the
 stage-4 coverage guard (`min_holdout_coverage`), and `8bda49ec…` → `5f590f13…` moved `decision_rule` into

@@ -29,13 +29,16 @@ their own name.
 
 1. **Registered, once.** It refuses a config whose hash has no registration
    entry (`GateNotRegistered`; a config changed after registration has a
-   different hash, so it is refused too) and a hash whose holdout was already
-   looked at (`HoldoutAlreadyOpened`). The look is a `gate-holdout-look`
-   ledger entry written before the holdout provider is called, and it is
-   written even when no family reaches stage 4: otherwise a screen that
-   passed nothing could be repeated on another candidate set under the same
-   registration until something did. Looks are read from the raw ledger, so a
-   ledger correction cannot undo one.
+   different hash, so it is refused too) and a dataset whose holdout was
+   already looked at (`HoldoutAlreadyOpened`). The look is a
+   `gate-holdout-look` ledger entry written before the holdout provider is
+   called, and it is written even when no family reaches stage 4: otherwise a
+   screen that passed nothing could be repeated on another candidate set
+   under the same registration until something did. Looks are read from the
+   raw ledger, so a ledger correction cannot undo one.
+
+   The budget is per **dataset**, not per config: see `GateConfig.look_key`.
+   Re-registering changes a threshold; it does not buy a look.
 2. **Authorised.** The caller names who authorises the look (`authorizer`, a
    non-blank string). It is checked before anything is read and recorded in
    the look entry. There is no default and no inferred authorizer: who may
@@ -106,6 +109,7 @@ __all__ = [
     "TrialScope",
     "load_registered",
     "register",
+    "holdout_looks",
     "required_holdout_obs",
     "required_n_boot",
     "run_gate",
@@ -137,7 +141,7 @@ class GateNotRegistered(RuntimeError):
 
 
 class HoldoutAlreadyOpened(RuntimeError):
-    """The holdout has been looked at under this config hash already."""
+    """This dataset's holdout has been looked at already (`GateConfig.look_key`)."""
 
 
 def _canonical_scope(scope: TrialScope) -> TrialScope:
@@ -209,6 +213,7 @@ class GateConfig:
     factors_digest: str | None = None
     min_holdout_coverage: float = DEFAULT_MIN_HOLDOUT_COVERAGE
     decision_rule: DecisionRule = field(default_factory=lambda: DecisionRule("funnel"))
+    holdout_round: int = 0
 
     def __post_init__(self) -> None:
         dates = {}
@@ -228,11 +233,13 @@ class GateConfig:
                 f"holdout begins: stages 1-3 would score it. Only data_version="
                 f"{SYNTHETIC_DATA_VERSION!r} may search that late (docs/validation.md)"
             )
-        for name in ("n_boot", "seed"):
+        for name in ("n_boot", "seed", "holdout_round"):
             value = getattr(self, name)
             if isinstance(value, bool | np.bool_) or not isinstance(value, numbers.Integral):
                 raise TypeError(f"{name} must be an integer, not {type(value).__name__}: {value!r}")
             object.__setattr__(self, name, int(value))
+        if self.holdout_round < 0:
+            raise ValueError(f"holdout_round must be 0 or more, not {self.holdout_round}")
         coverage = self.min_holdout_coverage
         if isinstance(coverage, bool | np.bool_) or not isinstance(coverage, numbers.Real):
             raise TypeError(f"min_holdout_coverage must be a real number, not {coverage!r}")
@@ -257,7 +264,7 @@ class GateConfig:
     def to_dict(self) -> dict:
         """Plain JSON content: what is registered and hashed."""
         scope = self.trial_scope
-        return {
+        out = {
             "search_end": self.search_end,
             "holdout_start": self.holdout_start,
             "holdout_end": self.holdout_end,
@@ -279,6 +286,13 @@ class GateConfig:
                 "method": self.decision_rule.method,
             },
         }
+        # A field added after a config was registered is written only when it
+        # differs from its default, so an earlier registration keeps its
+        # content and therefore its hash (`funnel.thresholds_dict` does the
+        # same). crsp-v1's registered 5f590f13... must not move.
+        if self.holdout_round:
+            out["holdout_round"] = self.holdout_round
+        return out
 
     @classmethod
     def from_dict(cls, data: dict) -> GateConfig:
@@ -288,6 +302,55 @@ class GateConfig:
         if "decision_rule" in data:
             data["decision_rule"] = DecisionRule.from_dict(data["decision_rule"])
         return cls(**data)
+
+    @property
+    def look_key(self) -> str:
+        """What a holdout look is spent on: the evidence, not the configuration.
+
+        `"<data_version>#<holdout_round>"`, and deliberately nothing else.
+
+        The holdout is worth something only because the search had no chance
+        to flatter it, and that is a property of **the data**. Spending a look
+        uses up the dataset, not the settings it was read under, so the budget
+        has to be counted per dataset.
+
+        Keying the budget on `config_hash` instead made every hashed field a
+        way to buy another look, including fields that cannot change which
+        candidates are selected. Measured on signal-free data before this
+        change: four looks under one dataset, from nothing but `seed` 0, 1, 2,
+        3, two of which accepted a family. The seed moves the bootstrap draws
+        and nothing else.
+
+        So only two things open a new look:
+
+        * **`data_version`** -- genuinely new data is genuinely new evidence.
+        * **`holdout_round`** -- a second look at the *same* data, declared on
+          purpose. It exists because without it the honest second round has no
+          sanctioned path, and people would reach for a seed change instead.
+          Bumping it is visible in the registration, the look entry and the
+          scorecard header; changing a seed is not.
+
+        Everything else is excluded on purpose:
+
+        * `seed`, `n_boot` -- computational, and cannot change the selection;
+        * `thresholds`, `decision_rule`, `min_holdout_coverage` -- the
+          pre-registered rules. Changing one after a holdout disappointed is
+          the exact move the funnel exists to prevent, so it must not be
+          rewarded with a fresh look;
+        * `search_end`, `holdout_start`, `holdout_end` -- re-slicing one
+          dataset is not new evidence. Genuinely new rows change
+          `data_version`, which is a hash of the files;
+        * `trial_scope` -- narrowing it shrinks the trial count *and* used to
+          mint a look, two anti-conservative effects from one edit;
+        * `generator`, `factors_digest` -- free-text provenance the gate
+          cannot verify. A new generator wanting a second look declares a
+          round.
+
+        The candidate set is not in the key either, and was never in the hash:
+        the same config with a fresh batch of candidates is refused, so a
+        screen that passed nothing cannot be retried until something passed.
+        """
+        return f"{self.data_version}#{self.holdout_round}"
 
     @property
     def config_hash(self) -> str:
@@ -302,6 +365,50 @@ def _entries_for(name: str, config_hash: str) -> list[dict]:
         for e in runlog.read_entries()
         if e.get("name") == name and (e.get("params") or {}).get("config_hash") == config_hash
     ]
+
+
+def _look_key_of(entry: dict) -> str | None:
+    """A look entry's key, deriving it for one written before `look_key` existed.
+
+    A look recorded by an earlier version carries `data_version` but no
+    `look_key`. Those predate `holdout_round`, so they are round 0, and
+    deriving the key makes the budget retroactive: a look already spent on a
+    dataset still counts against it.
+    """
+    params = entry.get("params") or {}
+    key = params.get("look_key")
+    if key is not None:
+        return str(key)
+    version = params.get("data_version")
+    return None if version is None else f"{version}#0"
+
+
+def holdout_looks() -> list[dict]:
+    """Every holdout look on the raw ledger, oldest first, with its key.
+
+    The audit the budget rests on. Read from `runlog.read_entries` rather than
+    the corrected view, so a ledger correction cannot retire a look.
+    """
+    looks = []
+    for entry in runlog.read_entries():
+        if entry.get("name") != LOOK_NAME:
+            continue
+        params = entry.get("params") or {}
+        looks.append(
+            {
+                "look_key": _look_key_of(entry),
+                "data_version": params.get("data_version"),
+                "holdout_round": params.get("holdout_round", 0),
+                "config_hash": params.get("config_hash"),
+                "authorizer": params.get("authorizer"),
+                "ts_utc": entry.get("ts_utc"),
+            }
+        )
+    return looks
+
+
+def _looks_for(look_key: str) -> list[dict]:
+    return [look for look in holdout_looks() if look["look_key"] == look_key]
 
 
 def register(config: GateConfig) -> dict:
@@ -492,8 +599,18 @@ def run_gate(
     registration = _entries_for(REGISTRATION_NAME, h)
     if not registration:
         raise GateNotRegistered(f"gate config {h[:12]} is not registered; call register first")
-    if _entries_for(LOOK_NAME, h):
-        raise HoldoutAlreadyOpened(f"the holdout was already opened under gate config {h[:12]}")
+    spent = _looks_for(config.look_key)
+    if spent:
+        first = spent[0]
+        raise HoldoutAlreadyOpened(
+            f"the holdout for {config.data_version} round {config.holdout_round} was already "
+            f"opened on {first['ts_utc']} by {first['authorizer']} under config "
+            f"{str(first['config_hash'])[:12]}. A look is spent on the data, not on the "
+            "configuration: changing the seed, the draws, a threshold or the decision rule "
+            "does not open it again. To look at this dataset a second time on purpose, "
+            "register a config with holdout_round "
+            f"{config.holdout_round + 1} and say why."
+        )
     labels = _checked_search(returns, family, config)
     _checked_stage3(config)
     th = config.thresholds
@@ -529,6 +646,8 @@ def run_gate(
         LOOK_NAME,
         params={
             "config_hash": h,
+            "look_key": config.look_key,
+            "holdout_round": config.holdout_round,
             "generator": config.generator,
             "data_version": config.data_version,
             "authorizer": authorizer,
