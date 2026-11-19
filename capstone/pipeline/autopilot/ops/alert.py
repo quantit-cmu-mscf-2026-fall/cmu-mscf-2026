@@ -142,7 +142,10 @@ def notify(ctx, report, alert):
     try:
         function = injected if injected is not None else resolve(target)
         function(copy.deepcopy(alert))
-    except Exception as error:  # a notifier is operator code: typed, never a traceback
+    except (
+        Exception,
+        SystemExit,
+    ) as error:  # a notifier is operator code: typed, never a traceback
         detail = f"{name}: {type(error).__name__}: {error}"
         report.problems.append(problem("alert_notifier_failed", detail))
         return {"target": name, "status": "failed", "detail": detail}

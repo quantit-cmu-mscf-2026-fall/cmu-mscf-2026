@@ -16,7 +16,8 @@ from capstone.pipeline.autopilot.reasons import ReasonSpec, record
 OPS_DIR = ("autopilot", "ops")
 
 # Reason codes the hook reports in `report.problems` (`"stage": null`); each alerting one is
-# written to ALERT.json and passed to the notifier.
+# written to ALERT.json and passed to the notifier (not `ops_hook_failed`, which the runner
+# adds after the hook has already failed).
 REASONS = {
     "alert_notifier_failed": ReasonSpec(
         "Operator", "fix `[alert] notifier` (module:function); the next alert calls it again"

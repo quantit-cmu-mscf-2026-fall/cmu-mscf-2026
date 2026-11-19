@@ -4,7 +4,11 @@
 
 1. alert (`alert`): `<run>/ALERT.json` / `.md` for every new STOP (and blocker, unless
    `[alert] on_blocked = false`), then the notifier;
-2. status (`status`): `<run>/autopilot/ops/status.json` / `.md`.
+2. status (`status`): `<run>/autopilot/ops/status.json` / `.md`. A failure is the blocked
+   problem `ops_status_failed`, and the alert step runs again so it is alerted too.
+
+`ops_hook_failed` (this hook raised) is added by the runner after the hook returns and is
+never alerted: it shows in the tick line and exit code only.
 
 Each step is idempotent and resumable after a kill (its files are replaced atomically and
 its progress is recorded before it moves on); what goes wrong is a typed problem in
@@ -35,3 +39,4 @@ def after_tick(ctx, report):
         status.write(ctx.config, list(report.states), journal=ctx.journal)
     except Exception as error:
         report.problems.append(problem("ops_status_failed", f"{type(error).__name__}: {error}"))
+        alert.run(ctx, report)  # the new problem is alerted too (one alert per new problem)

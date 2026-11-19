@@ -69,18 +69,27 @@ class Report:
         return " ".join(text.split()) + (f" (+{more} more)" if more else "")
 
 
+RUN_ROOT_ENV, POLICY_ENV = "AUTOPILOT_RUN_ROOT", "AUTOPILOT_POLICY_ID"
+
+
 @contextmanager
-def _ledger(root):
-    """`CAPSTONE_LEDGER_DIR` = `<run>/ledger` for one stage or hook, restored afterwards."""
-    previous = os.environ.get("CAPSTONE_LEDGER_DIR")
-    os.environ["CAPSTONE_LEDGER_DIR"] = str(Path(root) / "ledger")
+def _run_tags(root, policy_id):
+    """Name the run root and policy for `log_run` to tag entries with, then restore.
+
+    `CAPSTONE_LEDGER_DIR` is left as the operator set it: autopilot trials belong in the
+    project ledger, so a new run root still sees every earlier root's trials.
+    """
+    values = {RUN_ROOT_ENV: str(Path(root)), POLICY_ENV: policy_id}
+    previous = {key: os.environ.get(key) for key in values}
+    os.environ.update({key: value for key, value in values.items() if value is not None})
     try:
         yield
     finally:
-        if previous is None:
-            os.environ.pop("CAPSTONE_LEDGER_DIR", None)
-        else:
-            os.environ["CAPSTONE_LEDGER_DIR"] = previous
+        for key, old in previous.items():
+            if old is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = old
 
 
 def _hash_artifacts(root, artifacts):
@@ -127,7 +136,7 @@ def _run(stage, config, journal, services, sha, spend_guard):
     )
     try:
         ctx = Context(config, journal, stage.name, services)
-        with _ledger(config.run_root):
+        with _run_tags(config.run_root, config.core["policy_id"]):
             ceiling = None if stage.spend is None else stage.spend(ctx)
             if ceiling is not None:  # before anything is frozen or called
                 if spend_guard is None:
@@ -238,7 +247,7 @@ def tick(config, stages, *, services=None, hooks=(), only=None, spend_guard=None
         report.states = {s.name: journal.stage(s.name)["state"] for s in ordered}
         for hook in hooks:
             try:
-                with _ledger(root):
+                with _run_tags(root, config.core["policy_id"]):
                     hook(Context(config, journal, None, services), report)
             except Exception as error:
                 detail = f"{getattr(hook, '__module__', hook)}: {type(error).__name__}: {error}"

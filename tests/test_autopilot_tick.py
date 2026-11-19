@@ -5,6 +5,7 @@ Synthetic stages only; no data, model or broker.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -284,20 +285,33 @@ def test_recurring_stages_run_every_tick_and_hooks_run_last(tmp_path):
     assert journal.events()[0]["at"] == "t0"  # the injected clock stamps the journal
 
 
-def test_the_runner_sets_the_run_ledger_for_stages_and_hooks_and_restores_it(tmp_path, monkeypatch):
-    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", "before")
-    seen = []
+def test_stages_log_to_the_project_ledger_and_a_second_run_root_sees_the_first(
+    tmp_path, monkeypatch
+):
+    from capstone import runlog
 
-    def crashes(ctx):
-        seen.append(os.environ["CAPSTONE_LEDGER_DIR"])
-        raise RuntimeError("boom")
+    project = tmp_path / "project"
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(project))
+    counts = []
 
-    toys = [toy("a", crashes)]
-    config = make_config(tmp_path, toys)
-    hook = lambda ctx, report: seen.append(os.environ["CAPSTONE_LEDGER_DIR"])  # noqa: E731
-    runner.tick(config, toys, hooks=[hook])
-    assert seen == [str(config.run_root / "ledger")] * 2
-    assert os.environ["CAPSTONE_LEDGER_DIR"] == "before"
+    def trial(ctx):
+        runlog.log_run("autopilot-search")
+        counts.append(runlog.trial_count("autopilot-search"))
+        return StageResult(data={})
+
+    toys = [toy("a", trial)]
+    for name in ("run1", "run2"):
+        core = {"run_root": str(tmp_path / name), "policy_id": "p1"}
+        config = cfg.validate({"autopilot": core}, toys, path=tmp_path / "autopilot.toml")
+        runner.tick(config, toys)
+    assert counts == [1, 2]
+    assert os.environ["CAPSTONE_LEDGER_DIR"] == str(project)
+    assert not (tmp_path / "run1" / "ledger").exists()
+    lines = (project / "runs.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    tags = json.loads(lines[1])["tags"]
+    assert tags == [f"autopilot_run_root:{tmp_path / 'run2'}", "autopilot_policy:p1"]
+    assert "AUTOPILOT_RUN_ROOT" not in os.environ
 
 
 def test_only_runs_a_units_own_stages_over_a_seeded_journal(tmp_path):

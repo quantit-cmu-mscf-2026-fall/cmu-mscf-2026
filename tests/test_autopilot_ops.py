@@ -383,6 +383,8 @@ def test_a_broken_journal_is_a_typed_status_problem_not_a_traceback(tmp_path):
     events.write_text(events.read_text(encoding="utf-8").replace('"seq":0', '"seq":7'), "utf-8")
     report = tick(config, toys)
     assert codes(report) == ["ops_status_failed"] and "breaks the chain" in report.line()
+    alert_doc = json.loads((config.run_root / "ALERT.json").read_text("utf-8"))
+    assert [p["reason"]["code"] for p in alert_doc["problems"]] == ["ops_status_failed"]
 
 
 def test_atomic_writes_replace_and_a_torn_line_is_closed_off_not_extended(tmp_path):

@@ -143,6 +143,14 @@ def test_preflight_command_exit_codes_and_report_beside_the_config(tmp_path, cap
     assert "fix: choose the value" in captured.out
 
 
+def test_preflight_accepts_the_ops_sections(tmp_path):
+    config = ready(tmp_path)
+    extra = '[schedule]\ntime = "07:15"\n\n[alert]\non_blocked = false\n'
+    text = config.read_text(encoding="utf-8")
+    config.write_text(text + "\n" + extra, encoding="utf-8", newline="\n")
+    assert cli.main(["preflight", "--config", str(config)]) == 0
+
+
 def test_the_report_goes_under_the_run_root_once_it_exists(tmp_path):
     config = ready(tmp_path)
     run_root = config.parent / "runs" / "first-run"
