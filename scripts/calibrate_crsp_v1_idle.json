@@ -1,0 +1,23 @@
+{
+  "run": "crsp-v1",
+  "structure_from": "scripts/calibrate_crsp_v1.json, with idle days and the stage-4 coverage guard",
+  "variants": [12, 18, 18, 18, 18, 18, 24, 24, 24, 24, 24, 24, 24, 24, 300],
+  "within_corr": 0.5949,
+  "across_corr": 0.0221,
+  "ar1": 0.118,
+  "t_df": 5.0,
+  "garch": [0.25, 0.70],
+  "search_years": 31,
+  "holdout_years": 5,
+  "n_boot": 1999,
+  "n_real": [0, 1, 2],
+  "sharpe_real": [0.5, 1.0, 1.5],
+  "seeds": [0, 400],
+  "target_fdr": 0.10,
+  "margin": 0.02,
+  "sweep": {"q1": [0.1], "q4": [0.5]},
+  "baseline_q": [0.05],
+  "idle_share": [0.0, 0.2, 0.4, 0.6],
+  "idle_run": 21,
+  "min_holdout_coverage": 0.5
+}

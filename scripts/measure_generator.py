@@ -56,6 +56,18 @@ def _within_by_family(corr: pd.DataFrame, family: pd.Series) -> dict[str, float]
     return out
 
 
+def _live(s: pd.Series) -> pd.Series:
+    """`s` from its first to its last return: days before inception are not idle days."""
+    return s.loc[s.first_valid_index() : s.last_valid_index()]
+
+
+def _mean_run(idle: pd.Series) -> float:
+    """Mean length of a variant's runs of idle (NaN) days; NaN if never idle."""
+    flags = np.r_[False, idle.to_numpy(), False].astype(int)
+    starts, ends = np.flatnonzero(np.diff(flags) == 1), np.flatnonzero(np.diff(flags) == -1)
+    return float((ends - starts).mean()) if len(starts) else np.nan
+
+
 def measure(returns: pd.DataFrame, family: pd.Series) -> dict:
     """Structure of a dates x variants matrix with one family label per variant."""
     returns = returns[family.index]
@@ -68,6 +80,9 @@ def measure(returns: pd.DataFrame, family: pd.Series) -> dict:
     sq_ar1 = (demeaned**2).apply(lambda s: s.dropna().autocorr(1))
     kurt = returns.apply(lambda s: s.dropna().kurt())  # excess kurtosis
     days = returns.notna().sum()
+    live = {c: _live(returns[c]) for c in returns.columns if returns[c].notna().any()}
+    idle_share = pd.Series({c: s.isna().mean() for c, s in live.items()})
+    idle_runs = pd.Series({c: _mean_run(s.isna()) for c, s in live.items()})
     variants = family.value_counts()
 
     def q(s: pd.Series) -> dict:
@@ -81,6 +96,8 @@ def measure(returns: pd.DataFrame, family: pd.Series) -> dict:
         "n_dates": int(len(returns)),
         "dates": [str(returns.index.min().date()), str(returns.index.max().date())],
         "days_per_variant": q(days),
+        "idle_share": q(idle_share),
+        "idle_run": q(idle_runs.dropna()),
         "within_family_corr": round(within, 4),
         "across_family_corr": round(across, 4),
         "within_factor_corr": round(within_factor, 4),

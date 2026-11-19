@@ -50,6 +50,7 @@ __all__ = [
     "family_statistics",
     "gate_report",
     "gates_alone",
+    "idle_days",
     "make_family_set",
     "run_baseline",
     "run_funnel",
@@ -97,6 +98,8 @@ def make_family_set(
     n_search: int = 31 * 252,
     n_holdout: int = 5 * 252,
     seed: int = 0,
+    idle_share: float = 0.0,
+    idle_run: float = 21.0,
     **defects,
 ) -> FamilySet:
     """Families of `k` variants of one idea, with realistic defects.
@@ -109,9 +112,20 @@ def make_family_set(
     near-copies and every defect carries through. A real family's series is
     scaled so that each of its *variants* has annualised Sharpe `sharpe_real`.
     The default periods follow #43: 31 years of search, 5 of holdout.
+
+    `idle_share` is the long-run share of days a family holds no position, its
+    variants' returns NaN then (`backtest` leaves a flat date NaN, not 0.0).
+    A family's variants are idle on the same days, in runs of `idle_run` days
+    on average (a two-state Markov chain started from its stationary state).
+    Active days keep their returns, so a real variant's Sharpe per active day
+    is still `sharpe_real`; it just has fewer days to show it.
     """
     if not 0.0 < within_rho <= 1.0:
         raise ValueError("within_rho must be in (0, 1]")
+    if not 0.0 <= idle_share < 1.0:
+        raise ValueError(f"idle_share must be in [0, 1), got {idle_share}")
+    if not idle_run >= 1.0:
+        raise ValueError(f"idle_run must be at least 1 day, got {idle_run}")
     counts = np.full(n_families, k) if np.ndim(k) == 0 else np.asarray(k)
     if len(counts) != n_families or (counts < 1).any():
         raise ValueError(f"k must be >= 1 for each of the {n_families} families, got {k!r}")
@@ -133,11 +147,32 @@ def make_family_set(
     which = np.repeat(np.arange(n_families), counts)
     b = base.returns.to_numpy()[:, which]
     x = np.sqrt(within_rho) * b + np.sqrt(1.0 - within_rho) * own.returns.to_numpy()
+    if idle_share > 0.0:
+        idle = idle_days(n_obs, n_families, idle_share, idle_run, seed=seed + 2_000_003)
+        x[idle[:, which]] = np.nan
     hypotheses = list(base.returns.columns)
     columns = [f"{h}_v{j}" for h, n in zip(hypotheses, counts, strict=True) for j in range(n)]
     returns = pd.DataFrame(x, index=base.returns.index, columns=columns)
     family = pd.Series(np.repeat(hypotheses, counts), index=columns, name="hypothesis")
     return FamilySet(returns, family, base.truth.rename("truth"), n_search, n_holdout)
+
+
+def idle_days(n_obs: int, n_series: int, share: float, run: float, *, seed: int) -> np.ndarray:
+    """n_obs x n_series booleans, True on idle days: each column a two-state
+    Markov chain idle `share` of the time in runs of mean length `run`."""
+    leave_idle = 1.0 / run
+    enter_idle = share * leave_idle / (1.0 - share)
+    if enter_idle > 1.0:
+        raise ValueError(f"idle_share {share} needs idle runs longer than {run} days")
+    rng = np.random.default_rng(seed)
+    u = rng.random((n_obs, n_series))
+    out = np.empty((n_obs, n_series), dtype=bool)
+    state = u[0] < share
+    out[0] = state
+    for t in range(1, n_obs):
+        state = np.where(state, u[t] >= leave_idle, u[t] < enter_idle)
+        out[t] = state
+    return out
 
 
 # ---------------------------------------------------------------------------
