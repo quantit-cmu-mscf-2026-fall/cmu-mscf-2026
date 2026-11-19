@@ -93,39 +93,80 @@ class TestRegisteredContent:
             assert Thresholds(**json.loads(json.dumps(thresholds_dict(th)))) == th
 
 
+def decided(card: pd.DataFrame) -> pd.DataFrame:
+    """The funnel's rule: accepted = s1-s4, as a gate with decision_rule "funnel" sets it."""
+    card = card.copy()
+    card["accepted"] = card["s1_pass"] & card["s2_pass"] & card["s3_pass"] & card["s4_pass"]
+    return card
+
+
 class TestOutcomes:
     def test_the_promotion_module_holds_the_rule(self):
-        accepted, incubate = promotion.outcomes(scorecard(), INCUBATE)
-        assert list(accepted) == [True, False, False, False, False]
+        incubate = promotion.outcomes(decided(scorecard()), INCUBATE)
         # b is between q4 (0.30) and q4_incubate (0.5); c is above it; d never reached stage 4.
         assert list(incubate) == [False, True, False, False, False]
 
     def test_the_default_has_no_incubate_outcome(self):
-        accepted, incubate = promotion.outcomes(scorecard(), Thresholds())
-        assert list(accepted) == [True, False, False, False, False]
+        incubate = promotion.outcomes(decided(scorecard()), Thresholds())
         assert not incubate.any() and incubate.dtype == bool
 
-    def test_incubate_is_never_accepted_and_acceptance_is_unchanged(self):
-        plain, _ = promotion.outcomes(scorecard(), Thresholds())
-        accepted, incubate = promotion.outcomes(scorecard(), INCUBATE)
-        pd.testing.assert_series_equal(accepted, plain)
-        assert not (accepted & incubate).any()
-
     def test_a_looser_level_incubates_more_and_never_a_stage_3_failure(self):
-        card = scorecard()
-        _, at_half = promotion.outcomes(card, INCUBATE)
-        _, at_eight = promotion.outcomes(card, Thresholds(promote="incubate", q4_incubate=0.8))
+        card = decided(scorecard())
+        at_half = promotion.outcomes(card, INCUBATE)
+        at_eight = promotion.outcomes(card, Thresholds(promote="incubate", q4_incubate=0.8))
         assert list(at_eight) == [False, True, True, False, False]
         assert at_half.sum() <= at_eight.sum()
         assert not at_eight[~card["s3_pass"]].any()
 
-    def test_decide_sets_the_columns_and_prices_both_outcomes(self):
-        def grading(card):
-            return card["is_mean"] / 2
+    def test_decide_keeps_the_gates_accepted_and_adds_incubate(self):
+        card = promotion.decide(decided(scorecard()), INCUBATE)
+        assert list(card["accepted"]) == [True, False, False, False, False]
+        assert list(card["incubate"]) == [False, True, False, False, False]
+        assert not (card["accepted"] & card["incubate"]).any()
 
-        card = promotion.decide(scorecard(), INCUBATE, expected_mean=grading)
-        promoted = card["accepted"] | card["incubate"]
-        assert list(promoted) == [True, True, False, False, False]
-        assert card.loc[promoted, "expected_mean"].notna().all()
-        assert card.loc[~promoted, "expected_mean"].isna().all()
-        assert "expected_mean" not in promotion.decide(scorecard(), INCUBATE)
+    def test_decide_does_not_touch_expected_mean(self):
+        card = decided(scorecard())
+        card["expected_mean"] = card["is_mean"].where(card["accepted"])
+        before = card["expected_mean"].copy()
+        out = promotion.decide(card, INCUBATE)
+        pd.testing.assert_series_equal(out["expected_mean"], before)
+        assert out["expected_mean"].notna().tolist() == out["accepted"].tolist()
+
+    def test_a_card_the_gate_has_not_decided_is_refused(self):
+        with pytest.raises(ValueError, match="accepted"):
+            promotion.decide(scorecard(), INCUBATE)
+
+    def test_baseline_accepted_rows_stay_accepted(self):
+        # Decision rule "baseline" accepts on s1 alone (BH on the bootstrap p), so a
+        # family that fails s4 (A: s4_stat 0.35) or stops at s1 (B) is still accepted.
+        card = pd.DataFrame(
+            {
+                "s1_pass": [True, True, True],
+                "s2_pass": [True, False, True],
+                "s3_pass": [True, False, True],
+                "s4_pass": [False, False, False],
+                "s4_stat": [0.35, np.nan, 0.45],
+                "accepted": [True, True, False],
+            },
+            index=list("ABC"),
+        )
+        out = promotion.decide(card, INCUBATE)
+        assert list(out["accepted"]) == [True, True, False]
+        # A is accepted, so it cannot also incubate; only the unaccepted near-miss does.
+        assert list(out["incubate"]) == [False, False, True]
+
+
+class TestGateRefusesWhatItDoesNotRun:
+    def test_a_gate_config_refuses_incubate_until_the_gate_emits_it(self):
+        from capstone.gate import GateConfig
+
+        gate_fields = dict(
+            search_end="2020-12-31",
+            holdout_start="2021-01-01",
+            holdout_end="2025-12-31",
+            thresholds=Thresholds(stage1="bootstrap", promote="incubate", q4_incubate=0.5),
+            data_version="v",
+            generator="g",
+        )
+        with pytest.raises(ValueError, match="incubate"):
+            GateConfig(**gate_fields)
