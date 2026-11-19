@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import argparse
 
-from capstone.pipeline.autopilot import preflight, scaffold
+from capstone.pipeline.autopilot import ops, preflight, scaffold
 
 
 def main(argv=None):
@@ -20,7 +20,7 @@ def main(argv=None):
     scaffold.add_arguments(commands.add_parser("init", help="write a starter set"))
     args = parser.parse_args(argv)
     if args.command == "preflight":
-        return preflight.main(args)
+        return preflight.main(args, extra=ops.discover()[0])
     return scaffold.main(args)
 
 

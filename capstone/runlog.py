@@ -71,6 +71,15 @@ def _git_sha() -> str:
     return result.stdout.strip() or "unknown"
 
 
+def _autopilot_tags() -> list[str]:
+    """Run root and policy of the autopilot tick calling us, so ledger entries name them."""
+    pairs = (
+        ("AUTOPILOT_RUN_ROOT", "autopilot_run_root"),
+        ("AUTOPILOT_POLICY_ID", "autopilot_policy"),
+    )
+    return [f"{label}:{os.environ[key]}" for key, label in pairs if os.environ.get(key)]
+
+
 def log_run(
     name: str,
     *,
@@ -107,7 +116,7 @@ def log_run(
         "seed": seed,
         "params": params or {},
         "metrics": metrics or {},
-        "tags": [tags] if isinstance(tags, str) else list(tags or []),
+        "tags": ([tags] if isinstance(tags, str) else list(tags or [])) + _autopilot_tags(),
         "notes": notes,
     }
     ledger_dir = _ledger_dir()
