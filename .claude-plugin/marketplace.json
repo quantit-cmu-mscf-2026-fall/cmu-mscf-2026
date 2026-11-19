@@ -1,0 +1,14 @@
+{
+  "name": "cmu-mscf-2026",
+  "description": "Claude Code plugins for the Quantit x CMU MSCF 2026 alpha-discovery and validation pipeline",
+  "owner": {
+    "name": "quantit-cmu-mscf-2026-fall"
+  },
+  "plugins": [
+    {
+      "name": "mscf-pipeline",
+      "description": "Skills for the team's pipeline: shared data, the run ledger, validation, null calibration and the research PR workflow",
+      "source": "./mscf-plugin"
+    }
+  ]
+}
