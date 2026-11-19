@@ -573,6 +573,28 @@ def _children(node: Node) -> list[Node]:
     return []
 
 
+def _canonical(node: Node) -> Node:
+    """The tree with `-(-x)` collapsed to `x` and nested shifts folded into one.
+
+    `structural_key` already treats these as one shape, so a node and its child
+    can share a key (`shift(shift(x, a), b)` and its inner `shift`). Gene logic
+    that compares a gene with its parents needs a tree where that cannot happen.
+    """
+    if isinstance(node, Unary):
+        inner = _canonical(node.operand)
+        if isinstance(inner, Unary):
+            return inner.operand
+        return Unary(node.op, inner)
+    if isinstance(node, BinOp):
+        return BinOp(node.op, _canonical(node.left), _canonical(node.right))
+    if isinstance(node, Call):
+        arg = _canonical(node.arg)
+        arg2 = None if node.arg2 is None else _canonical(node.arg2)
+        call = Call(node.func, arg, node.window, arg2)
+        return _fold_shifts(call) if node.func == "shift" else call
+    return node
+
+
 def _is_root_gene(node: Node) -> bool:
     """A subtree whose leaves are all raw fields, with at least one operator.
 
@@ -588,7 +610,7 @@ def _is_root_gene(node: Node) -> bool:
 
 def root_genes(node: Node) -> frozenset[str]:
     """The tree's root genes, abstracted: windows dropped, as in Abs(Ma(vwap, 20)) = Ma(vwap, t)."""
-    return frozenset(structural_key(n) for n in walk(node) if _is_root_gene(n))
+    return frozenset(structural_key(n) for n in walk(_canonical(node)) if _is_root_gene(n))
 
 
 def gene_text(node: Node) -> str:
@@ -613,7 +635,7 @@ def frequent_root_genes(
     parents: dict[str, set[str]] = {}
     for tree in trees:
         seen: set[str] = set()
-        for node in walk(tree):
+        for node in walk(_canonical(tree)):
             if not _is_root_gene(node):
                 continue
             key = structural_key(node)

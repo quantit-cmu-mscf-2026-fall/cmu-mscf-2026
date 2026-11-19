@@ -74,9 +74,11 @@ def judge(
         f"Author's rationale: {rationale or '(none)'}"
     )
     spent: Counter = Counter()
-    answer = call_tool(client, judge_config, system=SYSTEM, user=user, tool=TOOL, usage=spent)
-    if usage is not None:  # kept apart from the proposer's tokens: another model's price
-        usage.update({f"alignment_{name}": count for name, count in spent.items()})
+    try:
+        answer = call_tool(client, judge_config, system=SYSTEM, user=user, tool=TOOL, usage=spent)
+    finally:  # a failed call was still billed
+        if usage is not None:  # kept apart from the proposer's tokens: another model's price
+            usage.update({f"alignment_{name}": count for name, count in spent.items()})
     checks = {check: bool(answer.get(check)) for check in CHECKS}
     failed = [check for check, passed in checks.items() if not passed]
     reason = str(answer.get("reason", ""))

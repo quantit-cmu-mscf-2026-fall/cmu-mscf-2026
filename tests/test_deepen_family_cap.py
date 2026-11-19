@@ -36,17 +36,22 @@ EDIT_ROUNDS = [[f"ts_mean(close, {3 + 2 * i})", f"rank(volume) * {i + 2}"] for i
 ROUNDS = 6
 CHILDREN = 2
 
-# The uncapped trace on this fixture on the public base bf8c8d4 (re-pinned there): per round
-# the parent's family, the edit and the children asked for; then each child's status.
+# The uncapped trace on this fixture, per round: the parent's family, the edit and the
+# children asked for; then each child's status. Re-pinned on the combined branch (the
+# earlier pin, from the public base bf8c8d4, failed in CI at index 1). The trace depends
+# on factor ids: candidates are ordered by id and the editor's picks are seeded, and
+# `factor_id` hashes `identity_key`, which #46 (canonical keys) changed after that pin.
+# The same fixture and seed now give this trace, identical under PYTHONHASHSEED 0, 1
+# and 2; it is deterministic, so a change here means deepen's behaviour changed.
 PINNED_ASKED = [
     ("h2", "normalization", 2),
-    ("h1", "normalization", 2),
-    ("h2", "interaction", 2),
-    ("h3", "nesting", 2),
-    ("h2", "other", 2),
+    ("h3", "normalization", 2),
+    ("h1", "rank_switch", 2),
+    ("h2", "nesting", 2),
+    ("h3", "other", 2),
     ("h1", "normalization", 2),
 ]
-PINNED_STATUSES = ["admitted"] * 2 + ["rejected"] * 10
+PINNED_STATUSES = ["admitted"] + ["rejected"] * 11
 
 
 @pytest.fixture
@@ -167,3 +172,13 @@ def test_a_bad_cap_is_refused(tmp_path):
     for bad in (0, -1, 1.5, True):
         with pytest.raises(ValueError, match="max_children_per_family"):
             Deepener(con, CONFIG, FakeScorer(), None, run_id="t", max_children_per_family=bad)
+
+
+def test_deepen_ledger_entries_record_the_family(tmp_path, ledger):
+    from capstone.runlog import read_entries
+
+    d, _, names = deepener(tmp_path / "a.db")
+    d.step()
+    entries = read_entries()
+    assert entries
+    assert all(e["params"]["hypothesis_id"] in names for e in entries)

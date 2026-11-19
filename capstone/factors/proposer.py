@@ -154,7 +154,12 @@ def _judge(
     else:
         # The judge runs last: it costs a model call, the checks above don't.
         if config.alignment_model:
-            verdict = alignment.judge(client, config, hypothesis, expression, rationale, usage)
+            try:
+                verdict = alignment.judge(client, config, hypothesis, expression, rationale, usage)
+            except Exception as exc:  # any judge failure: the batch and its record go on
+                reason = f"alignment judge failed: {exc}"
+                store.reject(con, hypothesis_id, expression, reason, node=node, **meta)
+                return Outcome(expression, "rejected", reason)
             meta.update(
                 alignment=verdict.score,
                 alignment_reason=verdict.reason,

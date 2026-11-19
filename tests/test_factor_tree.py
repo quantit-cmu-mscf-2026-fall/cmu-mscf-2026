@@ -443,3 +443,31 @@ def test_subtracting_is_adding_a_negation():
     assert factor_id(parse("close - (open + volume)")) == factor_id(parse("close - open - volume"))
     assert factor_id(parse("close - 0 - open")) != factor_id(parse("close - open"))
     assert factor_id(parse("close + 0 - open")) != factor_id(parse("close - open"))
+
+
+@pytest.mark.parametrize(
+    ("spelling", "gene"),
+    [
+        ("shift({}, {})", "shift(returns, t)"),
+        ("-(-({}))", "(close / open)"),
+    ],
+)
+def test_a_gene_that_canonicalises_into_its_own_parent_is_still_frequent(spelling, gene):
+    # Review of #61: `shift(shift(x, a), b)` and `-(-K)` share a key with their own
+    # child, so the gene was its own closer and the most frequent structure dropped out.
+    from capstone.factors.tree import frequent_root_genes
+
+    if spelling.startswith("shift"):
+        trees = [
+            parse("shift(shift(returns, 1), 5) * volume"),
+            parse("shift(returns, 3) / close"),
+            parse("shift(returns, 10) * volume"),
+        ]
+    else:
+        trees = [
+            parse("-(-(close / open)) * volume"),
+            parse("-(-(close / open)) + returns"),
+            parse("-(-(close / open)) - high"),
+        ]
+    found = {text: support for _, support, text in frequent_root_genes(trees, k=5)}
+    assert found.get(gene) == 1.0

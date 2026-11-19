@@ -128,6 +128,12 @@ def require_discovery(panel: Panel) -> None:
     _check_dates(pd.Index(panel.universe.index))
 
 
+def _rebased(factor: pd.Series, permno: pd.Series) -> pd.Series:
+    """`factor` over its stock's first valid value: 1 on day one, and no later split in it."""
+    valid = factor.where(factor > 0)
+    return valid / valid.groupby(permno).transform("first")
+
+
 def build_panel(
     daily: pd.DataFrame, data_version: str = "", *, fundamentals: pd.DataFrame | None = None
 ) -> Panel:
@@ -145,8 +151,12 @@ def build_panel(
         spread=sd.quoted_spread(daily),
         universe=daily["in_universe"].astype("float64").fillna(0).astype(bool),
     )
-    price_factor = rows["dlycumfacpr"].where(rows["dlycumfacpr"] > 0)
-    share_factor = rows["dlycumfacshr"].where(rows["dlycumfacshr"] > 0)
+    # CRSP anchors the cumulative factors at the file's last date, so a raw factor carries
+    # every split after the row, holdout years included. Rebased to each stock's first
+    # loaded row, a row uses only splits on or before its own date.
+    rows = rows.sort_values("date", kind="stable")
+    price_factor = _rebased(rows["dlycumfacpr"], rows["permno"])
+    share_factor = _rebased(rows["dlycumfacshr"], rows["permno"])
     rows["open"] = rows["dlyopen"] / price_factor
     rows["high"] = rows["dlyhigh"] / price_factor
     rows["low"] = rows["dlylow"] / price_factor
@@ -366,9 +376,8 @@ def factor_returns(tree: Node, panel: Panel, spec: TradingSpec | int = 1) -> Fac
 def screen_pvalue(net: pd.Series) -> float:
     """One-sided p-value of H0: Sharpe ratio <= 0, with a HAC variance (`sharpe_test`).
 
-    Computed as 1 - PSR, which equals `sharpe_test(...).pvalue_greater` on the
-    validation stack (#31) to rounding; switch to that field once #31 is on
-    `main`. NaN when the series has no variance.
+    Computed as 1 - PSR, which equals `sharpe_test(...).pvalue_greater` to
+    rounding. NaN when the series has no variance.
     """
     clean = net.dropna()
     if len(clean) < 2 or not clean.std(ddof=1) > 0:
@@ -448,7 +457,9 @@ def evaluate_factors(
     the moment its returns exist, before they are used, as a matrix column
     named by its variant id (`store.variant_id`). With `con`, the variants
     are recorded in the store's `variants` table. A factor that cannot be
-    computed is logged once per spec (each was a trial) and gets no column.
+    computed is logged once per spec (each was a trial) and gets no column; so does a
+    variant that never trades (all-NaN returns), which stays in the summary with
+    `traded` False.
     Costs are half the quoted spread; the full-spread Sharpe is reported
     alongside as a robustness view, not a separate candidate. Each variant's
     screen p-value (`screen_pvalue`) is logged with its metrics, and the
@@ -488,6 +499,7 @@ def evaluate_factors(
                 "expression": unparse(tree),
                 "data_version": panel.data_version,
                 "period": panel_period(panel),
+                "hypothesis_id": family,
                 "costs": "half quoted spread per unit traded",
                 **(extra_params or {}),
             }
@@ -511,7 +523,9 @@ def evaluate_factors(
                 raise ValueError(outcome.refused)
             metrics, net = outcome.results[position]
             log_run(LEDGER_NAME, params=params, metrics=metrics, tags=["evaluation", *tags])
-            columns[vid] = net
+            traded = bool(net.notna().any())
+            if traded:  # a variant that never trades has no column: it would block intake
+                columns[vid] = net
             summary.append(
                 {
                     "variant_id": vid,
@@ -519,6 +533,7 @@ def evaluate_factors(
                     "hypothesis_id": family,
                     "hold": spec.hold,
                     "neutral": spec.neutral,
+                    "traded": traded,
                     "expression": params["expression"],
                     **metrics,
                 }
@@ -527,38 +542,3 @@ def evaluate_factors(
     matrix.columns.name = "variant_id"
     table = pd.DataFrame(summary).set_index("variant_id") if summary else pd.DataFrame()
     return matrix.iloc[1:], table
-
-
-# ---------------------------------------------------------------------------
-# Trial counting, with corrections
-
-CORRECTION_NAME = "ledger-correction"
-
-
-def excluded_entries(entries: list[dict]) -> set[tuple[str, str]]:
-    """(ts_utc, factor_id) of evaluation entries a ledger correction excludes.
-
-    The ledger is append-only: a mistaken or duplicate run is never deleted.
-    Instead a correction entry (name `CORRECTION_NAME`) names the entries to
-    leave out of the trial count, and says why; the record stays complete.
-    """
-    out = set()
-    for e in entries:
-        if e.get("name") == CORRECTION_NAME and e["params"].get("ledger_name") == LEDGER_NAME:
-            out.update((x["ts_utc"], x["factor_id"]) for x in e["params"]["excludes"])
-    return out
-
-
-def trial_count(entries: list[dict] | None = None) -> int:
-    """Evaluation trials in the ledger: `LEDGER_NAME` entries no correction excludes."""
-    if entries is None:
-        from capstone.runlog import read_entries
-
-        entries = read_entries()
-    skip = excluded_entries(entries)
-    return sum(
-        1
-        for e in entries
-        if e.get("name") == LEDGER_NAME
-        and (e.get("ts_utc"), e["params"].get("factor_id")) not in skip
-    )

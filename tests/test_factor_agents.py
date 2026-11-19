@@ -386,3 +386,31 @@ def test_avoidance_off_leaves_the_prompt_and_checks_unchanged(con, hid):
     client = FakeClient(_factors("ts_rank(close / shift(close, 10), 21) * log(cap)"))
     (outcome,) = propose(con, hid, client, config)
     assert outcome.status == "stored" and "overused" not in client.calls[0]["system"]
+
+
+def test_a_failed_judge_call_is_still_counted_and_the_batch_is_recorded(con, hid):
+    # Review of #61: the judge answers in text instead of calling the tool. Its call
+    # and tokens must reach `usage`, and both parsed proposals must get a row.
+    from collections import Counter
+
+    class TextJudge(FakeClient):
+        def create(self, **kwargs):
+            if kwargs["tools"][0]["name"] == "record_alignment":
+                self.calls.append(kwargs)
+                usage = SimpleNamespace(input_tokens=7, output_tokens=3)
+                return SimpleNamespace(content=[SimpleNamespace(type="text")], usage=usage)
+            return super().create(**kwargs)
+
+    client = TextJudge(
+        {
+            "factors": [{"expression": "-ts_mean(returns, 5)", "rationale": "r"}] * 1
+            + [{"expression": "-ts_mean(returns, 9)", "rationale": "r"}]
+        }
+    )
+    config = FactorConfig(model="m", alignment_model="j", factors_per_hypothesis=2, max_repairs=0)
+    usage: Counter = Counter()
+    outcomes = propose(con, hid, client, config, zoo=[], usage=usage)
+    assert [o.status for o in outcomes] == ["rejected", "rejected"]
+    assert all("alignment judge failed" in o.reason for o in outcomes)
+    assert usage["alignment_calls"] == 2 and usage["alignment_input_tokens"] == 14
+    assert con.execute("SELECT COUNT(*) FROM proposals").fetchone()[0] == 2
