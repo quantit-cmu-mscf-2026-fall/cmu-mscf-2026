@@ -146,3 +146,44 @@ def test_formation_eligibility_is_carried_into_the_plan_by_copy():
     assert plan["formation_eligibility"] == {"1": "eligible"}
     plan["formation_eligibility"]["1"] = "changed"
     assert weights.attrs["formation_eligibility"] == {"1": "eligible"}
+
+
+def test_a_string_keyed_current_book_is_read_like_an_int_keyed_one():
+    args = (pd.Series({2: 0.5}), {1: 10.0, 2: 10.0}, 1000)
+    as_int = share_plan(args[0], {1: 10}, *args[1:], min_notional=0)
+    as_str = share_plan(args[0], {"1": 10}, *args[1:], min_notional=0)
+    assert as_str["orders"] == as_int["orders"]
+    assert (1, -10) in [(o["permno"], o["shares"]) for o in as_str["orders"]]
+    assert as_str["projected"] == as_int["projected"]
+
+
+def test_current_keys_that_collide_after_normalising_are_refused():
+    with pytest.raises(ValueError, match="collide"):
+        share_plan(pd.Series({1: 0.5}), {1: 10, "1": 5}, {1: 10.0}, 1000, min_notional=0)
+
+
+def test_a_fallback_exit_ignores_the_target_weight():
+    carry = {"marks": {3: 5.0}, "fallback_bps": 50}
+    plan = share_plan(
+        pd.Series({1: 0.5, 3: 0.5}),
+        {3: 10},
+        {1: 10.0, 3: 5.0},
+        1000,
+        fee_bps={1: 10},
+        carry=carry,
+        min_notional=0,
+    )
+    exit_order = next(o for o in plan["orders"] if o["permno"] == 3)
+    assert exit_order["shares"] == -10 and exit_order["fallback_cost"] == 50.0
+
+
+def test_a_reduction_below_the_minimum_notional_is_still_sent():
+    plan = share_plan(pd.Series({1: 0.09}), {1: 10}, {1: 10.0}, 1000, min_notional=100)
+    assert plan["targets"] == {1: 9}
+    assert [o["shares"] for o in plan["orders"]] == [-1] and plan["omitted"] == []
+
+
+def test_a_none_price_on_a_held_name_is_carried_not_a_type_error():
+    carry = {"marks": {1: 5.0}, "fallback_bps": 50}
+    plan = share_plan(pd.Series({1: 0.0}), {1: 2}, {1: None}, 1000, fee_bps=10, carry=carry)
+    assert plan["carried"][0]["permno"] == 1 and plan["projected"] == {1: 2}

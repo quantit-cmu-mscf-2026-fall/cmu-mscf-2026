@@ -56,6 +56,8 @@ def test_a_limit_at_the_boundary_passes():
         ({"capital": 100, "max_weight": 0.5, "max_gross": 0.4}, "limits"),
         ({"capital": 100, "max_weight": 0.0}, "limits"),
         ({"capital": 100, "side": "either"}, "side"),
+        ({"capital": 100, "max_order_notional": float("nan")}, "limits"),
+        ({"capital": 100, "max_order_notional": 0}, "limits"),
     ],
 )
 def test_invalid_risk_inputs_are_refused(kwargs, match):

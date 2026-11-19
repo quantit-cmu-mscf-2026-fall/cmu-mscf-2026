@@ -11,6 +11,7 @@ the public repositories carry code that was deliberately PR'd, and nothing else.
 | Code, PRs, reviews, issues | normal git/GitHub work | public work repo |
 | Agent session transcripts (including your prompts) | `.claude/settings.json` hook → `.sessions/` on your laptop | **private** `session-archive` repo, after redaction |
 | Experiment runs (name, params, seed, metrics, git SHA) | `capstone.runlog.log_run` → `experiments/runs.jsonl` (gitignored) | **private** `session-archive/ledger/` |
+| Synthetic/placebo search runs | `log_run` with `CAPSTONE_LEDGER_DIR=experiments/placebo` (gitignored) | **private** `session-archive/ledger/placebo/<user>-runs.jsonl`, separate from real trials |
 | PR/issue/review data, consolidated | nightly workflow in the archive repo | **private** `session-archive/github-export/` |
 
 ## What is NOT collected
@@ -54,6 +55,19 @@ git clone <org>/session-archive ../session-archive
 # then, whenever you finish working:
 python scripts/capture/sync_sessions.py
 ```
+
+## Placebo ledger convention
+
+Future placebo search drivers must set `CAPSTONE_LEDGER_DIR` to the checkout's
+`experiments/placebo/` before any `log_run`, and call the placebo guard before
+loading rows. That folder is gitignored; this checkout's sync script archives
+its ledger separately from `experiments/runs.jsonl`. Run the sync script from
+the checkout that owns the selected folder. Linked worktrees may also select
+the primary checkout's `experiments/placebo/`, then sync from that checkout.
+The guard refuses directory/file aliases of either main ledger. Restore the
+ordinary ledger setting before real research; a future driver must also refuse
+real runs against a placebo ledger. Search-driver/holdout wiring and the actual
+placebo rerun are not part of this panel-helper change.
 
 ## Not enabled (possible later, team's call)
 

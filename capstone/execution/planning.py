@@ -69,6 +69,11 @@ def share_plan(
     """
     if not math.isfinite(capital) or capital <= 0 or min_notional < 0:
         raise ValueError("positive finite capital and nonnegative minimum notional are required")
+    book = {int(n): q for n, q in current.items()}
+    if len(book) != len(current):
+        raise ValueError("current positions collide after normalising keys to integer permnos")
+    current = book
+    prices = {n: (math.nan if p is None else p) for n, p in prices.items()}
     if not isinstance(weights, pd.Series) or not weights.index.is_unique:
         raise ValueError("weights require unique instrument identifiers")
     if not all(math.isfinite(float(w)) for w in weights):
@@ -94,9 +99,9 @@ def share_plan(
                 raise ValueError("sizing prices must be finite and positive")
             marks[n] = carry["marks"][n]
     rate = max(rates.values(), default=cost_rate(0 if isinstance(fee_bps, Mapping) else fee_bps, 0))
-    old_gross = sum(abs(q) * float(marks[int(n)]) for n, q in current.items() if q)
+    old_gross = sum(abs(q) * float(marks[n]) for n, q in current.items() if q)
     old_cost = (
-        sum(abs(q) * float(marks[int(n)]) * rates[int(n)] for n, q in current.items() if q)
+        sum(abs(q) * float(marks[n]) * rates[n] for n, q in current.items() if q)
         if isinstance(fee_bps, Mapping)
         else rate * old_gross
     )
@@ -188,6 +193,8 @@ def portfolio_risk(
     if capital <= 0 or not math.isfinite(capital):
         raise ValueError("capital must be finite and positive")
     if not 0 < max_weight <= max_gross or not math.isfinite(max_gross):
+        raise ValueError("invalid portfolio limits")
+    if not math.isfinite(max_order_notional) or max_order_notional <= 0:
         raise ValueError("invalid portfolio limits")
     values = {n: int(q) * float(prices[n]) / capital for n, q in positions.items() if q}
     if any(
