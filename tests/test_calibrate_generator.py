@@ -107,7 +107,7 @@ def test_the_registered_crsp_v1_config_is_the_one_the_doc_registers(tmp_path, mo
     t = config.thresholds
     assert (t.stage1, t.q1, t.alpha2, t.final, t.q4) == ("bootstrap", 0.10, 1.0, "bh", 0.50)
     assert config.factors_digest is None  # stage 3 isn't built; the gate refuses a digest
-    assert registered["decision_rule"] | {"on": None} == {
+    assert registered["gate_config"]["decision_rule"] | {"on": None} == {
         "rule": "baseline",
         "method": "bh",
         "q": 0.05,
@@ -115,6 +115,9 @@ def test_the_registered_crsp_v1_config_is_the_one_the_doc_registers(tmp_path, mo
     }
     doc = (SCRIPTS.parent / "docs" / "validation" / "framework.md").read_text(encoding="utf-8")
     assert f"`{config.config_hash}`" in doc
+    # Pinned: the rule is part of the hash, so this moves only with a re-registration.
+    assert config.config_hash == "5f590f13f63e94f33fbdf960089c1fc01881a6fedf2437d8afbc3a0c396af7da"
+    assert config.decision_rule == gate.DecisionRule("baseline", q=0.05)
 
     monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path / "ledger"))
     assert gate.register(config)["params"]["config_hash"] == config.config_hash

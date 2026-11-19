@@ -161,6 +161,9 @@ all of it predates the cutoff. The split (decided 2026-10-05):
 | Search | 1990-01-02 to 2020-12-31 | Agents and stages 1-3 |
 | Holdout | 2021-01-01 to 2025-12-31 | The final stage only, looked at once |
 
+The holdout's first day is `capstone.gate.HOLDOUT_OPENS`: the gate refuses a
+real-data config whose search period reaches it.
+
 Five years rather than three because at 95% confidence (normal returns) an
 annual Sharpe of 1.0 needs about 2.7 years to tell from zero, 0.75 about 4.8
 and 0.5 about 11: five years can confirm 0.75 and up, three only about 1 and
@@ -212,7 +215,8 @@ backtest upward, and no method in this document can correct it.
 | `spanning` | incremental value over known factors and accepted signals | planned |
 | `evaluate` | `haircut_sharpe`: Harvey–Liu haircut (their reference code), ledger trial count | done |
 | `search_fdr` | search-adjusted p-value for a hypothesis's best of K variants: block bootstrap of the family maximum (`bootstrap_family_pvalues`, from Carl's branch), or exact for independent or equicorrelated variants (`rho=`); search-adjusted FDR (López de Prado & Fabozzi 2026); max-of-mixture fit over assumed K, a sensitivity table, not a gate | done |
-| `gate` | staged, pre-registered scorecard; trial count from the ledger; holdout looked at once | planned |
+| `grading` | the gate's graded scores (BY, Holm, local FDR, PSR, MinTRL, haircut Sharpe with the ledger trial count), batch diagnostics and the expected mean: reported, never read back into a decision | done |
+| `gate` | staged, pre-registered scorecard; trial count from the ledger; holdout looked at once, with a named authorizer; stage 3 not yet measured | done |
 
 Already in `evaluate`: `benjamini_hochberg`, `bonferroni`,
 `deflated_sharpe_ratio`, `expected_max_sharpe`, and `false_discovery_rate` /

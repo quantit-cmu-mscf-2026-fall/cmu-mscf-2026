@@ -24,12 +24,13 @@
       ],
       "exclude_tags": []
     },
-    "factors_digest": null
-  },
-  "decision_rule": {
-    "rule": "baseline",
-    "method": "bh",
-    "q": 0.05,
-    "on": "each family's bootstrap p-value (stage1='bootstrap', n_boot) over the search period"
+    "factors_digest": null,
+    "min_holdout_coverage": 0.5,
+    "decision_rule": {
+      "rule": "baseline",
+      "method": "bh",
+      "q": 0.05,
+      "on": "each family's bootstrap p-value (stage1='bootstrap', n_boot) over the search period"
+    }
   }
 }
