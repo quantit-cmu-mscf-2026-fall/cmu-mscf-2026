@@ -236,7 +236,15 @@ def test_membership_flags_spells_censored_at_the_query_end(pull, end_col):
     """The clamp hides the true end, so the frame says which spells it cut."""
     conn = RecordingConn()
     pull(conn, "2010-01-01", "2020-12-31")
-    assert f"{end_col} > %(end)s as mbr_end_censored" in _squash(conn.queries[0])
+    table = "crsp.dsp500list_v2" if end_col == "mbrenddt" else "crsp.dsp500list"
+    flag = (
+        f"{end_col} >= least(%(end)s::date, (select max({end_col}) from {table}))"
+        " as mbr_end_censored"
+    )
+    query = _squash(conn.queries[0]).replace("( ", "(").replace(" )", ")")
+    # CRSP closes open spells at the table's last date, so a strict `>` never fires there.
+    assert flag in query
+    assert f"{end_col} > %(end)s as mbr_end_censored" not in query
 
 
 # --- cache keys --------------------------------------------------------------

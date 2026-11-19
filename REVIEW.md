@@ -56,6 +56,32 @@ No finding without `file:line` and either a repro (input, observed, expected)
 or a quoted line it contradicts. A guess from a function's name is not a
 finding. Say what you ran and on which commit.
 
+## Comments
+
+Code should explain itself through names, types and tests. A comment stays
+only if it is one of these:
+
+- a public docstring that states the contract: inputs, units, what it
+  returns, what it refuses;
+- the source a method implements (paper and section or equation, or the
+  number it reproduces);
+- a constraint from outside our code: pandas or NumPy behaviour, a CRSP or
+  Compustat quirk, a vendor API, the OS;
+- a link to an issue that explains what the code can't show;
+- a suppression with its rule code (`# noqa: E731`) for a style-only rule.
+
+Everything else goes:
+- narration of the next line;
+- history (PR numbers, "used to", "now", "fixed", review rounds, calibration
+  results), which belongs in the PR description or `docs/`;
+- commented-out code, banners, and TODOs without an issue;
+- justifications. When our own code needs one, rename it, extract it or add a
+  test instead.
+
+This applies to the lines a diff adds; leave untouched code alone. Authors
+run the `no-comments` skill before review. In a review, extra comments are at
+most one Nit and never block.
+
 ## Risk
 
 Every PR needs one approving review. When a PR touches the paths below, that

@@ -72,7 +72,9 @@ __all__ = [
     "plant",
     "planted_side",
     "planted_sides",
+    "for_gate",
     "power_analysis",
+    "spec_for_gate",
 ]
 
 Stage = Literal["stage1", "stage2", "stage3", "stage4"]
@@ -477,3 +479,67 @@ def power_analysis(spec: PowerSpec, budget: PowerBudget | None = None) -> PowerR
         end_to_end_mds50=_crossing(grid, hits, 0.5),
         end_to_end_mds80=_crossing(grid, hits, 0.8),
     )
+
+
+def spec_for_gate(
+    *,
+    thresholds: Thresholds,
+    n_boot: int,
+    search: pd.DataFrame,
+    family: pd.Series,
+    holdout_periods: int,
+    n_trials: int,
+) -> PowerSpec:
+    """A gate run's `PowerSpec`: its thresholds, bootstrap, family sizes,
+    search length and holdout days, and the correlations on its search period
+    (within: each family's average pairwise correlation, averaged over
+    families of 2+ variants; across: over pairs from different families).
+
+    Stage 3 is not modelled here (it is reported as no gate, as in
+    `power_analysis`).
+    """
+    missing = [c for c in search.columns if c not in family.index]
+    if missing:
+        raise ValueError(
+            f"family has no label for {len(missing)} search column(s): {missing[:5]}"
+            + (" ..." if len(missing) > 5 else "")
+        )
+    codes, names = pd.factorize(family.reindex(search.columns))
+    corr = search.corr().to_numpy()
+    same = codes[:, None] == codes[None, :]
+    across = np.nanmean(corr[~same]) if (~same).any() else 0.0
+    across = float(np.clip(np.nan_to_num(across), 0.0, 0.99))
+    off_diagonal = same & ~np.eye(len(codes), dtype=bool)
+    counts = np.bincount(codes, minlength=len(names))
+    within = [np.nanmean(corr[off_diagonal & (codes == c)]) for c in np.flatnonzero(counts > 1)]
+    within_corr = float(np.nanmean(within)) if within else across
+    return PowerSpec(
+        thresholds=thresholds,
+        variants=tuple(int(k) for k in counts),
+        within_corr=float(np.clip(np.nan_to_num(within_corr, nan=across), across, 1.0)),
+        across_corr=across,
+        search_periods=len(search),
+        holdout_periods=holdout_periods,
+        n_boot=n_boot,
+        n_trials=n_trials,
+    )
+
+
+def for_gate(
+    config, search: pd.DataFrame, family: pd.Series, n_trials: int, budget: PowerBudget
+) -> tuple[MinDetectableSharpe, ...]:
+    """The gate header's `min_detectable_sharpe` for a `gate.GateConfig` and its
+    search period (the holdout's length: its business days).
+
+    Reported only: it reads the registered config and the search period, logs
+    nothing and changes no decision. Simulated worlds are seeded by `budget`.
+    """
+    spec = spec_for_gate(
+        thresholds=config.thresholds,
+        n_boot=config.n_boot,
+        search=search,
+        family=family,
+        holdout_periods=len(pd.bdate_range(config.holdout_start, config.holdout_end)),
+        n_trials=n_trials,
+    )
+    return power_analysis(spec, budget).min_detectable_sharpe()

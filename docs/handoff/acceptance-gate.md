@@ -19,7 +19,34 @@ description.
 - **Registration** (QUANTIT-33): `capstone/gate.py`, `GateConfig` (hashed
   from its content), `register` (logs it to the ledger once, tag "gate"),
   `required_n_boot` and the input checks a run makes first.
-- Not yet: the single-look run that fills the scorecard.
+- **Graded scores** (QUANTIT-35): `capstone/grading.py`, reported and never
+  read back into a decision.
+- **The run** (QUANTIT-34): `gate.run_gate`. Refuses an unregistered or
+  changed config (`GateNotRegistered`) and a config whose holdout was already
+  looked at (`HoldoutAlreadyOpened`); needs a named `authorizer`, recorded in
+  the `gate-holdout-look` ledger entry written before the holdout provider is
+  called. Stages 1-3 get the search period only; stage 3 is not measured yet
+  (`s3_measured` False). Tests: `tests/test_gate_run.py`.
+- **Holdout inputs** (QUANTIT-34): the provider's answer is checked on
+  arrival (exactly the requested variants, registered holdout dates only,
+  finite); a survivor with fewer holdout returns than the registered minimum
+  coverage (`min_holdout_coverage`, default half the holdout's business days;
+  `gate.required_holdout_obs`) is not tested: it fails stage 4, stays in the
+  stage-4 family at p = 1, and its `ho_n_obs` is on the scorecard. Tests:
+  `tests/test_gate_holdout_inputs.py`; the decision matrix (null and planted
+  markets on iid, `rho` and `ar1` data), scorecard, report and expected-mean
+  tests are in `tests/test_gate_decisions.py`.
+- **The decision rule** (QUANTIT-34): `run_gate` takes a `DecisionRule`
+  (a field of the config; `gate.load_registered` reads it, with the config, from
+  `scripts/gate_crsp_v1.json`) and **`accepted` follows it**. crsp-v1's is the
+  baseline (Q5): BH at q = 0.05 on the family bootstrap p-values, so
+  `accepted` is `s1_stat <= q`. The funnel's own verdict (every stage passed,
+  at the config's q1 / q4) stays on the scorecard as `funnel_pass`, reported
+  beside it and never deciding; under a `funnel` rule the two columns are
+  equal. The rule used is in the look entry and the header (`decision_rule`).
+  The rule is a hashed field of the config: changing it or its q changes the hash.
+  Tests: `tests/test_gate_decision_rule.py`.
+- Not yet: the stage-3 spanning test and the power header.
 
 ## 2. Contract
 - Input: a performance matrix (dates x variants, `docs/validation.md`) and a
@@ -33,6 +60,18 @@ description.
 - `screen` never reads `ho_*`. Stage 1 refuses a missing family p-value
   (BH would drop it); stage 4 refuses a live candidate with no holdout
   statistics. Stage 3 passes through (spanning test not built yet).
+- `run_gate` takes no default authorizer and ships no holdout provider: the
+  caller supplies both. A blank authorizer, a failed input check, too few
+  ledger trials or a failed stage 1-3 raise before the look, so none of them
+  spends it; once the look is logged the config cannot be run again.
+- A config registered with `factors_digest` is refused until stage 3 exists.
+- Real data cannot search the holdout: unless `data_version` is "synthetic",
+  `GateConfig` refuses a `search_end` on or after `gate.HOLDOUT_OPENS`
+  (2021-01-01, where `docs/validation.md` starts the holdout), when it is
+  built, so such a config can't be registered or run. A test keeps this
+  constant and the docs' date equal.
+- `GateConfig`'s default thresholds use stage 1 on the bootstrap family
+  maximum (`Thresholds()` itself still defaults to "rho", as on `main`).
 - A config's hash is SHA-256 of its canonical JSON, equal in every process.
   The gate's ledger entries are tagged "gate" and never counted as trials.
 - The report is standard JSON (NaN as null) and reads back to the same

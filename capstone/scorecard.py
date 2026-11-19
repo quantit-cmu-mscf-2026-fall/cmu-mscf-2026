@@ -19,12 +19,18 @@ Row (index `family`), in `SCORECARD_COLUMNS` order:
   `s4_stat` = BH-adjusted holdout p across the stage-3 survivors against
   `q4` (or the deflated Sharpe against `d4`), NaN for families that never
   reached it;
-- `accepted`: passed every gate;
+- `accepted`: the registered decision rule's verdict (`DecisionRule`, in the
+  header): under the baseline, BH at its q on the family p-values (`s1_stat`
+  <= q); under the funnel, `funnel_pass`. `funnel_pass`: passed every funnel
+  stage, reported whichever rule decides;
 - graded scores, reported and never used to decide: `p1` (the raw family
   p-value stage 1 adjusted), `by`, `holm` (adjusted across families),
   `lfdr`, `sharpe`, `psr`, `min_trl_years` (search period),
   `haircut_sharpe` (with the ledger trial count), `ho_sharpe`, `ho_p`,
-  `ho_psr` (holdout, stage-4 families only);
+  `ho_psr` (holdout, stage-4 families that had enough returns to be
+  tested), and `ho_n_obs` (the non-missing holdout returns of every
+  stage-4 family's `best`, tested or not: below the registered minimum
+  coverage the family fails stage 4 untested, at p = 1 in the family);
 - what a later live check needs: `is_mean` (search-period mean of `best`),
   `ho_mean`, `expected_mean` (the per-period mean to expect, accepted
   families) and `scale` (search-period standard deviation of `best`).
@@ -42,12 +48,14 @@ from __future__ import annotations
 import dataclasses
 import json
 import math
+import numbers
 from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
 
 from capstone.funnel import Thresholds, thresholds_dict
+from capstone.power import MinDetectableSharpe
 
 SCORECARD_COLUMNS: tuple[str, ...] = (
     "best",
@@ -69,6 +77,7 @@ SCORECARD_COLUMNS: tuple[str, ...] = (
     "s4_threshold",
     "s4_pass",
     "accepted",
+    "funnel_pass",
     "p1",
     "by",
     "holm",
@@ -80,6 +89,7 @@ SCORECARD_COLUMNS: tuple[str, ...] = (
     "ho_sharpe",
     "ho_p",
     "ho_psr",
+    "ho_n_obs",
     "is_mean",
     "ho_mean",
     "expected_mean",
@@ -87,7 +97,15 @@ SCORECARD_COLUMNS: tuple[str, ...] = (
 )
 # Read back as strings, never re-inferred: the family index, `best`, `generator`.
 _LABEL_COLUMNS = ("family", "best", "generator")
-_BOOL_COLUMNS = ("s1_pass", "s2_pass", "s3_pass", "s3_measured", "s4_pass", "accepted")
+_BOOL_COLUMNS = (
+    "s1_pass",
+    "s2_pass",
+    "s3_pass",
+    "s3_measured",
+    "s4_pass",
+    "accepted",
+    "funnel_pass",
+)
 
 
 @dataclass(frozen=True)
@@ -111,17 +129,67 @@ class TrialScope:
                 object.__setattr__(self, field, tuple(value))
 
 
+DECISION_RULES = ("baseline", "funnel")
+
+
+@dataclass(frozen=True)
+class DecisionRule:
+    """Which column decides `accepted` (`docs/validation/framework.md`, Q5).
+
+    `rule="baseline"`: BH at level `q` on the families' stage-1 bootstrap
+    p-values, nothing else. `rule="funnel"`: every funnel stage passes, at the
+    config's thresholds (`q` is None). The other one is still reported, as
+    `funnel_pass` or the stage columns. The rule is fixed in the registered
+    file (`scripts/gate_crsp_v1.json`, `decision_rule`); It is a hashed
+    field of `GateConfig`, and the look entry records the rule used.
+    """
+
+    rule: str
+    q: float | None = None
+    method: str = "bh"
+
+    def __post_init__(self) -> None:
+        if self.rule not in DECISION_RULES:
+            raise ValueError(f"rule must be one of {DECISION_RULES}, got {self.rule!r}")
+        if self.method != "bh":
+            raise ValueError(f"method must be 'bh', got {self.method!r}")
+        if self.rule == "funnel":
+            if self.q is not None:
+                raise ValueError("the funnel rule takes its levels from the config: q must be None")
+            return
+        if isinstance(self.q, bool) or not isinstance(self.q, numbers.Real):
+            raise TypeError(f"the baseline rule needs a numeric q, got {self.q!r}")
+        if not 0.0 < float(self.q) < 1.0:
+            raise ValueError(f"q must be in (0, 1), got {self.q!r}")
+        object.__setattr__(self, "q", float(self.q))
+
+    @classmethod
+    def from_dict(cls, data: dict) -> DecisionRule:
+        """From the registered file's `decision_rule` (its `on` note is ignored)."""
+        return cls(rule=data["rule"], q=data.get("q"), method=data.get("method", "bh"))
+
+
 @dataclass(frozen=True)
 class GateHeader:
     """The batch header: what the gate was, and what the search looked like.
 
     `factors_digest` names stage 3's factor frame (None: not measured).
     `trial_count` is the ledger count for `trial_scope`; `search_fdr_estimate`
-    is Storey's plug-in FDR of the stage-1 rejections on the family p-values
+    is Storey's positive FDR of the stage-1 rejections on the family p-values
     (NaN when nothing passed stage 1); `pbo` is CSCV on the search period's
     variants (NaN when infeasible); `avg_correlation` is across every
     variant on the search period. `registered_utc` is when the config went
-    on the ledger.
+    on the ledger. `min_detectable_sharpe` is, per stage and end to end, the
+    annualised Sharpe a real family needs to pass the funnel at 50% and 80%
+    power under this gate's own configuration (`capstone.power`, `power_sims`
+    simulated worlds); reported only, never read by a decision, and None (with
+    `power_sims` 0) when no power budget was run. `n_holdout_obs` is the
+    number of holdout dates on which some survivor has a return.
+    `min_holdout_coverage` is the registered share of the holdout's business
+    days a survivor needs a return on, and `min_holdout_obs` the number of
+    returns that makes (`ho_n_obs` below it fails stage 4); None for a report
+    written before the rule existed. `decision_rule` is what decided
+    `accepted` (None for a report written before it was recorded).
     """
 
     config_hash: str
@@ -144,6 +212,11 @@ class GateHeader:
     search_fdr_estimate: float
     pbo: float
     avg_correlation: float
+    min_detectable_sharpe: tuple[MinDetectableSharpe, ...] | None = None
+    power_sims: int = 0
+    min_holdout_coverage: float | None = None
+    min_holdout_obs: int | None = None
+    decision_rule: DecisionRule | None = None
 
 
 HEADER_FIELDS: tuple[str, ...] = tuple(f.name for f in dataclasses.fields(GateHeader))
@@ -265,6 +338,12 @@ def read_report(path: str | Path) -> GateResult:
     h["trial_scope"] = TrialScope(**h["trial_scope"])
     for name in ("search_fdr_estimate", "pbo", "avg_correlation"):
         h[name] = _number(h[name])
+    if h.get("decision_rule") is not None:
+        h["decision_rule"] = DecisionRule(**h["decision_rule"])
+    if h.get("min_detectable_sharpe") is not None:
+        h["min_detectable_sharpe"] = tuple(
+            MinDetectableSharpe(**m) for m in h["min_detectable_sharpe"]
+        )
     accepted = tuple(card.index[card["accepted"]])
     if list(accepted) != [str(a) for a in report["accepted"]]:
         raise ValueError(f"{path}: the accepted families disagree with the scorecard")

@@ -1,0 +1,36 @@
+{
+  "run": "crsp-v1",
+  "gate_config": {
+    "search_end": "2020-12-31",
+    "holdout_start": "2021-01-01",
+    "holdout_end": "2025-12-31",
+    "data_version": "crsp-sp500-daily:6c1295f853f3:71dafd0d5f98",
+    "generator": "factor-trees/claude-opus-5/v7/agent-deepen",
+    "thresholds": {
+      "q1": 0.1,
+      "stage1": "bootstrap",
+      "alpha2": 1.0,
+      "final": "bh",
+      "d4": 0.95,
+      "q4": 0.5,
+      "final_trials": "survivors"
+    },
+    "n_boot": 1999,
+    "seed": 0,
+    "trial_scope": {
+      "name": null,
+      "include_tags": [
+        "e2e-run:crsp-v1"
+      ],
+      "exclude_tags": []
+    },
+    "factors_digest": null,
+    "min_holdout_coverage": 0.5,
+    "decision_rule": {
+      "rule": "baseline",
+      "method": "bh",
+      "q": 0.05,
+      "on": "each family's bootstrap p-value (stage1='bootstrap', n_boot) over the search period"
+    }
+  }
+}

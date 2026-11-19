@@ -32,6 +32,12 @@ from pathlib import Path
 
 import pandas as pd
 
+from capstone.holdout_authority import (
+    HoldoutSealed,
+    guard_enabled,
+    require_discovery_query,
+)
+
 CACHE_DIR = Path(__file__).resolve().parent.parent / "data_cache"
 WRDS_HOST = "wrds-pgdata.wharton.upenn.edu"
 
@@ -205,6 +211,7 @@ def crsp_daily(
     (`crsp.dsenames`), which is time-varying: a company that changed listing is
     correctly included only for the period it qualified.
     """
+    require_discovery_query(end)
     where = [
         "d.date between %(start)s and %(end)s",
         f"n.shrcd in {tuple(share_codes)}",
@@ -260,8 +267,12 @@ def crsp_daily_ciz(
       `primaryexch` 'X', so the classification filter below drops it. The
       delisting return is therefore merged back from `stkdelists` as `dlret`,
       on `delistingdt`, the last trading day, as in the legacy convention:
-      compound it with that day's `ret`, (1 + ret) * (1 + dlret) - 1.
+      compound it with that day's `ret`, (1 + ret) * (1 + dlret) - 1. A delisting
+    row the merge adds on its own (no price row that day) has `ret` NaN, so
+    there the return is `dlret` alone: use `ret.fillna(0)` in the formula.
     """
+    require_discovery_query(start)
+    require_discovery_query(end)
     aliased = ", ".join(f"v.{source} as {legacy}" for legacy, source in CIZ_COLUMN_ALIASES.items())
     classification = " and ".join(f"v.{col} = '{value}'" for col, value in CIZ_COMMON_SHARE.items())
 
@@ -335,12 +346,18 @@ def sp500_members(conn, start: str, end: str) -> pd.DataFrame:
 
     A spell still running at `end` is clamped to `end`, so no row reaches past
     the window asked for; `mbr_end_censored` marks those spells, whose true end
-    is unknown as of `end`.
+    is unknown as of `end`. CRSP closes open spells at the table's last date
+    rather than leaving them NULL, so a spell is censored when it ends on or
+    after the earlier of `end` and that last date. A spell that really ended
+    on `end` cannot be told from an open one and is flagged too.
     """
+    require_discovery_query(end)
     query = """
         select permno, start as mbr_start,
                case when ending > %(end)s then %(end)s::date else ending end as mbr_end,
-               ending > %(end)s as mbr_end_censored
+               ending >= least(
+                   %(end)s::date, (select max(ending) from crsp.dsp500list)
+               ) as mbr_end_censored
         from crsp.dsp500list
         where ending >= %(start)s and start <= %(end)s
     """
@@ -354,10 +371,14 @@ def sp500_members_ciz(conn, start: str, end: str) -> pd.DataFrame:
     leave the index and later rejoin. Any membership check must test against
     every spell, not against a single end date.
     """
+    require_discovery_query(start)
+    require_discovery_query(end)
     query = """
         select permno, mbrstartdt as mbr_start,
                case when mbrenddt > %(end)s then %(end)s::date else mbrenddt end as mbr_end,
-               mbrenddt > %(end)s as mbr_end_censored
+               mbrenddt >= least(
+                   %(end)s::date, (select max(mbrenddt) from crsp.dsp500list_v2)
+               ) as mbr_end_censored
         from crsp.dsp500list_v2
         where mbrenddt >= %(start)s and mbrstartdt <= %(end)s
     """
@@ -391,13 +412,37 @@ def cached_crsp_daily(conn, start: str, end: str, *, name: str, **kwargs) -> pd.
     silently serve year-stale legacy rows as if they were current. Caches
     predating this change are simply never hit again, which is the right
     outcome: they are legacy, and legacy is a year behind.
+
+    With the holdout guard on (`CAPSTONE_HOLDOUT_GUARD`), the query dates must end by
+    2020-12-31 and a cache hit is read with the dates as a parquet filter, so rows
+    past `end` that an earlier, wider pull left in the file never reach memory.
     """
+    require_discovery_query(start)
+    require_discovery_query(end)
     ciz = kwargs.pop("ciz", True)
     scope = "_sp500" if kwargs.get("sp500_only") else ""
     family = "_ciz" if ciz else "_siz"
     path = _cache_path(f"crsp_{name}{scope}{family}")
     if path.exists():
-        return pd.read_parquet(path)
+        if not guard_enabled():
+            return pd.read_parquet(path)
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        with path.open("rb") as source:
+            schema = pq.ParquetFile(source).schema_arrow
+            if len(schema.get_all_field_indices("date")) != 1:
+                raise HoldoutSealed("cached CRSP needs one authoritative date column")
+            kind = schema.field("date").type
+            if not (pa.types.is_date(kind) or (pa.types.is_timestamp(kind) and kind.tz is None)):
+                raise HoldoutSealed("cached CRSP date schema is not bounded timezone-naive dates")
+            bounds = [pd.Timestamp(start), pd.Timestamp(end)]
+            if pa.types.is_date(kind):
+                bounds = [value.date() for value in bounds]
+            source.seek(0)
+            return pq.read_table(
+                source, filters=[("date", ">=", bounds[0]), ("date", "<=", bounds[1])]
+            ).to_pandas()
     puller = crsp_daily_ciz if ciz else crsp_daily
     frame = puller(conn, start, end, **kwargs)
     frame.to_parquet(path)

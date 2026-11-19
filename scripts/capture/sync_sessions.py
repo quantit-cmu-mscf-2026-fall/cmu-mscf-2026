@@ -5,6 +5,7 @@ Run after a work session:  python scripts/capture/sync_sessions.py
 What it moves, and where (nothing here ever enters the public repo):
 - `.sessions/transcripts/*.jsonl`  ->  ../session-archive/transcripts/<user>/
 - `experiments/runs.jsonl`         ->  ../session-archive/ledger/<user>-runs.jsonl
+- `experiments/placebo/runs.jsonl` ->  ../session-archive/ledger/placebo/<user>-runs.jsonl
 
 Every file is passed through `redact()` first: conservative patterns for
 common credential shapes are replaced with [REDACTED] before anything leaves
@@ -74,10 +75,11 @@ def main() -> int:
             redactions += _sync_file(src, ARCHIVE / "transcripts" / owner / src.name)
             synced += 1
 
-    ledger = REPO_ROOT / "experiments" / "runs.jsonl"
-    if ledger.exists():
-        redactions += _sync_file(ledger, ARCHIVE / "ledger" / f"{user}-runs.jsonl")
-        synced += 1
+    for folder in ("", "placebo"):
+        ledger = REPO_ROOT / "experiments" / folder / "runs.jsonl"
+        if ledger.exists():
+            redactions += _sync_file(ledger, ARCHIVE / "ledger" / folder / f"{user}-runs.jsonl")
+            synced += 1
 
     staged = subprocess.run(
         ["git", "-C", str(ARCHIVE), "status", "--porcelain"],

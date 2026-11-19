@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 STARTER = Path(__file__).resolve().parents[1]
 CAPTURE = STARTER / "scripts" / "capture" / "session_capture.py"
@@ -104,3 +105,58 @@ def test_hook_commands_are_anchored_to_project_dir():
         for group in event:
             for hook in group["hooks"]:
                 assert "$CLAUDE_PROJECT_DIR/" in hook["command"]
+
+
+def test_placebo_ledger_is_ignored():
+    result = subprocess.run(
+        ["git", "check-ignore", "--no-index", "-q", "experiments/placebo/runs.jsonl"],
+        cwd=STARTER,
+    )
+    assert result.returncode == 0
+
+
+def test_sync_keeps_real_and_placebo_ledgers_separate(tmp_path, monkeypatch):
+    mod = _load_sync()
+    repo, archive = tmp_path / "repo", tmp_path / "archive"
+    (repo / "experiments" / "placebo").mkdir(parents=True)
+    archive.mkdir()
+    (repo / "experiments" / "runs.jsonl").write_text('"real fixture"\n', encoding="utf-8")
+    (repo / "experiments" / "placebo" / "runs.jsonl").write_text(
+        '"placebo fixture"\n', encoding="utf-8"
+    )
+    monkeypatch.setattr(mod, "REPO_ROOT", repo)
+    monkeypatch.setattr(mod, "ARCHIVE", archive)
+    monkeypatch.setenv("GITHUB_USER", "fixture")
+    # No real archive Git commands, including pushes, execute in this test.
+    monkeypatch.setattr(
+        mod.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="", returncode=0)
+    )
+    assert mod.main() == 0
+    assert (archive / "ledger" / "fixture-runs.jsonl").read_text() == '"real fixture"\n'
+    assert (
+        archive / "ledger" / "placebo" / "fixture-runs.jsonl"
+    ).read_text() == '"placebo fixture"\n'
+
+
+def test_placebo_archive_cannot_overwrite_another_users_real_ledger(tmp_path, monkeypatch):
+    mod = _load_sync()
+    real_repo, placebo_repo, archive = tmp_path / "real", tmp_path / "placebo", tmp_path / "archive"
+    (real_repo / "experiments").mkdir(parents=True)
+    (placebo_repo / "experiments" / "placebo").mkdir(parents=True)
+    archive.mkdir()
+    (real_repo / "experiments" / "runs.jsonl").write_text("REAL-A\n", encoding="utf-8")
+    (placebo_repo / "experiments" / "placebo" / "runs.jsonl").write_text(
+        "PLACEBO-B\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(mod, "ARCHIVE", archive)
+    monkeypatch.setattr(
+        mod.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="", returncode=0)
+    )
+    monkeypatch.setattr(mod, "REPO_ROOT", real_repo)
+    monkeypatch.setenv("GITHUB_USER", "fixture-placebo")
+    assert mod.main() == 0
+    monkeypatch.setattr(mod, "REPO_ROOT", placebo_repo)
+    monkeypatch.setenv("GITHUB_USER", "fixture")
+    assert mod.main() == 0
+    assert (archive / "ledger" / "fixture-placebo-runs.jsonl").read_text() == "REAL-A\n"
+    assert (archive / "ledger" / "placebo" / "fixture-runs.jsonl").read_text() == "PLACEBO-B\n"
