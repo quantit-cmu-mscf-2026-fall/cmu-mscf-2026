@@ -21,8 +21,11 @@ from pathlib import Path
 from capstone.factors.tree import (
     BINARY_PARAMETER_FUNCS,
     BINARY_WINDOW_FUNCS,
-    FIELDS,
     FUNCS,
+    FUNDAMENTAL_FIELDS,
+    MARKET_FIELDS,
+    REGIME_FUNCS,
+    STOCK_FIELDS,
     WINDOW_MAX,
     WINDOW_MIN,
 )
@@ -36,13 +39,33 @@ class FactorConfig:
 
     model: str = "claude-opus-5"
     max_tokens: int = 16000
-    prompt_version: str = "v4"
+    prompt_version: str = "v7"
     hypotheses_per_paper: int = 3
     factors_per_hypothesis: int = 4
     max_repairs: int = 2
     max_zoo_share: float = 0.75
     max_store_share: float = 1.0
     max_nodes: int = 30
+    alignment_model: str = ""
+    min_alignment: float = 0.0
+    avoid_frequent_subtrees: int = 3
+    max_bond_leaves: int = 4
+    max_member_share: float = 0.75
+    max_bond_overlap: float = 0.75
+    memory_lambda_max: float = 0.05
+    memory_warmup_start: int = 0
+    memory_warmup_length: int = 200
+    memory_kappa: float = 5.0
+    memory_epsilon: float = 1e-6
+    memory_veto_confidence: float = 0.3
+    memory_veto_failure_rate: float = 0.7
+    memory_min_quality: float = 0.10
+    memory_high_quality: float = 0.20
+    memory_quality_edges: tuple[float, ...] = (0.05, 0.10, 0.20)
+    memory_signed_quality: bool = False
+    memory_max_correlation: float = 0.70
+    memory_pool_capacity: int = 50
+    memory_children_per_parent: int = 5
 
     def __post_init__(self) -> None:
         if self.max_nodes < 3:
@@ -51,9 +74,33 @@ class FactorConfig:
             raise ValueError("hypotheses_per_paper and factors_per_hypothesis must be >= 1")
         if self.max_repairs < 0:
             raise ValueError("max_repairs cannot be negative")
-        for name in ("max_zoo_share", "max_store_share"):
+        if not 0 <= self.min_alignment <= 1:
+            raise ValueError("min_alignment must be in [0, 1]")
+        if self.avoid_frequent_subtrees < 0:
+            raise ValueError("avoid_frequent_subtrees cannot be negative")
+        if self.max_bond_leaves < 2:
+            raise ValueError("max_bond_leaves must be at least 2")
+        for name in ("max_zoo_share", "max_store_share", "max_member_share", "max_bond_overlap"):
             if not 0 < getattr(self, name) <= 1:
                 raise ValueError(f"{name} must be in (0, 1]")
+        if self.memory_warmup_start < 0 or self.memory_warmup_length < 1:
+            raise ValueError("need memory_warmup_start >= 0 and memory_warmup_length >= 1")
+        if self.memory_lambda_max < 0 or self.memory_kappa <= 0 or self.memory_epsilon <= 0:
+            raise ValueError("need memory_lambda_max >= 0, memory_kappa > 0, memory_epsilon > 0")
+        if not 0 <= self.memory_min_quality <= self.memory_high_quality:
+            raise ValueError("need 0 <= memory_min_quality <= memory_high_quality")
+        # TOML gives arrays as lists; keep the config hashable.
+        object.__setattr__(self, "memory_quality_edges", tuple(self.memory_quality_edges))
+        edges = self.memory_quality_edges
+        if not edges or any(b <= a for a, b in zip(edges, edges[1:], strict=False)):
+            raise ValueError("memory_quality_edges must be non-empty and strictly increasing")
+        if not 0 < self.memory_max_correlation <= 1:
+            raise ValueError("memory_max_correlation must be in (0, 1]")
+        if self.memory_pool_capacity < 1 or self.memory_children_per_parent < 1:
+            raise ValueError("memory_pool_capacity and memory_children_per_parent must be >= 1")
+        for name in ("memory_veto_confidence", "memory_veto_failure_rate"):
+            if not 0 <= getattr(self, name) <= 1:
+                raise ValueError(f"{name} must be in [0, 1]")
 
 
 def load_config(path: str | Path | None = None) -> FactorConfig:
@@ -66,8 +113,15 @@ def load_config(path: str | Path | None = None) -> FactorConfig:
     return FactorConfig(**values)
 
 
-def make_client():
+def make_client(prompt_caching: bool = False):
     """A real Anthropic client; the SDK finds the credentials.
+
+    `prompt_caching=True` marks each request's system text as a cacheable prefix
+    (`capstone.pipeline.usage.PromptCaching`); off by default, as it changes the
+    request shape.
+
+    Hidden SDK retries are disabled: a retry must pass through the caller's
+    budget/journal as another counted attempt. API failures propagate to callers.
 
     In order: ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, an `ant auth login`
     profile, or workload identity federation (short-lived tokens in CI or a
@@ -77,7 +131,12 @@ def make_client():
         import anthropic
     except ImportError as exc:  # pragma: no cover - depends on the environment
         raise ImportError('install the agents extra: pip install -e ".[agents]"') from exc
-    return anthropic.Anthropic()
+    client = anthropic.Anthropic(max_retries=0)
+    if prompt_caching:
+        from capstone.pipeline.usage import PromptCaching
+
+        return PromptCaching(client)
+    return client
 
 
 def call_tool(
@@ -112,17 +171,44 @@ def call_tool(
     raise ValueError(f"the model did not call {tool['name']}")
 
 
-def grammar_help() -> str:
-    """The factor grammar in words, generated from the parser's own tables."""
+def grammar_help(*, regime_operators: bool = False, fundamentals: bool = False) -> str:
+    """The factor grammar in words, generated from the parser's own tables.
+
+    `regime_operators` (off by default) adds the two market-regime operators; off, the
+    text is what it was.
+
+    `fundamentals` adds the annual accounting fields; only for a run whose
+    panel was built with them (`evaluation.build_panel(fundamentals=...)`),
+    since a tree reading one fails to evaluate on a panel without them.
+    """
     windowed = sorted(name for name, takes in FUNCS.items() if takes)
     plain = sorted(name for name, takes in FUNCS.items() if not takes)
+    accounting = (
+        f"Annual accounting fields, per stock, in $ millions: {', '.join(FUNDAMENTAL_FIELDS)} "
+        "(book equity, income before extraordinary items, net sales, total assets); each "
+        "fiscal year's value is known from 90 days after the fiscal year end and held "
+        "until the next year's, so book / cap is book-to-market. "
+        if fundamentals
+        else ""
+    )
     return (
-        f"Fields: {', '.join(FIELDS)}. Operators: + - * / and unary minus. "
+        f"Fields: {', '.join(STOCK_FIELDS)} (per stock), and {', '.join(MARKET_FIELDS)} "
+        "(the value-weighted market return, the same for every stock on a date; market "
+        "volatility is ts_std(mkt_return, n)). "
+        f"{accounting}Operators: + - * / and unary minus. "
         f"f(x, window): {', '.join(windowed)}. "
         f"f(x, y, window): {', '.join(sorted(BINARY_WINDOW_FUNCS))}. "
         f"f(x, exponent): {', '.join(sorted(BINARY_PARAMETER_FUNCS))}. "
         f"f(x): {', '.join(plain)}. "
         f"Windows are integer literals in [{WINDOW_MIN}, {WINDOW_MAX}]; exponents are "
         "numeric literals. No other identifiers exist, and every expression must use "
-        "at least one field."
+        "at least one per-stock field."
+        + (
+            f" Market-regime operators, f(x): {', '.join(REGIME_FUNCS)}: volscale(x) scales "
+            "x by a fixed target volatility over the market's trailing 126-day volatility; "
+            "bear_gate(x) is x, set to 0 when the market's past-504-day return is negative. "
+            "A formula wrapped in one is counted in its unwrapped formula's family."
+            if regime_operators
+            else ""
+        )
     )

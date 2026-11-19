@@ -10,6 +10,10 @@ __pycache__/
 experiments/runs.jsonl
 experiments/factors.db*
 experiments/placebo/
+experiments/alignment_labels.csv
+experiments/reports/
+experiments/factor_evaluation/
+experiments/learned_memory_search_check/
 
 # paperlog working data (keep it out of this public repo; see research/paperlog/README.md)
 papers.db

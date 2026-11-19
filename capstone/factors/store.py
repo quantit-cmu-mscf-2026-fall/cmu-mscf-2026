@@ -10,6 +10,14 @@ proposals that were rejected or failed to parse. Proposals are the lineage
 edges (paper -> hypothesis -> factor, and parent factor -> child), and their
 count is what the search actually produced: N_searched, not N_reported.
 
+`memory_events` is learned memory search's record of each deepen edit
+(`capstone.factors.memory`). Its parent and child ids are plain text, not
+references into `factors`: a child that failed to parse has no factor.
+
+A `variants` row is one way of trading a stored factor (a trading spec:
+holding period, sector neutrality, ...). Evaluation trades variants, not
+bare formulas, so each variant is a candidate with lineage to its factor.
+
 Nothing here computes performance, so nothing here is a ledger trial.
 """
 
@@ -28,6 +36,11 @@ from capstone.factors.tree import structural_key as _structural_key
 from capstone.factors.tree import unparse as _unparse
 
 DB_FILENAME = "factors.db"
+ALIGNMENT_COLUMNS = (
+    ("alignment", "REAL"),
+    ("alignment_reason", "TEXT"),
+    ("alignment_model", "TEXT"),
+)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS papers (
@@ -76,6 +89,9 @@ CREATE TABLE IF NOT EXISTS proposals (
   rationale TEXT,
   model TEXT,
   prompt_version TEXT,
+  alignment REAL,
+  alignment_reason TEXT,
+  alignment_model TEXT,
   created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS usage (
@@ -87,6 +103,62 @@ CREATE TABLE IF NOT EXISTS usage (
   output_tokens INTEGER NOT NULL,
   created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS bonds (
+  id TEXT PRIMARY KEY,
+  rule TEXT NOT NULL,
+  leaves TEXT NOT NULL,
+  leaf_nodes INTEGER NOT NULL,
+  member_share REAL NOT NULL,
+  nearest_members TEXT,
+  bond_overlap REAL NOT NULL,
+  nearest_bond TEXT,
+  features TEXT NOT NULL,
+  rationale TEXT,
+  model TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS bond_members (
+  bond_id TEXT NOT NULL REFERENCES bonds(id),
+  member_id TEXT NOT NULL,
+  member_kind TEXT NOT NULL,
+  PRIMARY KEY (bond_id, member_id)
+);
+CREATE TABLE IF NOT EXISTS moves (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  action TEXT NOT NULL,
+  from_id TEXT,
+  result_id TEXT,
+  hypothesis_id TEXT,
+  status TEXT NOT NULL,
+  reason TEXT,
+  policy TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS memory_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL,
+  iteration INTEGER NOT NULL,
+  parent_id TEXT NOT NULL,
+  child_id TEXT,
+  child_expression TEXT NOT NULL,
+  hypothesis_id TEXT,
+  context TEXT NOT NULL,
+  motif_intended TEXT NOT NULL,
+  motif_realized TEXT,
+  status TEXT NOT NULL,
+  quality REAL,
+  baseline REAL,
+  residual REAL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_memory_events_run ON memory_events(run_id);
+CREATE TABLE IF NOT EXISTS variants (
+  id TEXT PRIMARY KEY,
+  factor_id TEXT NOT NULL REFERENCES factors(id),
+  spec TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_variants_factor ON variants(factor_id);
 CREATE INDEX IF NOT EXISTS ix_proposals_factor ON proposals(factor_id);
 CREATE INDEX IF NOT EXISTS ix_proposals_hypothesis ON proposals(hypothesis_id);
 CREATE INDEX IF NOT EXISTS ix_hypotheses_paper ON hypotheses(paper_key);
@@ -128,6 +200,9 @@ def connect(path: str | Path | None = None, *, readonly: bool = False) -> sqlite
     if "kind" not in columns:  # a store created before hypotheses had a kind
         con.execute("ALTER TABLE hypotheses ADD COLUMN kind TEXT NOT NULL DEFAULT 'market'")
     columns = {row[1] for row in con.execute("PRAGMA table_info(proposals)")}
+    for name, kind in ALIGNMENT_COLUMNS:  # a store created before the alignment check
+        if name not in columns:
+            con.execute(f"ALTER TABLE proposals ADD COLUMN {name} {kind}")
     if "proposed_factor_id" not in columns:
         with con:
             con.execute("ALTER TABLE proposals ADD COLUMN proposed_factor_id TEXT")
@@ -265,6 +340,9 @@ def add_factor(
     nearest_zoo: str = "",
     store_similarity: float | None = None,
     nearest_factor: str = "",
+    alignment: float | None = None,
+    alignment_reason: str = "",
+    alignment_model: str = "",
 ) -> tuple[str, bool]:
     """Store a factor and the proposal that produced it.
 
@@ -310,6 +388,9 @@ def add_factor(
             rationale=rationale,
             model=model,
             prompt_version=prompt_version,
+            alignment=alignment,
+            alignment_reason=alignment_reason,
+            alignment_model=alignment_model,
         )
     return fid, is_new
 
@@ -330,8 +411,12 @@ def reject(
     nearest_zoo: str = "",
     store_similarity: float | None = None,
     nearest_factor: str = "",
+    alignment: float | None = None,
+    alignment_reason: str = "",
+    alignment_model: str = "",
 ) -> int:
-    """Record a proposal that was not stored: it failed to parse or was not original.
+    """Record a proposal that was not stored: it failed to parse, was not original, or
+    did not implement its hypothesis.
 
     The factor itself is not added to `factors`. Pass `node` when the
     expression parsed, so the proposal's row still names which factor it was.
@@ -354,7 +439,42 @@ def reject(
             rationale=rationale,
             model=model,
             prompt_version=prompt_version,
+            alignment=alignment,
+            alignment_reason=alignment_reason,
+            alignment_model=alignment_model,
         )
+
+
+# ---------------------------------------------------------------------------
+# Variants: how a factor is traded
+
+
+def variant_id(fid: str, spec: dict) -> str:
+    """Stable id of a (factor, trading spec): the factor id, then a short hash of the spec."""
+    payload = json.dumps(spec, sort_keys=True, separators=(",", ":"))
+    return f"{fid}-{hashlib.sha256(payload.encode('utf-8')).hexdigest()[:8]}"
+
+
+def add_variant(con: sqlite3.Connection, fid: str, spec: dict) -> str:
+    """Record a way of trading a stored factor and return its id. Repeats are ignored."""
+    vid = variant_id(fid, spec)
+    with con:
+        con.execute(
+            "INSERT OR IGNORE INTO variants (id, factor_id, spec, created_at) VALUES (?, ?, ?, ?)",
+            (vid, fid, json.dumps(spec, sort_keys=True), _now()),
+        )
+    return vid
+
+
+def variants(con: sqlite3.Connection, fid: str | None = None) -> list[dict]:
+    """Stored variants (spec decoded), optionally of one factor."""
+    if fid is None:
+        rows = con.execute("SELECT * FROM variants ORDER BY created_at, id")
+    else:
+        rows = con.execute(
+            "SELECT * FROM variants WHERE factor_id = ? ORDER BY created_at, id", (fid,)
+        )
+    return [{**dict(r), "spec": json.loads(r["spec"])} for r in rows]
 
 
 # ---------------------------------------------------------------------------
@@ -363,7 +483,8 @@ def reject(
 
 def factors(con: sqlite3.Connection) -> list[dict]:
     """Every stored factor, oldest first."""
-    return [dict(r) for r in con.execute("SELECT * FROM factors ORDER BY created_at, id")]
+    # Wall-clock ties must not change which equally similar factor is named first.
+    return [dict(r) for r in con.execute("SELECT * FROM factors ORDER BY rowid")]
 
 
 def factor_trees(con: sqlite3.Connection) -> list[tuple[str, Node]]:

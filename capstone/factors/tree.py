@@ -1,8 +1,9 @@
 """Factor expressions as syntax trees: a closed grammar, two canonical keys.
 
-A factor is a string in a small grammar over daily stock fields (`FIELDS`),
-parsed into an immutable tree. `parse` is the only way in for a string: anything outside
-the grammar raises `ParseError`, and nothing calls eval or exec.
+A factor is a string in a small grammar over daily stock and market fields and
+annual accounting fields (`FIELDS`), parsed into an immutable tree. `parse` is the
+only way in for a string: anything outside the grammar raises `ParseError`, and
+nothing calls eval or exec.
 
 Two canonical keys, for two different questions:
 
@@ -32,7 +33,37 @@ from dataclasses import dataclass
 # Whatever evaluates factors must split-adjust prices and shares: a ratio of
 # raw closes across a split is not a return.
 OHLCV = ("open", "high", "low", "close", "volume")
-FIELDS = (*OHLCV, "returns", "shares", "cap")
+STOCK_FIELDS = (*OHLCV, "returns", "shares", "cap")
+
+# Market-wide fields: one value per date, the same for every stock.
+#   mkt_return: the value-weighted return of that day's universe, each stock's
+#     `returns` weighted by its previous day's `cap` (the market factor's
+#     building block). Market volatility is ts_std(mkt_return, n); a stock's
+#     market beta is ts_cov(returns, mkt_return, n) / ts_cov(mkt_return,
+#     mkt_return, n), and its residual return follows from that, so neither
+#     needs its own field or operator (Ang et al. 2006 used both).
+# A factor must still read at least one stock field: one built from market
+# fields alone ranks every stock the same on every date.
+MARKET_FIELDS = ("mkt_return",)
+
+# Annual accounting fields, per stock (QUANTIT-118), as dates x permno frames
+# from `factors.fundamentals`, each dated by when it could have been known, in
+# Compustat's units ($ millions): the four that the standard accounting
+# anomalies are built from.
+#   book: book equity, Fama-French's definition (value: book / cap);
+#   earnings: income before extraordinary items, `ib` (earnings yield, and
+#     with book, profitability);
+#   sales: net sales, `sale` (sales-to-price, margins);
+#   assets: total assets, `at` (investment: asset growth; ROA).
+# A fiscal year's value is visible only from `sd.available_from` with
+# report_col=None (the first trading day after the fiscal year end + 90
+# days) and is held until the next year's is; never before. A panel built
+# without fundamentals has none of these fields, and a tree reading one fails
+# to evaluate there.
+FUNDAMENTAL_FIELDS = ("book", "earnings", "sales", "assets")
+# Fields with a value per stock: an expression must read at least one.
+PER_STOCK_FIELDS = (*STOCK_FIELDS, *FUNDAMENTAL_FIELDS)
+FIELDS = (*STOCK_FIELDS, *MARKET_FIELDS, *FUNDAMENTAL_FIELDS)
 
 # func name -> takes a window argument. Windows must be integer literals.
 FUNCS = {
@@ -59,6 +90,14 @@ FUNCS = {
 }
 BINARY_WINDOW_FUNCS = {"ts_corr", "ts_cov"}
 BINARY_PARAMETER_FUNCS = {"signed_power"}
+
+# Market-regime operators (off by default): f(x), no window. Not in
+# `FUNCS`: they parse only with `parse(..., regime_operators=True)`; otherwise they
+# are unknown identifiers, as before. `volscale(x)` scales x by a fixed target over the
+# market's rv126;
+# `bear_gate(x)` is x set to 0 in a bear market (`capstone.regimes`). A tree using
+# one belongs to its `regime_base` formula's family.
+REGIME_FUNCS = ("volscale", "bear_gate")
 
 # Five trading years, the horizon of long-run reversal (De Bondt & Thaler
 # 1985). At 252 a three-to-five-year lookback had to be written as nested
@@ -192,9 +231,10 @@ def _finite(text: str) -> float:
 
 
 class _Parser:
-    def __init__(self, tokens: list[tuple[str, str]]):
+    def __init__(self, tokens: list[tuple[str, str]], regime_operators: bool = False):
         self.tokens = tokens
         self.pos = 0
+        self.regime_operators = regime_operators
 
     def peek(self) -> tuple[str, str] | None:
         return self.tokens[self.pos] if self.pos < len(self.tokens) else None
@@ -244,6 +284,8 @@ class _Parser:
                 return Field_(value)
             if value in FUNCS or value in BINARY_WINDOW_FUNCS or value in BINARY_PARAMETER_FUNCS:
                 return self.call(value)
+            if self.regime_operators and value in REGIME_FUNCS:
+                return self.call(value)
             raise ParseError(f"unknown identifier {value!r}")
         raise ParseError(f"unexpected token {value!r}")
 
@@ -275,25 +317,27 @@ class _Parser:
             if kind != "num":
                 raise ParseError(f"{func} exponent must be a numeric literal, got {value!r}")
             arg2 = Const(sign * _finite(value))
-        elif FUNCS[func]:
+        elif FUNCS.get(func):
             self.expect(",")
             window = self.window(func)
         self.expect(")")
         return Call(func, arg, window, arg2)
 
 
-def parse(expression: str) -> Node:
+def parse(expression: str, *, regime_operators: bool = False) -> Node:
     """Parse a factor expression into a tree. The ONLY entry point for strings.
+
+    `regime_operators` admits `REGIME_FUNCS` (off by default).
 
     Raises `ParseError` for anything outside the grammar: unknown identifiers
     or functions, quotes, attribute access, subscripts, non-literal windows,
-    expressions that reference no market field, or expressions above the node
+    expressions that reference no stock field, or expressions above the node
     cap.
     """
     tokens = _tokenize(expression)
     if not tokens:
         raise ParseError("empty expression")
-    parser = _Parser(tokens)
+    parser = _Parser(tokens, regime_operators)
     try:
         node = parser.expr()
         if parser.peek() is not None:
@@ -302,10 +346,30 @@ def parse(expression: str) -> Node:
         # (a left-leaning chain thousands of nodes deep) must be caught here too.
         if node_count(node) > MAX_EXPRESSION_NODES:
             raise ParseError(f"expression exceeds {MAX_EXPRESSION_NODES} nodes")
-        if not features_used(node):
-            raise ParseError("expression references no market field")
+        if not features_used(node) & set(PER_STOCK_FIELDS):
+            raise ParseError("expression references no stock field")
     except RecursionError:
         raise ParseError("expression is nested too deeply") from None
+    return node
+
+
+def uses_regime(node: Node) -> bool:
+    """Whether the tree applies a market-regime operator (`REGIME_FUNCS`)."""
+    return any(isinstance(n, Call) and n.func in REGIME_FUNCS for n in walk(node))
+
+
+def regime_base(node: Node) -> Node:
+    """The tree with every regime operator replaced by its argument: the base formula
+    whose family a regime variant is counted in, and which stage 3 spans it with."""
+    if isinstance(node, Call) and node.func in REGIME_FUNCS:
+        return regime_base(node.arg)
+    if isinstance(node, Unary):
+        return Unary(node.op, regime_base(node.operand))
+    if isinstance(node, BinOp):
+        return BinOp(node.op, regime_base(node.left), regime_base(node.right))
+    if isinstance(node, Call):
+        arg2 = None if node.arg2 is None else regime_base(node.arg2)
+        return Call(node.func, regime_base(node.arg), node.window, arg2)
     return node
 
 
@@ -493,3 +557,102 @@ def zoo_similarity(node: Node, zoo: Sequence[tuple[str, Node]]) -> tuple[int, fl
         if raw > best_raw:
             best_raw, best_name = raw, name
     return best_raw, best_raw / node_count(node), best_name
+
+
+# ---------------------------------------------------------------------------
+# Frequent subtree avoidance (Navigating the Alpha Jungle, #45: Sec. 3, Eq. 11-12)
+
+
+def _children(node: Node) -> list[Node]:
+    if isinstance(node, Unary):
+        return [node.operand]
+    if isinstance(node, BinOp):
+        return [node.left, node.right]
+    if isinstance(node, Call):
+        return [node.arg] if node.arg2 is None else [node.arg, node.arg2]
+    return []
+
+
+def _canonical(node: Node) -> Node:
+    """The tree with `-(-x)` collapsed to `x` and nested shifts folded into one.
+
+    `structural_key` already treats these as one shape, so a node and its child
+    can share a key (`shift(shift(x, a), b)` and its inner `shift`). Gene logic
+    that compares a gene with its parents needs a tree where that cannot happen.
+    """
+    if isinstance(node, Unary):
+        inner = _canonical(node.operand)
+        if isinstance(inner, Unary):
+            return inner.operand
+        return Unary(node.op, inner)
+    if isinstance(node, BinOp):
+        return BinOp(node.op, _canonical(node.left), _canonical(node.right))
+    if isinstance(node, Call):
+        arg = _canonical(node.arg)
+        arg2 = None if node.arg2 is None else _canonical(node.arg2)
+        call = Call(node.func, arg, node.window, arg2)
+        return _fold_shifts(call) if node.func == "shift" else call
+    return node
+
+
+def _is_root_gene(node: Node) -> bool:
+    """A subtree whose leaves are all raw fields, with at least one operator.
+
+    The paper's root gene: "a subtree ... whose leaves are exclusively raw input
+    features". A bare field is left out: every factor reads some field, so a
+    field alone can't be a structure worth avoiding.
+    """
+    if isinstance(node, Field_ | Const):
+        return False
+    leaves = [n for n in walk(node) if not _children(n)]
+    return all(isinstance(leaf, Field_) for leaf in leaves)
+
+
+def root_genes(node: Node) -> frozenset[str]:
+    """The tree's root genes, abstracted: windows dropped, as in Abs(Ma(vwap, 20)) = Ma(vwap, t)."""
+    return frozenset(structural_key(n) for n in walk(_canonical(node)) if _is_root_gene(n))
+
+
+def gene_text(node: Node) -> str:
+    """A root gene as the model reads it: the expression with every window written t."""
+    return re.sub(r", \d+\)", ", t)", unparse(node))
+
+
+def frequent_root_genes(
+    trees: Sequence[Node], k: int = 3, *, min_count: int = 2
+) -> list[tuple[str, float, str]]:
+    """The `k` most frequent closed root genes across `trees`: (key, support, text).
+
+    Support is the share of trees containing the gene (Eq. 11). A gene is
+    closed when no immediate supertree that is itself a root gene has the same
+    support, so the largest shared structure is named rather than each piece
+    of it. Genes in fewer than `min_count` trees are not frequent. Ties are
+    broken by the larger gene, then by key, so the result is deterministic.
+    """
+    counts: dict[str, int] = {}
+    texts: dict[str, str] = {}
+    sizes: dict[str, int] = {}
+    parents: dict[str, set[str]] = {}
+    for tree in trees:
+        seen: set[str] = set()
+        for node in walk(_canonical(tree)):
+            if not _is_root_gene(node):
+                continue
+            key = structural_key(node)
+            seen.add(key)
+            texts.setdefault(key, gene_text(node))
+            sizes[key] = node_count(node)
+            for child in _children(node):
+                if _is_root_gene(child):
+                    parents.setdefault(structural_key(child), set()).add(key)
+        for key in seen:
+            counts[key] = counts.get(key, 0) + 1
+    if not trees:
+        return []
+    closed = [
+        key
+        for key, count in counts.items()
+        if count >= min_count and all(counts[p] != count for p in parents.get(key, ()))
+    ]
+    closed.sort(key=lambda g: (-counts[g], -sizes[g], g))
+    return [(g, counts[g] / len(trees), texts[g]) for g in closed[:k]]
