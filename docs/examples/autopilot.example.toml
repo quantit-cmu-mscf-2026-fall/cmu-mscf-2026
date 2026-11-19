@@ -1,0 +1,24 @@
+# Autopilot configuration. One section per stage; an unknown section or key is refused.
+# Paths are resolved against this file's folder. This example holds only the sections the
+# core owns; each stage adds its own section (and its keys) when the stage is added.
+
+[autopilot]
+run_root = "runs/example-run"
+policy_id = "example-policy-v1"     # frozen at the first tick; reviewer = autopilot:example-policy-v1
+checkout = "registry"               # a separate git clone holding deploy/strategies.yml, never
+                                    # the code checkout or inside it; keep this file and runs/
+                                    # outside the code checkout too
+input_archive = "archive/qualified" # obtained out of band
+max_crashes = 3
+real_model_calls = false            # a person's opt-in; false = only an injected client
+
+[spend]                             # core: model-call ceilings, chosen by the person running it
+run_ceiling = 0                     # per-run ceiling over every spend scope; 0 = no calls
+global_ceiling = 0                  # ceiling over every run counted below; 0 = no calls
+# runs_dir = "runs"                 # required with real_model_calls = true: every run root in
+                                    # it is found and counted toward the global ceiling
+accounting_roots = []               # other run roots kept outside runs_dir
+
+[resources]                         # core: worker pools; results never depend on them
+max_workers = 0                     # cap on auto-sized pools; 0 = the machine's cores
+memory_budget_mb = 0                # RAM pools may plan for; 0 = a share of the RAM available
