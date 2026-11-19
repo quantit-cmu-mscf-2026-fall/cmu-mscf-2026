@@ -40,7 +40,7 @@ Fill every section of the template:
 - Data version: <sd.data_version()>
 - Seeds: <list>
 - Trial count: <n> from `trial_count(<name or tags>, exclude_tags=["synthetic"])`, <m> total in ledger
-- Correction: <method> because <dependence>; evidence profile of the top candidates
+- Gate: <stage gate>; graded scores: <evidence profile>
 - <key numbers or one small plot>
 
 ## Checklist
@@ -63,4 +63,4 @@ Results live in the description, not in committed files.
 Run `/review-pr` (it launches the `pr-reviewer` agents, see `REVIEW.md`) for a first pass,
 then read the diff yourself. Check:
 ledger before results, trial count sourced from the ledger, `shared_data` rules, holdout
-untouched, correction chosen for the dependence, null and power tests for any new method.
+untouched, one gate per stage with graded scores reported, null and power tests for any new method.

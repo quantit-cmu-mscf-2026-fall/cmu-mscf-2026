@@ -73,7 +73,7 @@ Known weaknesses are measured ones, from the PRs cited.
 | Search-adjusted family p-value (`search_adjusted_pvalue`, #51) | Search within one hypothesis | hypothesis | Exact for independent or evenly correlated variants (`rho=`); no resampling | The independent formula over-corrects near-copies (power 0.64 vs 0.81 at K = 20, ρ = 0.9); built on HAC p-values, too optimistic in the tail under fat tails and GARCH | Fast cross-check on the bootstrap | 1 |
 | PSR, MinTRL (#29) | Too short a track record | candidate | Readable: "how many years would we need?" | Single-candidate; no multiple testing | Graded score | 2, 4 |
 | Robustness to lags, costs, sub-periods | Fragile signals | candidate | Catches results that hang on one choice | Each check is another test if used as a gate | Graded score | 2 |
-| PBO / CSCV (`pbo`, #35) | Overfitting in the *selection* of the best | batch | Measures the search, not one candidate | 0.5 is the no-skill baseline; a single set ranges 0.06–0.78 | Batch diagnostic | 2 |
+| PBO / CSCV (`pbo`, #35) | Overfitting in the *selection* of the best | batch | Measures the search, not one candidate | 0.5 is the no-skill baseline; a single set ranges 0.08–0.89 (100 no-skill sets, 1000 × 50, `n_blocks=10`) | Batch diagnostic | 2 |
 | Average correlation, implied independent trials (#29) | Overcounting correlated trials | batch | Explains why a correction is strict | Must not replace the ledger count in a decision | Batch diagnostic | all |
 | Search-adjusted FDR estimate (below) | Hidden specification search | batch | Uses what we can see: the whole search | Depends on the search being fully logged | Batch diagnostic | 1 |
 | Spanning alpha (`spanning`, planned) | Known factor in disguise; copy of a held signal | candidate | The novelty test | Needs the comparison set (#43) | **Gate** | 3 |
@@ -179,8 +179,9 @@ see the whole search.** The ledger records every trial, and the factor store
 
 This page fixes the **method**; the threshold **values** q₁, α₃ and q₄ come
 from running that method for our real generator, and are written here, with
-the date and the parameter file, before any real candidate is scored. None
-is registered yet.
+the date and the parameter file, before any real candidate is scored. The
+first registration, for the crsp-v1 generator, is under "Registered
+thresholds" below.
 
 **What "calibrated on real data" means.** The thresholds are tuned on
 *simulated* candidate sets whose structure is measured from the real
@@ -231,14 +232,93 @@ registered only once it is, and a real stage-3 gate will lower power, and
 possibly the FDR, below what the funnel alone shows.
 
 **Baseline first (decided, Q5):** until the funnel is calibrated and shown to
-do better, the decision rule is the baseline: **BH at 10% on each family's
-bootstrap p-value** (#67). The baseline has no holdout behind it, so its FDR
+do better, the decision rule is the baseline: **BH on each family's bootstrap
+p-value** (#67), at the level its calibration registers (5% for crsp-v1; the
+10% first proposed is too loose there, see below). The baseline has no holdout behind it, so its FDR
 rests entirely on those p-values. The same procedure measures it, the funnel
 and the naive stack side by side, and the funnel replaces the baseline only
 once it beats it.
 
 **The null check still applies:** on sets with no real candidates, the
 calibrated funnel must pass almost nothing (`CLAUDE.md`, "Research hygiene").
+
+### Registered thresholds: crsp-v1 (2026-11-16)
+
+**Generator:** `factor-trees/claude-opus-5/v7/agent-deepen`, run `crsp-v1`,
+data version `6c1295f853f3`, discovery period 1990-01-03 to 2020-12-31. The
+holdout was not opened.
+
+**Measured structure** (`scripts/measure_generator.py`, ledger
+`generator-structure`; returns and family labels only, no mean, Sharpe or
+p-value read):
+- 15 hypothesis families, 594 variants, from 12 to 300 per family;
+- mean correlation within a family 0.59 (0.90 between one factor's trading
+  specs), across families 0.02. The pooled 0.59 mostly reflects the
+  300-variant family (94% of the within-family pairs, 0.59 on its own); the
+  families' own means run from 0.21 to 0.95, median 0.84;
+- lag-1 autocorrelation 0.12; excess kurtosis 12; autocorrelation of squared
+  returns 0.27.
+
+**K, the variants each family searched.** The matrix holds 99 factors × 6
+trading specs = 594 variants: the 53 factors drawn from papers and 46 the
+deepen agent added, all to one family (the 300-variant one, whose 4 seed
+factors it refined). The run's ledger counts 693 trials and its summary
+reports 73 deepened children judged, so up to 27 children were evaluated but
+are not in the matrix. If they were scored on the search period they are
+trials of that family, and the calibration below is rerun with that family at
+K = 462 (27 × 6 more; the last column of the table below).
+
+These are in `scripts/calibrate_crsp_v1.json`. Tails and volatility
+clustering were matched by simulating with t₅ innovations and GARCH
+(0.25, 0.70), which gives kurtosis 14 and squared-return autocorrelation
+0.28 under the same measurement. With 15 families, the share of real ideas
+is a count: 0, 1 or 2 real families, at an annual Sharpe of 0.5, 1.0 or 1.5.
+
+**Registered** (`scripts/calibrate_generator.py`, 400 seeds, ledger
+`generator-calibration`, tags `synthetic` and `calibration`):
+
+| | Value |
+|---|---|
+| Decision rule (Q5) | **Baseline: BH at q = 0.05** on the bootstrap family p-values |
+| Funnel, reported alongside | stage 1 BH at **q₁ = 0.10** on bootstrap family p-values; stage 2 no gate; stage 4 BH across survivors at **q₄ = 0.50** |
+| Stage 1's p-value | `stage1 = "bootstrap"`, 1,999 draws |
+| α₃ | not registered: stage 3 isn't built, so the config has no `factors_digest` |
+| Registered config | `scripts/gate_crsp_v1.json`: the `GateConfig` above, hash `5e89d78ae00e9537af3db3aa20810c5804c1d6c3ae892cf91600ce962e179009` |
+
+`GateConfig` has no field for the decision rule, so its hash covers the
+funnel only. The rule and its q (baseline, BH at 0.05) are fixed here and in
+the same file's `decision_rule`; the gate run takes them from there. The run
+registers the file's config with
+`gate.register(GateConfig.from_dict(json.load(f)["gate_config"]))` on the
+run's ledger before scoring, replacing the crsp-v1 manifest's earlier q₄ = 0.30
+config.
+
+Worst-setting FDR and mean power. The main run is followed by four
+sensitivity runs: within-family correlation at the highest and lowest family's
+level (0.90, 0.21), lighter tails with GARCH (0.20, 0.75), and the deepened
+family at K = 462:
+
+| Rule | Main | Corr. 0.90 | Corr. 0.21 | GARCH (0.20, 0.75) | K = 462 |
+|---|---|---|---|---|---|
+| Baseline, q = 0.05 | 0.042 / 0.865 | 0.060 / 0.828 | 0.036 / 0.930 | 0.043 / 0.862 | 0.047 / 0.862 |
+| Funnel, q₁ = 0.10, q₄ = 0.50 | 0.047 / 0.850 | 0.058 / 0.814 | 0.050 / 0.896 | 0.049 / 0.845 | 0.049 / 0.836 |
+| Baseline, q = 0.10 | 0.089 / 0.903 | **0.122** / 0.867 | 0.083 / 0.957 | 0.090 / 0.900 | **0.107** / 0.895 |
+| Funnel, q₁ = 0.10, q₄ = 0.30 | 0.032 / 0.791 | 0.042 / 0.763 | 0.028 / 0.827 | 0.032 / 0.781 | 0.032 / 0.783 |
+
+Both registered rules stay below 0.08 (the 10% target less a 2-point margin)
+in every setting. With 400 seeds, an FDR near 0.05 has a standard error of
+about 0.011, so the worst case (0.060) is 1.8 standard errors under the
+cut. At K = 462 the registered rules' FDR moves by at most 0.005 and their
+power by at most 0.014, so the 27 missing children, if they were scored,
+don't change the registration. BH at 10% exceeds the target when variants are near-copies.
+With 15 families a false discovery is usually the only discovery, so the FDR
+here is close to the chance of any false discovery. The funnel does not beat
+the baseline in simulation, so the baseline decides (Q5); the funnel is
+reported beside it because its holdout guards against what the simulation
+doesn't model.
+
+These thresholds belong to this generator. A new agent, model, prompt set or
+search budget needs `measure_generator.py` and a new calibration.
 
 ### What the method's test runs showed (2026-10-06, synthetic; #68)
 
@@ -298,11 +378,11 @@ Recorded 2026-10-05 and 2026-10-06 from the review of #50; updated 2026-10-21.
 | Q2 | Stage-1 gate when families exist | Carl's bootstrap max + BH. Local FDR (#54) is a graded score, and replaces the gate only if the harness shows a real power gain at our base rate |
 | Q3 | Stage-4 gate: deflated Sharpe, Romano–Wolf or SPA | **Proposed from calibration:** BH across the survivors' holdout p-values; the deflated Sharpe becomes a graded score (#68) |
 | Q4 | Where the search is recorded | The factor store, for lineage; the ledger, for trials with computed performance. **Not implemented yet:** a per-trial record of whether a result was shown to the agent. Results reach the agent through the deepen scorer (#79), which records no such exposure; that audit is a follow-up |
-| Q5 | Calibration target | A flat 10% end-to-end FDR; the baseline (BH at 10% on the bootstrap family p-values, #67) decides until the funnel beats it |
+| Q5 | Calibration target | A flat 10% end-to-end FDR; the baseline (BH on the bootstrap family p-values, #67) decides until the funnel beats it, at the level calibration registers (crsp-v1: q = 0.05) |
 | — | Where stage 2's fresh data comes from | **Proposed from calibration:** no separate period; stage 2 reports graded robustness checks and the holdout confirms (#68) |
 | — | Stage 3's gate is the spanning alpha test | **To confirm** with its owner |
 | — | Stage 3's frequency: monthly anomaly portfolios or daily factors (#75) | **Open**, with its owner; needed before α₃ means anything |
-| — | Funnel or bootstrap baseline as the deciding rule | **Open**; see "What the method's test runs showed" |
+| — | Funnel or bootstrap baseline as the deciding rule | **Baseline for crsp-v1** (registered 2026-11-16): the funnel didn't beat it in calibration. Revisit if the team weighs the holdout's protection higher |
 
 ## What this page changes, and what it doesn't
 

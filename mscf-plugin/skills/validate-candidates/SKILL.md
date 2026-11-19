@@ -1,6 +1,6 @@
 ---
 name: validate-candidates
-description: How to judge whether candidate signals or strategies in cmu-mscf-2026 are real - build the dates x candidates performance matrix, test Sharpe ratios one-sided with autocorrelation-robust variance, pick the right multiple-testing correction for the dependence, deflate by the ledger's trial count, and place the result in the five-stage funnel. Use when scoring candidates, reporting a discovery, or choosing a correction.
+description: How to judge whether candidate signals or strategies in cmu-mscf-2026 are real - build the dates x candidates performance matrix, test Sharpe ratios one-sided with autocorrelation-robust variance, apply the stage's gate (one luck correction per stage) plus graded scores, deflate by the ledger's trial count, and place the result in the five-stage funnel. Use when scoring candidates, reporting a discovery, or placing a result in the funnel.
 ---
 
 # Validate candidates
@@ -68,18 +68,19 @@ yes; a candidate strong only under `q` is not a discovery.
 | 5 Incubation | Works live? | small paper capital |
 
 Until the funnel is calibrated and shown to beat it, **the baseline decides** (Q5 in
-`framework.md`): BH at the registered level on each family's bootstrap p-value (10% in
-`framework.md` at the time of writing; re-read it, since values are registered there). The
-funnel replaces the baseline only once it beats it.
+`framework.md`): BH on each family's bootstrap p-value, at the level registered for the
+generator. For crsp-v1 that is **BH at 5%** (`scripts/gate_crsp_v1.json`, `decision_rule`);
+10% was found too loose for this generator. Other generators use the level `framework.md`
+registers for them. The funnel replaces the baseline only once it beats it.
 
 Threshold values come from `capstone.calibration` simulations of the real generator and are
-registered in `docs/validation/framework.md` before scoring; none were registered when this
-was written. The defaults in code (`Thresholds()`, `run_baseline`) are not registered, and
+registered in `docs/validation/framework.md` before scoring (crsp-v1: "Registered
+thresholds: crsp-v1", and `scripts/gate_crsp_v1.json`). The defaults in code (`Thresholds()`, `run_baseline`) are not registered, and
 both default to `stage1="rho"`, the formula p-value. For real candidates stage 1 must pass
 `stage1="bootstrap"`. Tag the ledger entry with the stage (`stage:screen`, ...).
 
 ## 5. Report
 
-State: series type, period, cost model, seed(s), ledger trial count, the correction and why,
+State: series type, period, cost model, seed(s), ledger trial count, the stage's gate and the graded scores,
 the full evidence profile, and for anything that passed the holdout, that the model may
 remember 2021-2025.

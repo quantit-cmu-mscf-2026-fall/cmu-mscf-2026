@@ -23,7 +23,7 @@ entry = runlog.log_run(
             "end": "2020-12-31", "data_version": sd.data_version()},
     metrics={"sharpe": sr, "pvalue_greater": p},
     seed=SEED,
-    tags=["stage:screen"],
+    tags=["stage:screen", "<your-family-tag>"],
     notes="net of costs; gross sharpe in params",
 )
 ```
@@ -43,8 +43,10 @@ a performance number is not a trial. Counts accumulate across rounds of a search
 
 Use these tag prefixes so the funnel can be read straight off the ledger. `stage:`,
 `verdict:` and `holdout` are read by the pipeline viewer (#192, still open). Nothing reads
-or defines other prefixes, so do not invent ones that look official. Group a family's runs
-by reusing one experiment `name`, which `trial_count(name=...)` reads.
+or defines other prefixes, so do not reuse them for anything else. Add one family tag of your
+own (for example `momentum-family`) to every run in a family so `include_tags` can scope the
+count; avoid prefixes that look official. Also group a family's runs by reusing one experiment
+`name`, which `trial_count(name=...)` reads.
 
 | Tag | Meaning |
 |---|---|
@@ -61,8 +63,8 @@ The count for a correction is scoped to the family being corrected, not the whol
 from capstone import runlog
 
 n = runlog.trial_count(name="momentum-12-1", exclude_tags=["synthetic"])
-# or, for related runs that share a tag:
-n = runlog.trial_count(include_tags=["stage:screen"], exclude_tags=["synthetic"])
+# or, for related runs that share your family tag:
+n = runlog.trial_count(include_tags=["<your-family-tag>"], exclude_tags=["synthetic"])
 ```
 
 Bare `trial_count()` and `python -m capstone.runlog stats` count every entry (every
