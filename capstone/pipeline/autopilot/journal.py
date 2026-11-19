@@ -72,7 +72,7 @@ class Journal:
         path = self.root / EVENTS
         text = path.read_text(encoding="utf-8") if path.exists() else ""
         complete = []
-        for line in text.split("\n")[:-1]:
+        for line in text.split("\n"):
             try:
                 json.loads(line)
             except json.JSONDecodeError:

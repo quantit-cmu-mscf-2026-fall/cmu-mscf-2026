@@ -27,21 +27,26 @@ uses) and **#35** (PBO).
 ## PBO: already in PR #35
 
 `capstone/pbo.py` and `tests/test_pbo.py` are in **PR #35** against `main`,
-unchanged from an earlier unmerged implementation. It already matches the
-contract:
+with calibration tests and explicit handling of median ties and unusable
+splits. It matches the performance-matrix contract:
 
 ```python
 cscv(returns_matrix: pd.DataFrame, n_blocks: int = 16, *, periods_per_year: int = 252) -> dict
-# keys: pbo, degradation_slope, degradation_intercept, oos_ranks,
+# keys: pbo, n_splits_used, degradation_slope, degradation_intercept, oos_ranks,
 #       winner_is_sharpe, winner_oos_sharpe, winner_columns
 ```
 
 It follows Bailey, Borwein, López de Prado & Zhu (2016/2017): split the sample
 into `n_blocks` (even) contiguous blocks, use every combination of half the
 blocks as in-sample, find the in-sample winner, and record its relative rank
-out of sample. PBO is the share of splits where the winner lands below the
-out-of-sample median. Rows with any missing value are dropped so every
-candidate is scored on the same dates.
+out of sample. PBO is the share of usable splits where the winner lands below
+the out-of-sample median, counting a winner exactly on the median as half.
+Flat OOS candidates tie at the bottom; when all candidates are flat OOS,
+the winner ties on the median and contributes half. A split with no IS Sharpe
+has no winner and is excluded: `n_splits_used` reports the contributing splits,
+and `pbo` is NaN if none contribute. Rows with any missing value are dropped
+so every candidate is scored on the same dates. Build the input matrix with
+`backtest.candidate_returns`.
 
 **Checked 2026-09-27.** The full suite passes on plain `main` with #35, and
 also on the validation stack (#32). `cscv` works directly on
@@ -61,13 +66,13 @@ So:
 
 - **QUANTIT-46 and QUANTIT-12 are reviewing #35.** `cscv` already generates
   the splits and computes PBO and the performance-drop fit.
-- **QUANTIT-47** is the remaining work: calibration tests on
-  `make_return_matrix` (the tests in #35 use `make_panel`), covering the cases
-  in the table, plus docs. Also update the module docstring: it says to build
-  the input with `run_backtest` per candidate, and `backtest.candidate_returns`
-  (#28) now does that.
-- **PBO from one candidate set is noisy.** On no-skill sets it ranged from
-  about 0.06 to 0.78 depending on the seed. A calibration test has to average
+- **QUANTIT-47** calibration and power tests on `make_return_matrix` are
+  included in #35, with correlated (`rho`) and autocorrelated (`ar1`) cases;
+  the module docstring now points to `backtest.candidate_returns`. Review
+  remains with this workstream.
+- **PBO from one candidate set is noisy.** On 100 no-skill sets from
+  `synth.make_return_matrix` (1000 dates x 50 candidates, `n_blocks=10`) it
+  ranged from 0.08 to 0.89 depending on the seed, mean 0.48. A calibration test has to average
   over many seeds, and the gate shouldn't treat a single PBO near a threshold
   as decisive.
 

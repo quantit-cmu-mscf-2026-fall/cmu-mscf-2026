@@ -24,17 +24,22 @@ Input: a PR number, or nothing to review the current branch against `main`.
      docstring says;
    - claims and leaks: items 6 and 7, and whether the description's claims
      hold (its numbers, "fails without the change").
+
+   With them, launch one `comment-reviewer` on the diff (REVIEW.md,
+   "Comments").
 4. **Verify.** Merge duplicates. For each remaining finding, launch a fresh
    `pr-reviewer` to refute it. Keep only `CONFIRMED` findings; check
    Pre-existing ones against `main`.
 5. **Write.** Start with the verdict (Approve, Request changes or Comment).
    Then give what was run and on which commit, and the Important findings,
    most severe first, each with `file:line`, a one-line repro and a fix. Add at
-   most three Nits and one line for Pre-existing issues. Don't summarise the
-   diff or list what is fine.
+   most three Nits and one line for Pre-existing issues. The comment report
+   is one Nit at most: the number of comments to drop and the worst two
+   `file:line`s. Don't summarise the diff or list what is fine.
 6. **Post only when the user says so** (`gh pr review <n> --approve`,
    `--request-changes` or `--comment`, with `--body-file`). For the current
-   branch, fix the Important findings before opening the PR instead.
+   branch, fix the Important findings and run the `no-comments` skill before
+   opening the PR instead.
 
 If this would be the fourth round on the PR, say so and suggest discussing
 the approach rather than reviewing lines again (REVIEW.md, "When a review

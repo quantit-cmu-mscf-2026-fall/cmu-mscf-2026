@@ -55,7 +55,8 @@ def test_init_writes_the_starter_set(tmp_path):
     written, kept = scaffold.init(tmp_path / "set")
     assert written == list(scaffold.FILES) and kept == []
     for name in scaffold.FILES:
-        assert (tmp_path / "set" / name).read_bytes() == (scaffold.STARTER / name).read_bytes()
+        got = (tmp_path / "set" / name).read_text(encoding="utf-8")
+        assert got == (scaffold.STARTER / name).read_text(encoding="utf-8")
 
 
 def test_init_never_overwrites(tmp_path):
