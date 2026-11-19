@@ -32,16 +32,58 @@ TAG = "mscf-pipeline guard"
 DENY_PATHS_ENV = "MSCF_GUARD_DENY_PATHS"
 NOREPLY_REMOTE_ENV = "MSCF_GUARD_NOREPLY_REMOTE"
 
-HOLDOUT_FLAG = re.compile(r"--(?:end|as-of|start|before)(?:=|\s+)[\"']?202[1-5](?!\d)")
-HOLDOUT_KWARG = re.compile(r"\b(?:end|start)\s*=\s*[\"']202[1-5]-")
-FORCE_PUSH = re.compile(r"\bgit\s+push\b[^;&|\n]*?\s(?:--force(?![-\w])|-[a-zA-Z]*f[a-zA-Z]*\b)")
-SECRET = re.compile(r"\$\{?(?:env:)?(?:ANTHROPIC|WRDS|BROKER|GITHUB_TOKEN|GH_TOKEN)\w*", re.I)
-PRINT_VERB = re.compile(r"(?:^|[;&|]\s*|\s)(?:echo|printf|print|Write-Host|Write-Output)\b", re.I)
+# Discovery ends 2020-12-31: a start inside 2021-2025 or an end/as-of/before from 2021 on
+# touches the holdout. Dates may be dashed or compact (2023-06-30, 20230630).
+_DATE_TAIL = r"(?:-?\d{2}){0,2}(?!\d)"
+_OPEN = r"(?:=|\s+)[\"']?"
+_ANY_YEAR = r"20(?:2[1-9]|[3-9]\d)"
+HOLDOUT_FLAG = re.compile(
+    rf"--(?:(?:end|as-of|before){_OPEN}{_ANY_YEAR}|start{_OPEN}202[1-5]){_DATE_TAIL}", re.I
+)
+HOLDOUT_KWARG = re.compile(
+    rf"\b(?:(?:end|as_of|before)\s*=\s*[\"']{_ANY_YEAR}|start\s*=\s*[\"']202[1-5]){_DATE_TAIL}",
+    re.I,
+)
+_SECRET_NAME = r"(?:ANTHROPIC|WRDS|BROKER|GITHUB_TOKEN|GH_TOKEN)\w*"
+SECRET = re.compile(r"\$\{?(?:env:)?" + _SECRET_NAME, re.I)
+PRINT_VERB = re.compile(
+    r"(?:^|[;&|]\s*|\s)(?:echo|printf|print|Write-Host|Write-Output)\b|<<<", re.I
+)
+# reading one secret without a `$`: printenv NAME, a PowerShell env: drive listing or item,
+# or a segment that is nothing but the $env:NAME expression
+SECRET_READ = re.compile(
+    r"^\s*(?:\$\()?\$env:" + _SECRET_NAME + r"\)?\s*$"
+    r"|\bprintenv\s+[\"']?"
+    + _SECRET_NAME
+    + r"|\b(?:gci|get-childitem|dir|ls|gi|get-item|gc|get-content|type|cat)\b[^;&|\n]*?"
+    r"\benv:(?:\\)?(?:\*?\s*$|" + _SECRET_NAME + r")",
+    re.I,
+)
+LEDGER_WRITE = re.compile(
+    r">|\b(?:rm|del|erase|mv|move|ren|rename|cp|copy|truncate|tee|sed\s+-\w*i|remove-item|ri"
+    r"|move-item|set-content|add-content|clear-content|out-file)\b",
+    re.I,
+)
 ENV_DUMP = re.compile(r"(?:^|[;&|]\s*)(?:env|printenv|export\s+-p|set)\s*(?:$|[;&|])", re.I)
 WORKING_DATA = re.compile(
-    r"(?:runs\.jsonl|\.parquet\b|data_cache/|\.sessions/|factors\.db|\.ipynb_checkpoints)"
+    r"runs\.jsonl|\.parquet\b|(?:^|/)data_cache(?:/|$)|(?:^|/)\.sessions(?:/|$)"
+    r"|factors\.db|\.ipynb_checkpoints",
+    re.I,
 )
-GIT_ADD = re.compile(r"\bgit\s+add\b([^;&|\n]*)")
+PROTECTED_BRANCH = re.compile(r"(?:^|[:/])(?:main|master|trunk)$")
+WRAPPERS = {"sudo", "command", "env", "time", "exec", "nohup", "nice"}
+GLOBAL_VALUE_OPTS = {
+    "-C",
+    "-c",
+    "--git-dir",
+    "--work-tree",
+    "--namespace",
+    "--exec-path",
+    "--super-prefix",
+}
+SHELL_C = {"-c", "-lc", "-command"}
+REDIR_ALONE = re.compile(r"^(?:\d*|&)(?:>>?|<)$")
+REDIR_ATTACHED = re.compile(r"^(?:\d*|&)(?:>>?|<)&?\S+$")
 RUNS_PYTHON_SCRIPT = re.compile(
     r"\bpython3?\b[^;&|\n]*?(?:\s-m\s+(?:experiments|scripts)\.|\s(?:experiments|scripts)[\\/]\S+\.py)"
 )
@@ -87,19 +129,20 @@ def bash_denial(command: str) -> str | None:
     if reason:
         return reason
     runs_python = re.search(r"\bpython", command, re.I) is not None
-    if HOLDOUT_FLAG.search(command) or (runs_python and HOLDOUT_KWARG.search(command)):
+    if runs_python and (HOLDOUT_FLAG.search(command) or HOLDOUT_KWARG.search(command)):
         return (
             "holdout: 2021-2025 stays sealed for discovery and stages 1-3; only the "
             "pre-registered stage-4 run reads it, once (pipeline-boundaries rule 1)"
         )
-    if FORCE_PUSH.search(command):
-        return (
-            "git push --force rewrites shared history; use --force-with-lease on your own PR branch"
-        )
+    for call in _git_calls(command):
+        reason = _git_denial(call)
+        if reason:
+            return reason
     # a presence check ("test -n $KEY && echo set") is fine; printing the value is not
+    segments = re.split(r"&&|\|\||[;|\n]", command)
     if any(
-        SECRET.search(seg) and PRINT_VERB.search(seg)
-        for seg in re.split(r"&&|\|\||[;|\n]", command)
+        SECRET_READ.search(seg) or (SECRET.search(seg) and PRINT_VERB.search(seg))
+        for seg in segments
     ):
         return "credentials: never print ANTHROPIC_*/WRDS_*/broker/GitHub token variables"
     if ENV_DUMP.search(command):
@@ -107,25 +150,23 @@ def bash_denial(command: str) -> str | None:
             "credentials: dumping the environment can print tokens; "
             "test one variable's presence instead"
         )
-    for match in GIT_ADD.finditer(command):
-        if WORKING_DATA.search(match.group(1)):
-            return (
-                "public repo: the run ledger, parquet data, data_cache, .sessions and notebook "
-                "checkpoints are never committed; results go in the PR description"
-            )
+    for seg in segments:
+        if "runs.jsonl" in seg.lower() and LEDGER_WRITE.search(re.sub(r"\d*>&\d+", "", seg)):
+            return "the ledger is append-only through capstone.runlog.log_run; never edit it"
     return None
 
 
 # --- edits ------------------------------------------------------------------------------------
 
 
-def edit_verdict(payload: dict) -> tuple[str | None, str | None]:
+def edit_verdict(payload: dict, cwd: str = ".") -> tuple[str | None, str | None]:
     raw = str(payload.get("file_path", ""))
     reason = path_denial(raw)
     if reason:
         return "deny", reason
-    path = raw.replace("\\", "/")
-    if path.endswith("experiments/runs.jsonl") or path.endswith("/runs.jsonl"):
+    # resolve against the hook's folder and fold case: macOS and Windows disks ignore it
+    path = os.path.normpath(os.path.join(cwd, raw)).replace("\\", "/").rstrip(" .").lower()
+    if path.endswith("/runs.jsonl"):
         return "deny", "the ledger is append-only through capstone.runlog.log_run; never edit it"
     if "/data_cache/" in path or path.endswith(".parquet"):
         return "deny", "shared data changes only through the data maintainer's WRDS refresh"
@@ -158,7 +199,10 @@ def post_bash(command: str, cwd: str) -> str | None:
     count = ledger_count(cwd)
     if count is None:
         return "no ledger found after this run: was every trial logged with runlog.log_run?"
-    return f"ledger now holds {count} runs (python -m capstone.runlog stats for the breakdown)"
+    return (
+        f"ledger file now holds {count} entries, corrections included; the trial count is "
+        "what `python -m capstone.runlog stats` reports"
+    )
 
 
 # --- opt-in: no-reply emails on pushes to a named remote ---------------------------------------
@@ -169,7 +213,17 @@ def _segments(command):
 
 
 def _tokens(segment):
-    return [t.strip("\"'") for t in re.findall(r"\"[^\"]*\"|'[^']*'|\S+", segment)]
+    """The words of one shell segment, quotes stripped, redirections (and targets) gone."""
+    words = [t.strip("\"'") for t in re.findall(r"\"[^\"]*\"|'[^']*'|\S+", segment)]
+    kept, skip = [], False
+    for word in words:
+        if skip:
+            skip = False
+        elif REDIR_ALONE.match(word):
+            skip = True
+        elif not REDIR_ATTACHED.match(word):
+            kept.append(word)
+    return kept
 
 
 def _git(where, *args):
@@ -188,17 +242,74 @@ def _git(where, *args):
     return done.stdout.strip() if done.returncode == 0 else None
 
 
-def _push_args(tokens):
-    """(the -C folder or None, the arguments after `push`), or None if not a git push."""
-    if "git" not in tokens:
+def _git_call(tokens):
+    """(the -C folder or None, the subcommand, its arguments) for a git command, else None.
+    Skips env assignments, wrappers like sudo, and git's global options (-C, -c, --git-dir)."""
+    i = 0
+    while i < len(tokens) and (re.match(r"^\w+=", tokens[i]) or tokens[i].lower() in WRAPPERS):
+        i += 1
+    if i >= len(tokens):
         return None
-    i, where = tokens.index("git") + 1, None
+    if Path(tokens[i].replace("\\", "/")).name.lower() not in ("git", "git.exe"):
+        return None
+    i, where = i + 1, None
     while i < len(tokens) and tokens[i].startswith("-"):
         if tokens[i] == "-C" and i + 1 < len(tokens):
             where = tokens[i + 1]
-        i += 2 if tokens[i] in ("-C", "-c") else 1
-    if i < len(tokens) and tokens[i] == "push":
-        return where, tokens[i + 1 :]
+        i += 2 if tokens[i] in GLOBAL_VALUE_OPTS else 1
+    if i >= len(tokens):
+        return None
+    return where, tokens[i].lower(), tokens[i + 1 :]
+
+
+def _git_calls(command):
+    """Every git call in a command line, including ones inside `bash -c "..."` strings."""
+    calls = []
+    for segment in _segments(command):
+        tokens = _tokens(segment)
+        call = _git_call(tokens)
+        if call:
+            calls.append(call)
+        for before, word in zip(tokens, tokens[1:], strict=False):
+            if before.lower() in SHELL_C and re.search(r"\s", word):
+                calls += _git_calls(word)
+    return calls
+
+
+def _push_args(tokens):
+    """(the -C folder or None, the arguments after `push`), or None if not a git push."""
+    call = _git_call(tokens)
+    return (call[0], call[2]) if call and call[1] == "push" else None
+
+
+def _forced(args):
+    return any(
+        a in ("--force", "--force-if-includes")
+        or (a.startswith("-") and not a.startswith("--") and "f" in a[1:])
+        for a in args
+    )
+
+
+def _git_denial(call):
+    _, sub, args = call
+    if sub == "push":
+        plain = [a for a in args if not a.startswith("-")]
+        if _forced(args) or any(a.startswith("+") for a in plain):
+            return (
+                "git push --force (or a +refspec) rewrites shared history; merge instead, "
+                "and use --force-with-lease only on your own PR branch"
+            )
+        if any(a.startswith("--force-with-lease") for a in args) and any(
+            PROTECTED_BRANCH.search(a) for a in plain
+        ):
+            return "git push --force-with-lease to main rewrites shared history"
+    if sub in ("add", "stage"):
+        for arg in args:
+            if not arg.startswith("-") and WORKING_DATA.search(arg.replace("\\", "/")):
+                return (
+                    "public repo: the run ledger, parquet data, data_cache, .sessions and "
+                    "notebook checkpoints are never committed; results go in the PR description"
+                )
     return None
 
 
@@ -318,13 +429,23 @@ def verdict(data: dict) -> tuple[str | None, str | None]:
             return "deny", reason
         return ("warn", "\n".join(notes)) if notes else (None, None)
     if tool in EDITS:
-        return edit_verdict(payload)
+        return edit_verdict(payload, cwd)
     return None, None
 
 
 def main() -> int:
-    data = json.loads(sys.stdin.read() or "{}")
-    kind, message = verdict(data)
+    # fail closed: only exit 2 blocks, so unreadable input or an internal error must exit 2
+    try:
+        data = json.loads(sys.stdin.read())
+        if not isinstance(data, dict):
+            raise ValueError("hook input is not a JSON object")
+        kind, message = verdict(data)
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"{TAG}: could not evaluate the hook input ({type(exc).__name__}); denied",
+            file=sys.stderr,
+        )
+        return 2
     if kind == "deny":
         print(f"{TAG}: {message}", file=sys.stderr)
         return 2
