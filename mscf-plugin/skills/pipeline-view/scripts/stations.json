@@ -1,0 +1,16 @@
+{
+  "profile": "validation",
+  "description": "An experiment's path through the cmu-mscf-2026 pipeline: build the candidate, log it, then the five validation stages of docs/validation.md",
+  "stations": [
+    {"id": "hypothesis", "label": "Hypothesis", "detail": "params and seed frozen", "icon": "bulb"},
+    {"id": "data", "label": "Load data", "detail": "shared_data, to 2020-12-31", "icon": "db"},
+    {"id": "signal", "label": "Build signal", "detail": "point-in-time inputs", "icon": "wave"},
+    {"id": "backtest", "label": "Backtest", "detail": "net of quoted spread", "icon": "chart"},
+    {"id": "ledger", "label": "Log to ledger", "detail": "before anyone looks", "icon": "book"},
+    {"id": "screen", "label": "1 · Screen", "detail": "search-adjusted p, BH", "icon": "funnel", "ledger_stage": "screen"},
+    {"id": "robustness", "label": "2 · Robustness", "detail": "CV, PBO, costs, sub-periods", "icon": "shield", "ledger_stage": "robustness"},
+    {"id": "incremental", "label": "3 · Incremental", "detail": "spanning vs FF5 + anomalies", "icon": "plus", "ledger_stage": "incremental"},
+    {"id": "final", "label": "4 · Holdout", "detail": "2021-2025, looked at once", "icon": "lock", "ledger_stage": "final"},
+    {"id": "incubation", "label": "5 · Incubation", "detail": "small paper capital", "icon": "rocket", "ledger_stage": "incubation"}
+  ]
+}
