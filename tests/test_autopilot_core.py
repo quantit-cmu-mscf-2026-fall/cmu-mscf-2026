@@ -211,6 +211,17 @@ def test_event_log_is_an_append_only_chain_that_survives_a_torn_tail(tmp_path):
         journal.verify_events()
 
 
+def test_a_complete_row_missing_only_its_newline_is_still_an_event(tmp_path):
+    journal = Journal(tmp_path)
+    journal.event("a")
+    journal.event("b")
+    path = tmp_path / EVENTS
+    path.write_bytes(path.read_bytes().rstrip(b"\n"))  # killed between "}" and the newline
+    assert [e["kind"] for e in journal.events()] == ["a", "b"]
+    assert journal.event("c")["seq"] == 2
+    assert journal.verify_events() == 3
+
+
 def test_the_first_event_chains_from_genesis_and_an_empty_log_verifies(tmp_path):
     journal = Journal(tmp_path)
     assert journal.verify_events() == 0

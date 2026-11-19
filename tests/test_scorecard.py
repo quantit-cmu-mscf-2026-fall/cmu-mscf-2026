@@ -46,6 +46,7 @@ def _card(accepted: tuple) -> pd.DataFrame:
     card.loc["h2", ["s4_stat", "ho_sharpe", "ho_p", "ho_psr", "ho_mean", "expected_mean"]] = np.nan
     card["lfdr"] = np.nan
     card["accepted"] = card.index.isin(accepted)
+    card["funnel_pass"] = card["accepted"]
     return card
 
 
