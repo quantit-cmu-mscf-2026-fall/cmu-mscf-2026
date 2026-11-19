@@ -76,6 +76,44 @@ def note(done) -> str:
         "printenv",
         "git add experiments/runs.jsonl",
         "git add data_cache/wrds/sp500_daily_1990_2025.parquet",
+        # force pushes through global options, +refspec and clustered flags
+        "git -C . push --force origin main",
+        "git -c push.default=simple push -f origin main",
+        "git --git-dir=.git push --force origin main",
+        "git --git-dir .git push origin main -f",
+        "git push origin +main",
+        "git push origin +HEAD:main",
+        "git push -fu origin topic",
+        "git push --force-with-lease origin main",
+        "git push --force-with-lease origin HEAD:main",
+        "sudo git push -f",
+        'bash -c "git push --force origin main"',
+        # forced or aliased adds of working data
+        "git add -f .sessions",
+        "git add -f .sessions/2026-11-19.jsonl",
+        "git stage -f experiments/runs.jsonl",
+        "git stage -f .sessions",
+        "git -C . add -f data_cache",
+        "git add -f experiments/RUNS.JSONL",
+        # holdout dates: ends after 2020, compact dates, as-of and before
+        "python -m experiments.momentum --end 2026-06-30",
+        "python -m experiments.momentum --end 20230630",
+        "python -m experiments.momentum --as-of=2024-01-01",
+        "python -c \"sd.load('x', end='2026-01-01')\"",
+        "python -c \"sd.load('x', end='20260101')\"",
+        "python -m experiments.momentum --start 20210104",
+        # secrets read without a print verb
+        "printenv ANTHROPIC_API_KEY",
+        "cat <<< $ANTHROPIC_API_KEY",
+        "$env:ANTHROPIC_API_KEY",
+        "gci env:ANTHROPIC_API_KEY",
+        "Get-ChildItem env:",
+        "Get-Item env:WRDS_PASSWORD",
+        # the ledger written through the shell
+        "echo x >> experiments/runs.jsonl",
+        "rm experiments/runs.jsonl",
+        "sed -i '$d' experiments/runs.jsonl",
+        "Remove-Item experiments/RUNS.jsonl",
     ],
 )
 def test_denies(command):
@@ -93,6 +131,16 @@ def test_denies(command):
         'test -n "$ANTHROPIC_API_KEY" && echo set',
         "git -C ~/code/cmu-mscf-2026 status",
         r"git -C D:\work\cmu-mscf-2026 status",
+        "git log --before=2024-01-01 --oneline",
+        "python -m experiments.momentum --end 2020-12-31 --start 2010-01-01",
+        "git -C . push origin topic",
+        "git push origin topic 2>&1 | tail -5",
+        "git add -u",
+        "git stage mscf-plugin",
+        "Get-ChildItem Env:PATH",
+        'if ($env:ANTHROPIC_API_KEY) { "set" }',
+        "tail -n 3 experiments/runs.jsonl 2>&1",
+        "python -m capstone.runlog stats",
     ],
 )
 def test_allows_including_a_clone_of_the_team_repo(command):
@@ -121,11 +169,37 @@ def test_denies_editing_the_ledger_and_data_and_warns_on_holdout_dates_in_code()
     )
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "experiments/RUNS.jsonl",
+        "experiments/Runs.JSONL",
+        "experiments/../experiments/runs.jsonl",
+        "EXPERIMENTS\\Runs.jsonl",
+        "data_cache/X.PARQUET",
+    ],
+)
+def test_denies_editing_the_ledger_and_data_whatever_the_case_or_dots(path):
+    for tool in ("Edit", "Write", "MultiEdit"):
+        assert denied(guard(edit(tool, ROOT / path, content="x")))
+    assert denied(guard(edit("Edit", Path(path), new_string="x")))
+
+
+@pytest.mark.parametrize(
+    "raw", ["", "not json", "[1, 2]", "null", '{"tool_name": "Bash", "tool_input": 5}']
+)
+def test_unreadable_or_malformed_hook_input_fails_closed(raw):
+    done = subprocess.run(
+        [sys.executable, str(GUARD)], input=raw, capture_output=True, text=True, timeout=60
+    )
+    assert done.returncode == 2 and "Traceback" not in done.stderr and "denied" in done.stderr
+
+
 def test_reports_the_ledger_count_after_an_experiment_script(tmp_path):
     (tmp_path / "runs.jsonl").write_text('{"name": "a"}\n{"name": "b"}\n', encoding="utf-8")
     post = bash("python experiments/momentum.py", "PostToolUse")
     done = guard(post, {"CAPSTONE_LEDGER_DIR": str(tmp_path)})
-    assert "ledger now holds 2 runs" in note(done)
+    assert "ledger file now holds 2 entries" in note(done)
     empty = guard(post, {"CAPSTONE_LEDGER_DIR": str(tmp_path / "none")})
     assert "no ledger found" in note(empty)
     assert guard(bash("ls", "PostToolUse")).stdout == ""
@@ -215,7 +289,16 @@ def test_the_noreply_rule_is_off_unless_configured(repo):
 
 def test_denies_a_push_carrying_a_non_noreply_email(repo):
     commit(repo, "b.txt", "me@example.com")
-    for command in ["git push", "git push origin topic", "git push -u origin HEAD:topic"]:
+    for command in [
+        "git push",
+        "git push origin topic",
+        "git push -u origin HEAD:topic",
+        "git push > push.log",
+        "git push origin topic 2>&1",
+        "git push origin topic 2>&1 | tail -5",
+        "git push origin topic >push.log 2>&1",
+        "git -C . push origin topic",
+    ]:
         done = guard(bash(command, cwd=repo), ON, repo)
         assert denied(done) and "users.noreply.github.com" in done.stderr, (command, done)
 

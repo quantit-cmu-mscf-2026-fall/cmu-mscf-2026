@@ -57,6 +57,7 @@ def test_skills_have_usable_frontmatter():
         "research-pr",
         "paper-round",
         "pipeline-view",
+        "paperlog",
     }
     for path in SKILLS:
         meta = frontmatter(path)
@@ -124,14 +125,17 @@ def _capstone_names() -> set[str]:
 # Backticked words that are ledger columns or other libraries' names, and the Claude Code
 # tool a command's `allowed-tools: Bash(...)` frontmatter names.
 NOT_CAPSTONE = {"bh", "by", "q", "lfdr", "Path", "Series", "DataFrame", "Bash"}
+CLASS_SPAN = re.compile(r"`([A-Z][a-z0-9]+(?:[A-Z][a-z0-9]*)+)`")  # a bare class name in prose
 CALL = re.compile(r"(?<![\w.-])([A-Za-z_]\w*)\((?!s\))")  # not "seed(s)" or CSS "cubic-bezier("
 SPAN = re.compile(r"`([^`\n]+)`")
 
 
 def _unqualified_names(text: str, catalog: bool) -> set[str]:
     """Names used without a module: calls like `log_run(...)` and, in the method catalog
-    (references/methods.md), every identifier in a table's first column (`holm`)."""
-    found = set(CALL.findall(text)) - set(vars(builtins))
+    (references/methods.md), every identifier in a table's first column (`holm`). A bare
+    CamelCase span in running prose (`WalkForward`) is a class name; builtins like `KeyError`
+    are skipped."""
+    found = (set(CALL.findall(text)) | set(CLASS_SPAN.findall(text))) - set(vars(builtins))
     for line in text.splitlines():
         if catalog and line.startswith("|") and not set(line) <= set("|- "):
             for span in SPAN.findall(line.split("|")[1]):

@@ -52,6 +52,9 @@ def test_the_check_command_matches_the_repositorys_rules():
 
 
 def test_the_commands_carry_no_private_or_host_specific_text():
-    banned = re.compile(r"caleb|ibkr|interactive brokers|OMP_NUM_THREADS|[A-Za-z]:\\[A-Za-z]", re.I)
+    banned = re.compile(
+        r"ibkr|interactive brokers|OMP_NUM_THREADS|[A-Za-z]:\\[A-Za-z]|/Users/|/home/", re.I
+    )
+    assert COMMANDS, "no command files found"
     for path in COMMANDS:
         assert not banned.search(path.read_text(encoding="utf-8")), path

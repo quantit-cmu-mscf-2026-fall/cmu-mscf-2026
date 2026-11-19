@@ -21,11 +21,12 @@ For development: `claude --plugin-dir ./mscf-plugin`. The hook runs `python`, so
 | Skill | `pipeline-boundaries` | Sealed holdout, ledger before results, one-way validation, pre-registered thresholds, public-repo hygiene |
 | Skill | `shared-data` | Loading CRSP/Compustat through `capstone.shared_data` and the returns/costs/fundamentals rules |
 | Skill | `run-ledger` | `log_run` before looking, what counts as a trial, stage tags, trial counts scoped to the family |
-| Skill | `validate-candidates` | Performance matrix, one-sided HAC Sharpe tests, choosing a correction, the five-stage funnel |
+| Skill | `validate-candidates` | Performance matrix, one-sided HAC Sharpe tests, one luck correction per stage plus graded scores, the five-stage funnel |
 | Skill | `null-calibration` | Null and power tests every new validation method ships with |
 | Skill | `research-pr` | Branch, checks, PR template with seeds and trial count, review and merge |
 | Skill | `paper-round` | Weekly paper one-pager, smallest experiment, report back |
 | Skill | `pipeline-view` | The live pipeline lab over the run ledger (local page or one-file snapshot), and how an experiment reports its progress (`mscf_progress.track`, `pipeline_run.py`) |
+| Skill | `paperlog` | Search the team's paper log (a read-only copy of the shared `papers.db`), add a paper, run the weekly collection on request |
 | Command | `qp-check` | The pre-PR acceptance check: offline tests, ruff, and the trial count from `runlog stats` |
 | Agent | `ship-checker` | Read-only pre-push check of a branch against the PR rules (title, size, template, failing-without-change test, safety scan) |
 | Hook | `hooks/guard.py` | Denies holdout dates in commands, force pushes, printing secrets, committing working data, editing the ledger; warns on holdout dates in code; reports the ledger count after experiment scripts |
