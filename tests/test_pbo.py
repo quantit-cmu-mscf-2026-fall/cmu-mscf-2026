@@ -318,6 +318,20 @@ class TestGuardrails:
         result = cscv(matrix, n_blocks=8)
         assert result["n_obs_used"] <= len(matrix) - 2
 
+    def test_inf_returns_are_refused(self):
+        matrix = pd.DataFrame(np.random.default_rng(0).normal(0, 0.01, (800, 5)))
+        matrix.iloc[10, 1] = np.inf
+
+        with pytest.raises(ValueError, match="inf"):
+            cscv(matrix, n_blocks=10)
+
+    def test_rows_out_of_time_order_are_refused(self):
+        dates = pd.bdate_range("2020-01-01", periods=800)
+        matrix = pd.DataFrame(np.random.default_rng(0).normal(0, 0.01, (800, 5)), index=dates)
+
+        with pytest.raises(ValueError, match="time order"):
+            cscv(matrix.sample(frac=1, random_state=1), n_blocks=10)
+
 
 class TestMedianTiesAndUnusableSplits:
     """A rank exactly ON the OOS median is not evidence of "no overfitting".
@@ -439,6 +453,40 @@ class TestMedianTiesAndUnusableSplits:
         assert "cash" not in set(result["winner_columns"])
         assert result["n_splits_used"] == result["n_splits"]
         assert np.all(np.abs(result["winner_is_sharpe"]) < 100)
+
+    def test_a_winner_idle_out_of_sample_is_flat_not_a_zero_sharpe(self):
+        # A candidate that earns early and is exactly 0.0 later: when its OOS
+        # half is all zeros it must be flat (NaN), never a finite Sharpe of 0.0
+        # that would rank it above the other flat candidates.
+        for seed in range(100):
+            rng = np.random.default_rng(seed)
+            matrix = pd.DataFrame(rng.normal(0, 0.01, (800, 10)))
+            matrix.iloc[:400, 0] += 0.003
+            matrix.iloc[400:, 0] = 0.0
+
+            result = cscv(matrix, n_blocks=8)
+
+            assert not (result["winner_oos_sharpe"] == 0.0).any(), seed
+
+    def test_idle_winner_has_no_oos_sharpe_and_ranks_last_over_many_seeds(self):
+        # Column 0 earns +0.003 a day for 400 days, then is exactly 0.0. Split 0
+        # trains on blocks 0-3 and tests on 4-7, so column 0's OOS half is all
+        # zeros: its Sharpe must be NaN and it must rank last (1/11), on any
+        # BLAS summation order. Rounding residue used to give it a finite value.
+        checked = 0
+        for seed in range(200):
+            rng = np.random.default_rng(seed)
+            matrix = pd.DataFrame(rng.normal(0, 0.01, (800, 10)))
+            matrix.iloc[:400, 0] += 0.003
+            matrix.iloc[400:, 0] = 0.0
+
+            result = cscv(matrix, n_blocks=8)
+
+            if result["winner_columns"][0] == 0:
+                checked += 1
+                assert np.isnan(result["winner_oos_sharpe"][0]), seed
+                assert result["oos_ranks"].iloc[0] == pytest.approx(1 / 11), seed
+        assert checked > 100
 
 
 # REVIEW.md item 3: null calibration and power on `synth.make_return_matrix`,

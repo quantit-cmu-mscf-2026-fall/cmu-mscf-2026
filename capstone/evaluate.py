@@ -941,8 +941,8 @@ def haircut_sharpe(
     choosing between them after seeing the numbers is itself multiple testing.
 
     A **graded score, not a gate** (`docs/validation/framework.md`, stage 4):
-    the stage-4 gate is the deflated Sharpe, and charging both charges the same
-    search twice.
+    the stage-4 gate is BH across the survivors' holdout p-values, and the
+    search is charged once there, not again here.
 
     **This follows the authors' reference code**, `Haircut_SR.m` and
     `sample_random_multests.m`, which differs from a naive reading of the paper
@@ -993,7 +993,10 @@ def haircut_sharpe(
         autocorrelation: first-order autocorrelation of the returns at
             `frequency` (their `rho`). Non-zero applies their autocorrelation
             correction to the annualised Sharpe before testing; it does nothing
-            at `frequency="annual"`, as in their code.
+            at `frequency="annual"`, as in their code. Estimate it from the
+            returns and pass it: the default assumes none, and on returns with
+            lag-1 autocorrelation 0.3 that lets the best no-skill candidate
+            through far above the level (tested).
         avg_correlation: assumed average correlation across trials (their
             `RHO`), which selects the simulated p-value distribution. Only
             `[0, 1)` is meaningful; outside it the authors fall back to 0.2.
@@ -1077,7 +1080,9 @@ def haircut_sharpe(
         )
 
     statistic = annualised / np.sqrt(12) * np.sqrt(n_monthly)
-    pvalue = pd.Series(2.0 * (1.0 - stats.t.cdf(statistic, n_monthly - 1)), index=reported.index)
+    # sf, not 1 - cdf: the subtraction rounds a far-tail p to 0, which would make
+    # every adjusted Sharpe inf for a high but finite reported Sharpe.
+    pvalue = pd.Series(2.0 * stats.t.sf(statistic, n_monthly - 1), index=reported.index)
     testable = annualised.notna() & (annualised > 0) & pvalue.le(1.0)
 
     rng = np.random.default_rng(seed)
@@ -1113,9 +1118,7 @@ def haircut_sharpe(
         # Every adjusted p-value is clipped at 1, so the inverse is never
         # negative and the haircut never exceeds 100%.
         survived = (
-            stats.t.ppf(1.0 - adjusted[name] / 2.0, n_monthly - 1)
-            / np.sqrt(n_monthly)
-            * np.sqrt(12)
+            stats.t.isf(adjusted[name] / 2.0, n_monthly - 1) / np.sqrt(n_monthly) * np.sqrt(12)
         )
         out[f"pvalue_{name}"] = adjusted[name]
         out[f"sharpe_{name}"] = survived

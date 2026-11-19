@@ -1003,22 +1003,6 @@ class TestLocalFdr:
 #     order of magnitude tighter than the error it has to detect.
 HAIRCUT_ATOL = 0.02
 
-# QUANTIT-52's ledger path needs `runlog.trial_count`, which arrives in its own
-# PR (#33) against `main` and is not in this stack. Skipping is deliberate:
-# vendoring a copy of the reader here would fork the thing the whole team
-# corrects against. These tests come back on their own once #33 lands.
-try:
-    from capstone.runlog import trial_count as _trial_count  # noqa: F401
-
-    HAS_LEDGER_READER = True
-except ImportError:  # pragma: no cover - depends on which PRs are merged
-    HAS_LEDGER_READER = False
-
-requires_ledger_reader = pytest.mark.skipif(
-    not HAS_LEDGER_READER,
-    reason="needs runlog.trial_count (#33), which is not in this stack yet",
-)
-
 # label, kwargs for haircut_sharpe, then the reference's N / p_raw / adjusted
 # Sharpes. `n_trials` is our ledger total; the reference's num_test = n_trials-1.
 HAIRCUT_REFERENCE = [
@@ -1309,7 +1293,6 @@ class TestHaircutTrialCountConvention:
         assert surviving == sorted(surviving, reverse=True)
         assert surviving[0] > surviving[-1]
 
-    @requires_ledger_reader
     def test_trial_count_is_read_from_the_ledger(self, tmp_path, monkeypatch):
         monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
         from capstone.runlog import log_run
@@ -1327,7 +1310,6 @@ class TestHaircutTrialCountConvention:
         assert from_ledger.attrs["num_test"] == 24
         pd.testing.assert_frame_equal(from_ledger, explicit)
 
-    @requires_ledger_reader
     def test_an_experiment_name_scopes_the_count(self, tmp_path, monkeypatch):
         monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
         from capstone.runlog import log_run
@@ -1343,7 +1325,6 @@ class TestHaircutTrialCountConvention:
         assert scoped.attrs["n_trials"] == 4
         assert scoped.attrs["num_test"] == 3
 
-    @requires_ledger_reader
     def test_an_empty_ledger_raises_instead_of_applying_no_haircut(self, tmp_path, monkeypatch):
         monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
 
@@ -1461,3 +1442,90 @@ class TestHaircutGuardrails:
     def test_rejects_an_impossible_autocorrelation(self):
         with pytest.raises(ValueError, match="autocorrelation must be in"):
             haircut_sharpe(1.0, 240, n_trials=101, frequency="monthly", autocorrelation=1.0)
+
+
+def _best_monthly_sharpe(returns: pd.DataFrame) -> float:
+    return float((returns.mean() / returns.std(ddof=1) * np.sqrt(12)).max())
+
+
+class TestHaircutTail:
+    def test_a_high_finite_sharpe_keeps_a_finite_haircut(self):
+        # 1 - cdf rounded this p to 0, which made every adjusted Sharpe inf.
+        out = haircut_sharpe(2.0, 240, n_trials=101, frequency="monthly", n_simulations=100)
+
+        assert out["pvalue"].iloc[0] == pytest.approx(1.0543192425853833e-16, rel=1e-6)
+        for name in ("bonferroni", "holm", "bhy", "average"):
+            assert np.isfinite(out[f"sharpe_{name}"].iloc[0])
+            assert 0.0 < out[f"haircut_{name}"].iloc[0] < 1.0
+
+
+# REVIEW.md item 3: null calibration and power on `synth.make_return_matrix`.
+# The best of 100 no-skill monthly candidates over 20 years is haircut with
+# the true trial count; ar1 nulls pass the autocorrelation they were built with.
+_HAIRCUT_NULLS = [
+    ("iid", {}, 0.0),
+    ("rho", {"rho": 0.5}, 0.0),
+    ("ar1", {"ar1": 0.3}, 0.3),
+    ("rho_ar1", {"rho": 0.5, "ar1": 0.3}, 0.3),
+]
+
+
+def _null_false_call_rate(kwargs: dict, autocorrelation: float, n_seeds: int = 200) -> dict:
+    hits = {"bonferroni": 0, "holm": 0, "bhy": 0}
+    for seed in range(n_seeds):
+        returns = make_return_matrix(
+            n_obs=240, n_candidates=100, periods_per_year=12, seed=seed, **kwargs
+        ).returns
+        out = haircut_sharpe(
+            _best_monthly_sharpe(returns),
+            240,
+            n_trials=100,
+            frequency="monthly",
+            autocorrelation=autocorrelation,
+            n_simulations=200,
+            seed=seed,
+        )
+        for name in hits:
+            hits[name] += bool(out[f"pvalue_{name}"].iloc[0] < 0.05)
+    return {name: count / n_seeds for name, count in hits.items()}
+
+
+class TestHaircutCalibration:
+    @pytest.mark.parametrize(("label", "kwargs", "autocorrelation"), _HAIRCUT_NULLS)
+    def test_the_best_no_skill_candidate_rarely_survives(self, label, kwargs, autocorrelation):
+        rate = _null_false_call_rate(kwargs, autocorrelation)
+
+        # Bonferroni and Holm control the chance of any false call: the level
+        # plus about one standard error over 200 seeds. BHY controls the false
+        # discovery rate, so on a lone best candidate it can sit a little above.
+        assert rate["bonferroni"] <= 0.07, rate
+        assert rate["holm"] <= 0.07, rate
+        assert rate["bhy"] <= 0.10, rate
+
+    def test_an_ar1_null_needs_its_autocorrelation_passed(self):
+        # The default assumes none; on an ar1 null that inflates the false calls.
+        assert _null_false_call_rate({"ar1": 0.3}, 0.0)["bonferroni"] > 0.2
+
+    def test_a_planted_signal_survives(self):
+        hits = 0
+        for seed in range(100):
+            panel = make_return_matrix(
+                n_obs=240,
+                n_candidates=100,
+                n_real=5,
+                sharpe_real=1.0,
+                periods_per_year=12,
+                seed=seed,
+            )
+            real = panel.truth[panel.truth].index
+            out = haircut_sharpe(
+                _best_monthly_sharpe(panel.returns[real]),
+                240,
+                n_trials=100,
+                frequency="monthly",
+                n_simulations=200,
+                seed=seed,
+            )
+            hits += bool(out["pvalue_bonferroni"].iloc[0] < 0.05)
+
+        assert hits >= 80
