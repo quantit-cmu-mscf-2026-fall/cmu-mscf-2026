@@ -77,9 +77,19 @@ class BrokerAdapter:
     contracts; orders are DAY market orders tagged with the paper account.
     """
 
-    def __init__(self, client, api, *, port: int, account: str, readonly: bool) -> None:
+    def __init__(
+        self,
+        client,
+        api,
+        *,
+        port: int,
+        account: str,
+        readonly: bool,
+        env: Mapping[str, str] | None = None,
+    ) -> None:
         check_port(port)
         check_account(account)
+        self._env = os.environ if env is None else env
         self._client, self._api, self._port = client, api, port
         self._account, self._readonly = account, readonly
 
@@ -95,8 +105,12 @@ class BrokerAdapter:
         timeout: float = 10.0,
         client=None,
         api=None,
+        env: Mapping[str, str] | None = None,
     ) -> BrokerAdapter:
-        check_port(port)  # before anything is imported or opened
+        env = os.environ if env is None else env
+        if env.get(PAPER_FLAG) != "1":  # before anything is checked, imported or opened
+            raise PaperGuardError(f"set {PAPER_FLAG}=1 to use the paper broker")
+        check_port(port)
         if expected_account is not None:
             check_account(expected_account)
         if api is None:
@@ -108,7 +122,7 @@ class BrokerAdapter:
         client.connect(host, port, clientId=client_id, timeout=timeout, readonly=readonly)
         try:
             account = _paper_account(client.managedAccounts(), expected_account)
-            return cls(client, api, port=port, account=account, readonly=readonly)
+            return cls(client, api, port=port, account=account, readonly=readonly, env=env)
         except BaseException:
             client.disconnect()
             raise
@@ -149,6 +163,7 @@ class BrokerAdapter:
             readonly=readonly,
             client=client,
             api=api,
+            env=env,
         )
 
     @property
@@ -194,8 +209,10 @@ class BrokerAdapter:
     def place(self, orders: Sequence[ShareOrder]) -> tuple[Ack, ...]:
         if self._readonly:
             raise PaperGuardError("this connection is read-only (a dry run); it cannot send")
+        if any(o.shares == 0 for o in orders):
+            raise ValueError("a zero-share order cannot be sent")
         self._recheck()
-        check_paper(self._account, self._port, os.environ)
+        check_paper(self._account, self._port, self._env)
         acks = []
         for o in orders:
             order = self._api.MarketOrder(o.side, abs(o.shares))

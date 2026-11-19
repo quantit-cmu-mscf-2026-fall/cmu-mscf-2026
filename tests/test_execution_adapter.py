@@ -32,6 +32,11 @@ ENV = {
 }
 
 
+@pytest.fixture(autouse=True)
+def paper_flag(monkeypatch):
+    monkeypatch.setenv(PAPER_FLAG, "1")
+
+
 def connect(client: FakeClient, *, port=4002, readonly=False, expected=None) -> BrokerAdapter:
     return BrokerAdapter.connect(
         "paper-host.invalid",
@@ -126,10 +131,35 @@ def test_place_translates_share_orders_into_market_orders(monkeypatch):
 
 
 def test_place_refuses_without_the_flag(monkeypatch):
-    monkeypatch.delenv(PAPER_FLAG, raising=False)
+    client = FakeClient()
+    broker = connect(client)
+    monkeypatch.delenv(PAPER_FLAG)
+    with pytest.raises(PaperGuardError, match=PAPER_FLAG):
+        broker.place([ShareOrder(1, "AAA", 1, 50.0)])
+    assert client.placed == []
+
+
+def test_connect_without_the_flag_raises_and_opens_nothing(monkeypatch):
+    monkeypatch.delenv(PAPER_FLAG)
     client = FakeClient()
     with pytest.raises(PaperGuardError, match=PAPER_FLAG):
-        connect(client).place([ShareOrder(1, "AAA", 1, 50.0)])
+        connect(client)
+    assert client.connected is None
+
+
+def test_place_uses_the_env_mapping_the_connection_was_given(monkeypatch):
+    monkeypatch.delenv(PAPER_FLAG)
+    client = FakeClient()
+    broker = from_env(client, ENV, readonly=False)
+    broker.place([ShareOrder(1, "AAA", 1, 50.0)])
+    assert len(client.placed) == 1
+
+
+def test_place_refuses_a_zero_share_order_before_sending_anything():
+    client = FakeClient()
+    broker = connect(client)
+    with pytest.raises(ValueError, match="zero-share"):
+        broker.place([ShareOrder(1, "AAA", 5, 50.0), ShareOrder(2, "BBB", 0, 5.0)])
     assert client.placed == []
 
 
