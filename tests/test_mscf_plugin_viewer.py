@@ -150,11 +150,12 @@ def test_snapshot_embeds_scene_and_escaped_state_without_the_session_id(tmp_path
         "params": {"end": "2020-12-31"},
     }
     (ledger / "runs.jsonl").write_text(json.dumps(entry) + "\n")
+    (tmp_path / "repo").mkdir()
     out = tmp_path / "view.html"
     pipeline_view.main(
         [
             "--repo",
-            str(tmp_path),
+            str(tmp_path / "repo"),
             "--ledger-dir",
             str(ledger),
             "--progress-dir",
@@ -221,6 +222,8 @@ def test_progress_files_stay_outside_the_repository(monkeypatch):
         ("--ledger-dir", "outputs/registered-slice-01/ledger"),
         ("--progress-dir", "data_cache/wrds"),
         ("--snapshot", "outputs/view.html"),
+        ("--snapshot", "pipeline-lab.html"),
+        ("--snapshot", "docs/nested/pipeline-lab.html"),
     ],
 )
 def test_viewer_refuses_run_outputs_and_market_data(tmp_path, flag, where):
@@ -244,3 +247,38 @@ def test_fonts_are_embedded_only_when_the_woff2_files_are_present(tmp_path, monk
     css = pipeline_view.fonts_css()
     assert css.count("@font-face") == 1 and "base64,ZmFrZQ==" in css
     assert not list(SCRIPTS.rglob("*.woff2"))
+
+
+def test_trials_come_from_runlog_so_a_ledger_correction_is_not_a_trial(tmp_path, monkeypatch):
+    from capstone import runlog
+
+    ledger = tmp_path / "ledger"
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(ledger))
+    tags = ["stage:screen"]
+    first = runlog.log_run("mom", params={"lb": 1}, seed=1, tags=tags)
+    runlog.log_run("mom", params={"lb": 2}, seed=1, tags=tags)
+    runlog.log_run(
+        runlog.CORRECTION_NAME,
+        params={
+            "ledger_name": "mom",
+            "excludes": [{"ts_utc": first["ts_utc"], "lb": 1}],
+            "reason": "duplicate of a crashed run",
+        },
+    )
+    assert runlog.trial_count() == 1
+    state = pipeline_view.build_state(ledger / "runs.jsonl", ROOT, tmp_path / "p", 24.0)
+    assert state["trials"] == runlog.trial_count() == 1
+    assert state["names"] == 1 and state["ledger_error"] is None
+    assert [n["name"] for n in state["top_names"]] == ["mom"]
+    assert next(x for x in state["stages"] if x["stage"] == "screen")["runs"] == 1
+    assert state["hygiene"].get("no data_version") == 1  # the correction is not a trial run
+
+
+def test_an_unreadable_ledger_line_is_an_error_not_a_trial(tmp_path):
+    ledger = tmp_path / "ledger"
+    ledger.mkdir()
+    good = json.dumps({"name": "mom", "ts_utc": "2026-01-01T00:00:00+00:00", "tags": []})
+    (ledger / "runs.jsonl").write_text(good + "\n{not json\n", encoding="utf-8")
+    state = pipeline_view.build_state(ledger / "runs.jsonl", ROOT, tmp_path / "p", 24.0)
+    assert state["trials"] == 0 and "not valid JSON" in state["ledger_error"]
+    assert "<unreadable line>" not in json.dumps(state["top_names"])

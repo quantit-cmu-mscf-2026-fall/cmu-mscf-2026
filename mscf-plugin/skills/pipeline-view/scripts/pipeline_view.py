@@ -53,6 +53,42 @@ def off_limits(path: Path, repo: Path) -> str | None:
     return None
 
 
+def inside_repo(path: Path, repo: Path) -> bool:
+    path = path.resolve()
+    return path == repo or repo in path.parents
+
+
+def counted_entries(path: Path, repo: Path) -> tuple[list[dict], int, str | None]:
+    """(entries that are trials, the trial count, a ledger error or None).
+
+    The count is `capstone.runlog`'s own: ledger corrections applied, correction entries never
+    trials, an unreadable line an error (not a trial). Without `capstone` importable the
+    viewer cannot apply corrections, so it reports the error instead of a raw line count."""
+    entries = read_entries(path)
+    corrupt = [e for e in entries if "corrupt" in (e.get("tags") or [])]
+    plain = [e for e in entries if e not in corrupt]
+    try:
+        if str(repo) not in sys.path:
+            sys.path.insert(0, str(repo))
+        from capstone import runlog
+
+        previous = os.environ.get("CAPSTONE_LEDGER_DIR")
+        os.environ["CAPSTONE_LEDGER_DIR"] = str(path.parent)
+        try:
+            trials = runlog._Corrections(runlog._read_numbered()).trials
+        finally:
+            if previous is None:
+                os.environ.pop("CAPSTONE_LEDGER_DIR", None)
+            else:
+                os.environ["CAPSTONE_LEDGER_DIR"] = previous
+    except ImportError:
+        kept = [e for e in plain if e.get("name") != "ledger-correction"]
+        return kept, len(kept), "capstone.runlog not importable: corrections not applied"
+    except ValueError as exc:
+        return plain, 0, str(exc)
+    return trials, len(trials), None
+
+
 def ledger_path(ledger_dir: str | None, repo: Path) -> Path:
     root = ledger_dir or os.environ.get("CAPSTONE_LEDGER_DIR")
     return (Path(root) if root else repo / "experiments") / "runs.jsonl"
@@ -97,7 +133,7 @@ def git(repo: Path, *args: str) -> str | None:
 def build_state(
     path: Path, repo: Path, pdir: Path | None = None, reject_hours: float = REJECT_WINDOW_HOURS
 ) -> dict:
-    entries = read_entries(path)
+    entries, trial_total, ledger_error = counted_entries(path, repo)
     stations = (read_json(STATIONS) or {}).get("stations", [])
     now = time.time()
     line = build_line(pdir or progress_dir(), entries, stations, now)
@@ -124,8 +160,6 @@ def build_state(
             hygiene["no data_version"] += 1
         if not e.get("metrics"):
             hygiene["no metrics"] += 1
-        if "corrupt" in (e.get("tags") or []):
-            hygiene["unreadable line"] += 1
         timeline.append({"ts": e.get("ts_utc"), "n": i})
     holdout = [
         {"ts": e.get("ts_utc"), "name": e.get("name"), "user": e.get("user")}
@@ -159,7 +193,8 @@ def build_state(
         "mtime": path.stat().st_mtime if path.is_file() else None,
         "branch": git(repo, "rev-parse", "--abbrev-ref", "HEAD"),
         "sha": git(repo, "rev-parse", "--short", "HEAD"),
-        "trials": len(entries),
+        "trials": trial_total,
+        "ledger_error": ledger_error,
         "names": len(by_name),
         "users": len(by_user),
         "families": len(families),
@@ -374,6 +409,11 @@ def main(argv: list[str] | None = None) -> int:
         reason = target and off_limits(Path(target), repo)
         if reason:
             parser.error(f"--{label} path refused: {reason}")
+    if args.snapshot and inside_repo(Path(args.snapshot), repo):
+        parser.error(
+            "--snapshot path refused: a snapshot carries private ledger content and must not "
+            "be written inside the repository working tree"
+        )
     if args.json:
         print(json.dumps(build_state(path, repo, pdir, args.reject_window_hours), indent=2))
         return 0
@@ -381,7 +421,7 @@ def main(argv: list[str] | None = None) -> int:
         Path(args.snapshot).write_text(
             render(build_state(path, repo, pdir, args.reject_window_hours)), encoding="utf-8"
         )
-        print(f"wrote {args.snapshot} ({len(read_entries(path))} runs)")
+        print(f"wrote {args.snapshot}")
         return 0
     serve(path, repo, args.port, pdir, args.reject_window_hours)
     return 0

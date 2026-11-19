@@ -88,11 +88,11 @@ A browser cannot reach a server inside a cloud session. Write one self-contained
 and send or publish it:
 
 ```bash
-python "${CLAUDE_PLUGIN_ROOT}/skills/pipeline-view/scripts/pipeline_view.py" --repo . --snapshot pipeline-lab.html
+python "${CLAUDE_PLUGIN_ROOT}/skills/pipeline-view/scripts/pipeline_view.py" --repo . --snapshot ~/.cache/mscf-pipeline/pipeline-lab.html
 ```
 
 A snapshot carries names and metrics from the private ledger: share it privately and never
-commit it to the public repository. `--json` prints the state for scripting.
+commit it to the public repository. The viewer refuses a `--snapshot` path inside the repo. `--json` prints the state for scripting.
 
 ## Changing the room
 
