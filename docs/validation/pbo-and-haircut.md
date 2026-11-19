@@ -70,8 +70,9 @@ So:
   included in #35, with correlated (`rho`) and autocorrelated (`ar1`) cases;
   the module docstring now points to `backtest.candidate_returns`. Review
   remains with this workstream.
-- **PBO from one candidate set is noisy.** On no-skill sets it ranged from
-  about 0.06 to 0.78 depending on the seed. A calibration test has to average
+- **PBO from one candidate set is noisy.** On 100 no-skill sets from
+  `synth.make_return_matrix` (1000 dates x 50 candidates, `n_blocks=10`) it
+  ranged from 0.08 to 0.89 depending on the seed, mean 0.48. A calibration test has to average
   over many seeds, and the gate shouldn't treat a single PBO near a threshold
   as decisive.
 

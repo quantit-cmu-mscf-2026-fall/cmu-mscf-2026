@@ -196,6 +196,14 @@ class TestPower:
                 at_mds = np.interp(mds, report.sharpe_grid, np.maximum.accumulate(s.power))
                 assert at_mds == pytest.approx(level, abs=1e-9) or mds == 0.0
 
+    def test_end_to_end_power_requires_more_than_stage1(self, report):
+        # Full acceptance includes later gates. Counting stage-1 passes as
+        # end-to-end hits wrongly preserves the existing broad power bounds.
+        first = np.asarray(stage(report, "stage1").power)
+        end = np.asarray(report.end_to_end)
+        assert (end <= first).all()
+        assert (end < first).any()
+
     def test_the_summary_lists_every_stage_and_end_to_end(self, report):
         mds = report.min_detectable_sharpe()
         assert [m.stage for m in mds] == ["stage1", "stage2", "stage3", "stage4", "end_to_end"]
