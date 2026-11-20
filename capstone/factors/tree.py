@@ -618,6 +618,20 @@ def gene_text(node: Node) -> str:
     return re.sub(r", \d+\)", ", t)", unparse(node))
 
 
+def _closes(key: str, parent: str, counts, sizes, parents) -> bool:
+    """Whether `parent` hides `key` from the closed genes: it has the same support.
+
+    Two genes that are each the other's parent (a minus sign moved through a
+    product, in different trees) are one shape: the larger, then the lower key,
+    is kept and the other is hidden by it.
+    """
+    if counts[parent] != counts[key]:
+        return False
+    if key in parents.get(parent, ()):
+        return (sizes[parent], key) > (sizes[key], parent)
+    return True
+
+
 def frequent_root_genes(
     trees: Sequence[Node], k: int = 3, *, min_count: int = 2
 ) -> list[tuple[str, float, str]]:
@@ -652,7 +666,8 @@ def frequent_root_genes(
     closed = [
         key
         for key, count in counts.items()
-        if count >= min_count and all(counts[p] != count for p in parents.get(key, ()))
+        if count >= min_count
+        and not any(_closes(key, p, counts, sizes, parents) for p in parents.get(key, ()))
     ]
     closed.sort(key=lambda g: (-counts[g], -sizes[g], g))
     return [(g, counts[g] / len(trees), texts[g]) for g in closed[:k]]

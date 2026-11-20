@@ -450,6 +450,7 @@ def test_subtracting_is_adding_a_negation():
     [
         ("shift({}, {})", "shift(returns, t)"),
         ("-(-({}))", "(close / open)"),
+        ("-(-(close) * volume)", None),
     ],
 )
 def test_a_gene_that_canonicalises_into_its_own_parent_is_still_frequent(spelling, gene):
@@ -457,6 +458,16 @@ def test_a_gene_that_canonicalises_into_its_own_parent_is_still_frequent(spellin
     # child, so the gene was its own closer and the most frequent structure dropped out.
     from capstone.factors.tree import frequent_root_genes
 
+    if spelling.startswith("-(-(close) *"):
+        # Each spelling of the product is the other's parent in one tree.
+        trees = [
+            parse("-(-(close) * volume) + returns"),
+            parse("-(close * volume) + high"),
+            parse("-(-(close) * volume) / open"),
+        ]
+        supports = [s for _, s, text in frequent_root_genes(trees, k=5) if "volume" in text]
+        assert supports == [1.0]
+        return
     if spelling.startswith("shift"):
         trees = [
             parse("shift(shift(returns, 1), 5) * volume"),
