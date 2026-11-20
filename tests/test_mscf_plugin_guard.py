@@ -6,6 +6,7 @@ nothing is pushed and no network is used (a remote's URL is only read, never con
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import subprocess
@@ -169,6 +170,15 @@ def note(done) -> str:
         "find experiments -name runs.jsonl -delete",
         "Copy-Item -Destination experiments/runs.jsonl -Path x.jsonl",
         "bash -c 'rm experiments/runs.jsonl'",
+        "> experiments/runs.jsonl",
+        ">experiments/runs.jsonl",
+        "cd experiments && > runs.jsonl",
+        "git push origin :main",
+        "git push origin :master",
+        "git push origin :refs/heads/main",
+        "git push --delete origin main",
+        "git push origin --delete main",
+        "git push -d origin main",
     ],
 )
 def test_denies(command):
@@ -436,3 +446,19 @@ def test_an_undeterminable_push_warns_rather_than_denies(repo):
     for command in ["git push --all origin", f"git push {TEAM_URL} topic"]:
         done = guard(bash(command, cwd=repo), ON, repo)
         assert "could not work out" in note(done), command
+
+
+def test_guard_source_has_no_python_310_syntax():
+    source = (ROOT / "mscf-plugin" / "hooks" / "guard.py").read_text(encoding="utf-8")
+    tree = ast.parse(source, feature_version=(3, 9))
+    assert not any(isinstance(n, ast.Match) for n in ast.walk(tree))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "zip":
+            assert all(k.arg != "strict" for k in node.keywords)
+
+
+@pytest.mark.parametrize(
+    "command", ["git push origin :feature", "git push --delete origin cal/topic"]
+)
+def test_deleting_a_non_protected_remote_branch_is_allowed(command):
+    assert not denied(guard(bash(command)))

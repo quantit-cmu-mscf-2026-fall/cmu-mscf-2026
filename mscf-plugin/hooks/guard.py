@@ -168,6 +168,8 @@ def bash_denial(command: str, cwd: str = ".") -> str | None:
     for part, tokens, folder in walked:
         words = _command(tokens)
         if not words:
+            if _ledger_write(part, words, False):
+                return LEDGER_REASON
             continue
         runs_python = _runs_python(words)
         python_runs = python_runs or runs_python
@@ -371,7 +373,8 @@ def _walk(command, where, depth=0):
         words = _command(tokens)
         if words and words[0].lower() == "eval":
             yield from _walk(" ".join(words[1:]), where, depth + 1)
-        for before, word in zip(words, words[1:], strict=False):
+        for i, word in enumerate(words[1:]):
+            before = words[i]
             is_shell_c = before.lower() in SHELL_C or SHELL_C_CLUSTER.match(before.lower())
             if is_shell_c and re.search(r"\s", word):
                 yield from _walk(word, where, depth + 1)
@@ -437,6 +440,13 @@ def _git_denial(where, sub, args):
                 "git push --force, --mirror or a +refspec rewrites shared history; merge "
                 "instead, and use --force-with-lease only on your own PR branch"
             )
+        deleting = any(a in ("-d", "--delete") for a in args)
+        if any(
+            PROTECTED_BRANCH.search(a[1:] if a.startswith(":") else a)
+            for a in plain
+            if deleting or a.startswith(":")
+        ):
+            return "git push that deletes main (:main or --delete main) destroys shared history"
         if any(a.startswith("--force-with-lease") for a in args):
             refspecs = plain[1:]
             if not refspecs or refspecs == ["HEAD"]:
