@@ -54,6 +54,26 @@ def test_the_real_data_config_loads_the_pinned_model_and_the_bootstrap_stage_1()
     assert FileSource(config.papers).papers()  # the papers file resolves from the repository root
 
 
+def test_the_real_data_config_states_the_registered_thresholds_and_generator():
+    from capstone import gate
+    from capstone.funnel import thresholds_dict
+
+    registered = gate.load_registered(REPO / "scripts" / "gate_crsp_v1.json")
+    config = load_config(CRSP)
+    assert thresholds_dict(config.thresholds) == thresholds_dict(registered.thresholds)
+    assert config.generator == registered.generator
+    assert config.generator == "/".join(
+        ["factor-trees", config.factors.model, config.factors.prompt_version]
+        + [f"{config.deepen_selector}-deepen"]
+    )
+    assert config.n_boot == registered.n_boot
+    assert (config.search_end, config.holdout_start, config.holdout_end) == (
+        registered.search_end,
+        registered.holdout_start,
+        registered.holdout_end,
+    )
+
+
 def test_the_default_call_budget_is_300_and_a_run_can_set_its_own(tmp_path):
     assert DEFAULT_MAX_MODEL_CALLS == 300
     assert load_config(CRSP).max_model_calls == 300

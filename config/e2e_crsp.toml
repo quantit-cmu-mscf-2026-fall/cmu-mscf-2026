@@ -54,13 +54,22 @@ holds = [1, 5, 21]
 neutral = ["none", "sector"]
 
 [gate]
-generator = "factor-trees"
+# The registered generator (scripts/gate_crsp_v1.json): the model, prompt version
+# and selector above. tests/test_e2e_config.py checks it and the thresholds.
+generator = "factor-trees/claude-opus-5/v7/agent-deepen"
 # A floor: the driver raises it to the family count's need (>= 20 x families,
 # n_boot + 1 rounded up to a multiple of 500).
 n_boot = 1999
-# On real data stage 1 is the bootstrap family maximum, then BH across families.
+# The registered thresholds: stage 1 is the bootstrap family maximum, then BH
+# across families; stage 4 is BH at q4 = 0.50 over the survivors.
 [gate.thresholds]
+q1 = 0.1
 stage1 = "bootstrap"
+alpha2 = 1.0
+final = "bh"
+d4 = 0.95
+q4 = 0.5
+final_trials = "survivors"
 
 # Fama-French 5 + momentum (capstone.data.load_ff5_momentum; downloaded once
 # and cached), cut to the search period.
