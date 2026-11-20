@@ -142,6 +142,17 @@ def test_a_capped_family_offers_no_candidates_to_the_agent(tmp_path, ledger):
     assert capped not in shown and len(shown) == 2
 
 
+def test_candidates_put_a_losing_seed_last_when_quality_is_signed(tmp_path, ledger):
+    d, _, _ = deepener(tmp_path / "a.db")
+    d.config = replace(d.config, memory_signed_quality=True)
+    losing = factor_id(parse(FAMILY_SEEDS["h1"]))
+    d.pool.quality[losing] = -3.0
+    for fid in d.pool.quality:
+        if fid != losing:
+            d.pool.quality[fid] = 1.5
+    assert [c.view.id for c in d.candidates()][-1] == losing
+
+
 def test_the_agent_is_asked_only_for_what_the_family_has_left(tmp_path, ledger):
     # Cap 1, two children a round. The agent answers two edits, the second broken:
     # before the fix it was asked for 2, its broken extra cost a repair call, and the

@@ -732,7 +732,12 @@ class Deepener:
         """The parents the agent sees, best by S_ledger first, with the memory's evidence."""
         views = sorted(
             self._open(self._views()),
-            key=lambda v: (-ledger_score(v.quality, v.rho_max, v.times_selected), v.id),
+            key=lambda v: (
+                -ledger_score(
+                    v.quality, v.rho_max, v.times_selected, self.config.memory_signed_quality
+                ),
+                v.id,
+            ),
         )[: self.candidates_shown]
         n = self.config.memory_children_per_parent
         out = []

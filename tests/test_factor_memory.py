@@ -468,6 +468,20 @@ def test_scores_by_hand():
     assert action_score(0.05, 0.05, 0.5, 0.1, 1e-6) == pytest.approx(expected)
 
 
+def test_a_losing_parent_scores_zero_when_quality_is_signed():
+    assert ledger_score(-3.0, 0.0, 0) == pytest.approx(3.0)  # the unsigned default is |Q|
+    assert ledger_score(-3.0, 0.0, 0, signed_quality=True) == 0.0
+    assert ledger_score(1.5, 0.0, 3, signed_quality=True) == pytest.approx(1.5 / 2)
+
+
+def test_a_negative_quality_parent_is_not_picked_over_a_winner_when_signed():
+    losing = ParentView("a", "returns|q0|d0|u0", -3.0, 0.0, 0)
+    winning = ParentView("b", "volume|q2|d0|u0", 1.5, 0.0, 0)
+    signed = FactorConfig(memory_signed_quality=True)
+    assert select_action([losing, winning], MemoryState(), 0, signed).parent_id == "b"
+    assert select_action([losing, winning], MemoryState(), 0, CONFIG).parent_id == "a"
+
+
 def test_veto_needs_both_confidence_and_failures():
     assert vetoed(stats_of([], failures=4), CONFIG)  # gate 4/9 > 0.3, rate 5/6 > 0.7
     assert not vetoed(stats_of([], failures=1), CONFIG)  # rate 2/3 < 0.7

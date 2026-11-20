@@ -566,13 +566,17 @@ def warmup(t: int, config: FactorConfig) -> float:
     return config.memory_lambda_max * min(1.0, ramp)
 
 
-def ledger_score(quality: float, rho_max: float, times_selected: int) -> float:
+def ledger_score(
+    quality: float, rho_max: float, times_selected: int, signed_quality: bool = False
+) -> float:
     """S_ledger(p) = Q(p) * (1 - rho_max(p)) / sqrt(1 + u_p) (plan decision D2; ours,
     as the paper gives no formula). rho_max: the parent's largest |corr| with
-    another pool member."""
+    another pool member. With `signed_quality` a negative Q (a loser after costs)
+    counts as 0, not as |Q|."""
     if not math.isfinite(quality):
         raise ValueError("parent quality must be finite")
-    return abs(quality) * (1.0 - abs(rho_max)) / math.sqrt(1 + times_selected)
+    q = max(quality, 0.0) if signed_quality else abs(quality)
+    return q * (1.0 - abs(rho_max)) / math.sqrt(1 + times_selected)
 
 
 def action_score(s_ledger: float, lambda_t: float, confidence: float, mean: float, eps: float):
@@ -632,7 +636,9 @@ def select_action(
     lam = warmup(t, config)
     best: list[Action] = []
     for parent in sorted(parents, key=lambda p: p.id):
-        s = ledger_score(parent.quality, parent.rho_max, parent.times_selected)
+        s = ledger_score(
+            parent.quality, parent.rho_max, parent.times_selected, config.memory_signed_quality
+        )
         for motif in PRODUCIBLE_MOTIFS:
             if allowed is not None and not allowed(parent, motif):
                 continue
