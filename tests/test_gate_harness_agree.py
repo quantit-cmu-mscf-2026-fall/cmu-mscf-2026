@@ -4,11 +4,11 @@ import dataclasses
 
 import pandas as pd
 import pytest
-from gate_helpers import N_BOOT, N_HOLDOUT, N_SEARCH, Market, gate_once, market
+from gate_helpers import N_BOOT, N_HOLDOUT, N_SEARCH, Market, config_for, gate_once, market
 
 from capstone import calibration
 from capstone.funnel import Thresholds
-from capstone.gate import DecisionRule
+from capstone.gate import DecisionRule, required_holdout_obs
 
 BASELINE_Q = 0.05
 Q_GRID = (0.01, 0.05, 0.10, 0.20, 0.50)
@@ -39,8 +39,8 @@ def gate_card(m: Market) -> pd.DataFrame:
     return gate_once(m, decision_rule=DecisionRule("baseline", q=BASELINE_Q)).scorecard
 
 
-def harness_funnel(stats: pd.DataFrame) -> pd.Series:
-    return calibration.run_funnel(stats, TH)["stage4"]
+def harness_funnel(stats: pd.DataFrame, min_holdout_obs: int | None = None) -> pd.Series:
+    return calibration.run_funnel(stats, TH, min_holdout_obs=min_holdout_obs)["stage4"]
 
 
 def assert_same(gate_column: pd.Series, harness: pd.Series) -> None:
@@ -70,7 +70,7 @@ def test_the_planted_world_has_something_to_agree_on():
     assert harness_funnel(stats).any()
 
 
-def test_a_thinly_covered_holdout_fails_in_the_gate_but_not_in_the_harness(ledger):
+def test_a_thinly_covered_holdout_fails_in_both_once_the_harness_has_the_guard(ledger):
     m = market(seed=1, share_real=0.3)
     stats = harness_statistics(m)
     passer = harness_funnel(stats).idxmax()
@@ -83,12 +83,12 @@ def test_a_thinly_covered_holdout_fails_in_the_gate_but_not_in_the_harness(ledge
 
     card = gate_card(gappy)
     gappy_stats = harness_statistics(gappy)
+    guard = required_holdout_obs(config_for(gappy))
 
-    assert harness_funnel(gappy_stats)[passer]
+    assert card.loc[passer, "ho_n_obs"] < guard
     assert not card.loc[passer, "funnel_pass"]
-    assert card.loc[passer, "ho_n_obs"] < 0.5 * N_HOLDOUT
-    unaffected = card.index != passer
-    assert_same(card["funnel_pass"][unaffected], harness_funnel(gappy_stats))
+    assert harness_funnel(gappy_stats)[passer]
+    assert_same(card["funnel_pass"], harness_funnel(gappy_stats, min_holdout_obs=guard))
     assert_same(
         card["accepted"], calibration.run_baseline(gappy_stats, q=BASELINE_Q, stage1="bootstrap")
     )
