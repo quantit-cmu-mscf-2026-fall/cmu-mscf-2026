@@ -93,7 +93,7 @@ BINARY_PARAMETER_FUNCS = {"signed_power"}
 
 # Market-regime operators (off by default): f(x), no window. Not in
 # `FUNCS`: they parse only with `parse(..., regime_operators=True)`; otherwise they
-# are unknown identifiers, as before. `volscale(x)` scales x by a fixed target over the
+# are unknown identifiers. `volscale(x)` scales x by a fixed target over the
 # market's rv126;
 # `bear_gate(x)` is x set to 0 in a bear market (`capstone.regimes`). A tree using
 # one belongs to its `regime_base` formula's family.
@@ -560,7 +560,7 @@ def zoo_similarity(node: Node, zoo: Sequence[tuple[str, Node]]) -> tuple[int, fl
 
 
 # ---------------------------------------------------------------------------
-# Frequent subtree avoidance (Navigating the Alpha Jungle, #45: Sec. 3, Eq. 11-12)
+# Frequent subtree avoidance (Navigating the Alpha Jungle, Sec. 3, Eq. 11-12)
 
 
 def _children(node: Node) -> list[Node]:

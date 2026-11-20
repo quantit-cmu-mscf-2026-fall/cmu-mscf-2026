@@ -3,8 +3,7 @@
 
 [scorer]
 # The one trading spec a child is scored under. Monthly rebalancing without
-# sector neutrality limits the cost drag; letting the agent pick the spec from
-# the hypothesis's horizon is a follow-up (QUANTIT-117).
+# sector neutrality limits the cost drag.
 hold = 21
 neutral = "none"
 

@@ -29,7 +29,7 @@ max_store_share = 1.0
 # had 31-45.
 max_nodes = 30
 
-# Frequent subtree avoidance (Navigating the Alpha Jungle, #45, Sec. 3): the
+# Frequent subtree avoidance (Navigating the Alpha Jungle, Sec. 3): the
 # most frequent closed "root genes" in the store (subtrees whose leaves are
 # all fields, windows abstracted) are named in the prompt as structures to
 # avoid, and a formula containing one is rejected. The paper avoids 3. 0 is off.

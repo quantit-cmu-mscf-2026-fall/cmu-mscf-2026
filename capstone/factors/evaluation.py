@@ -61,8 +61,8 @@ from capstone.factors.interpret import evaluate
 from capstone.factors.tree import Node, unparse
 from capstone.runlog import log_run
 
-# Discovery 1990-2020, holdout 2021-2025: decided 2026-10-05 (PR #43). The
-# holdout is looked at once, at the final decision, and never here.
+# Discovery 1990-2020, holdout 2021-2025. The holdout is looked at once, at the
+# final decision, and never here.
 DISCOVERY_START = "1990-01-01"
 DISCOVERY_END = "2020-12-31"
 DAILY_FILE = "sp500_daily_1990_2025"
@@ -352,7 +352,7 @@ def signal_returns(signal: pd.DataFrame, panel: Panel, spec: TradingSpec) -> Fac
     spread raises `ValueError` rather than trading for free. A day whose book
     came from no signal, with nothing traded, holds no position: its returns,
     cost and turnover are NaN, not 0.0, so a lookback's warm-up doesn't count
-    as flat days (#55). A real signal that nets to zero weight still earns 0.0.
+    as flat days. A real signal that nets to zero weight still earns 0.0.
     """
     return _backtest(trading_signal(signal, panel, spec.neutral), panel, spec)
 

@@ -454,8 +454,8 @@ def test_subtracting_is_adding_a_negation():
     ],
 )
 def test_a_gene_that_canonicalises_into_its_own_parent_is_still_frequent(spelling, gene):
-    # Review of #61: `shift(shift(x, a), b)` and `-(-K)` share a key with their own
-    # child, so the gene was its own closer and the most frequent structure dropped out.
+    # `shift(shift(x, a), b)` and `-(-K)` share a key with their own child: the gene
+    # must not close itself out.
     from capstone.factors.tree import frequent_root_genes
 
     if spelling.startswith("-(-(close) *"):

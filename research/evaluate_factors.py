@@ -1,6 +1,6 @@
 """Evaluate the stored factors on the CRSP discovery period (QUANTIT-81).
 
-    python research/evaluate_factors.py --store D:/paperlog/factors.db [--limit N]
+    python research/evaluate_factors.py --store factors.db [--limit N]
                                         [--record-variants]
 
 Builds the 1990-2020 panel from the shared data (the 2021-2025 holdout is

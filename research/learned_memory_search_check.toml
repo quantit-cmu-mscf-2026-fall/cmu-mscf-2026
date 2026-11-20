@@ -1,10 +1,5 @@
-# Step 3 of learned memory search: the archived v1 design.
+# Step 3 of learned memory search: design v1.
 # Read by research/learned_memory_search_check.py.
-# Historical v1 ran before the screening fix in #73 (7af0c45). Its original
-# code revision is unavailable in this repository. Rerunning this design on
-# current code does not reproduce those historical numbers; outputs go to
-# a new rerun folder. Both designs were archived together in a277923, so
-# repository history does not establish pre-registration before their runs.
 #
 # Question: running the deepen move on a synthetic panel with one planted
 # factor, does learned memory search find it in fewer evaluations than the

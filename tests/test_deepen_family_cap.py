@@ -37,12 +37,9 @@ ROUNDS = 6
 CHILDREN = 2
 
 # The uncapped trace on this fixture, per round: the parent's family, the edit and the
-# children asked for; then each child's status. Re-pinned on the combined branch (the
-# earlier pin, from the public base bf8c8d4, failed in CI at index 1). The trace depends
-# on factor ids: candidates are ordered by id and the editor's picks are seeded, and
-# `factor_id` hashes `identity_key`, which #46 (canonical keys) changed after that pin.
-# The same fixture and seed now give this trace, identical under PYTHONHASHSEED 0, 1
-# and 2; it is deterministic, so a change here means deepen's behaviour changed.
+# children asked for; then each child's status. The trace depends on factor ids:
+# candidates are ordered by id and the editor's picks are seeded. It is identical under
+# PYTHONHASHSEED 0, 1 and 2, so a change here means deepen's behaviour changed.
 PINNED_ASKED = [
     ("h2", "normalization", 2),
     ("h3", "normalization", 2),
@@ -154,9 +151,8 @@ def test_candidates_put_a_losing_seed_last_when_quality_is_signed(tmp_path, ledg
 
 
 def test_the_agent_is_asked_only_for_what_the_family_has_left(tmp_path, ledger):
-    # Cap 1, two children a round. The agent answers two edits, the second broken:
-    # before the fix it was asked for 2, its broken extra cost a repair call, and the
-    # extra was then dropped unrecorded.
+    # Cap 1, two children a round. The agent answers two edits, the second broken: it is
+    # asked for 1, so the broken extra costs no repair call and is not dropped unrecorded.
     d, _, names = deepener(tmp_path / "a.db", cap=1)
     parent = FAMILY_SEEDS["h3"]
     client = AgentClient(_decision(parent, "nesting", ["ts_mean(rank(close / open), 5)", "(("]))

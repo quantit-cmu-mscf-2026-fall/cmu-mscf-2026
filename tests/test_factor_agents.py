@@ -419,7 +419,7 @@ def test_avoidance_off_leaves_the_prompt_and_checks_unchanged(con, hid):
 
 
 def test_a_failed_judge_call_is_still_counted_and_the_batch_is_recorded(con, hid):
-    # Review of #61: the judge answers in text instead of calling the tool. Its call
+    # The judge answers in text instead of calling the tool. Its call
     # and tokens must reach `usage`, and both parsed proposals must get a row.
     from collections import Counter
 

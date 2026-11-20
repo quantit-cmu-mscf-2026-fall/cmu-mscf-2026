@@ -129,7 +129,7 @@ def test_costs_match_the_backtest_when_every_spread_is_the_same():
     net, turnover = backtest_components(
         signal, panel.fields["returns"], cost_bps=10.0, demean=True, gross=1.0
     )  # half of a 20 bps spread is 10 bps per unit traded
-    # Same returns and turnover on every day, warm-up NaNs included (#55).
+    # Same returns and turnover on every day, warm-up NaNs included.
     held = result.net.notna()
     np.testing.assert_allclose(result.net, net, rtol=1e-9, atol=1e-12)
     np.testing.assert_allclose(result.turnover[held], turnover[held], rtol=1e-9)
@@ -402,8 +402,7 @@ def test_the_research_script_end_to_end(tmp_path, monkeypatch):
 
 
 def test_the_trial_count_is_the_ledgers_and_seen_results_always_count(tmp_path, monkeypatch):
-    # Review of #359: evaluation had its own trial_count that honoured exclusions of
-    # entries with metrics, so it undercounted (runlog.trial_count never does).
+    # Exclusions never remove a seen result (one with metrics) from the count.
     from capstone import runlog
 
     monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
@@ -440,7 +439,7 @@ def test_a_variant_that_never_trades_is_logged_and_summarised_but_not_a_column(
     assert len(read_entries()) == 2  # both were trials
     assert list(matrix.columns) == list(summary.index[summary.traded])
     assert summary.traded.tolist() == [True, False]
-    fi = intake.from_evaluation(matrix, summary)  # used to raise "no returns at all"
+    fi = intake.from_evaluation(matrix, summary)  # a matrix with no dead column
     assert list(fi.returns.columns) == list(matrix.columns)
 
 
@@ -454,9 +453,9 @@ def test_ledger_entries_record_the_hypothesis_family(tmp_path, monkeypatch):
 
 
 def test_a_later_split_does_not_change_a_level_on_an_earlier_date():
-    # Review of #359: CRSP's cumulative factors are anchored at the file's last date, so a
-    # 2021 split sits in every 1990-2020 row's factor. Raw rows are identical here; only
-    # the factor column differs, and the panels cut at the same date must agree.
+    # CRSP's cumulative factors are anchored at the file's last date, so a 2021 split
+    # sits in every 1990-2020 row's factor. Raw rows are identical here; only the factor
+    # column differs, and the panels cut at the same date must agree.
     rows = fake_rows(n_stocks=6, n_days=40)
     later_split = rows.copy()
     later_split.loc[later_split.permno == 10000, ["dlycumfacpr", "dlycumfacshr"]] = 2.0
@@ -541,7 +540,7 @@ def test_a_lookback_warming_up_is_not_counted_as_flat_days():
 
 
 def test_a_real_signal_with_zero_net_weight_still_earns_zero():
-    # #25's rule: idleness comes from a missing signal, not from zero weights.
+    # Idleness comes from a missing signal, not from zero weights.
     panel = build_panel(fake_rows(n_stocks=10, n_days=30))
     signal = ev.factor_signal(parse("volume"), panel)
     signal.iloc[10:15] = 1.0  # a signal that is there but the same for every stock
