@@ -88,6 +88,39 @@ def test_stocks_outside_the_universe_are_never_held():
     assert result.net.iloc[1:].notna().all()
 
 
+def test_non_members_do_not_move_members_cross_sectional_weights():
+    rows = fake_rows(n_stocks=12, n_days=60)
+    never_members = rows[rows.permno.isin([10010, 10011])].copy()
+    members = rows[~rows.permno.isin([10010, 10011])]
+    never_members["in_universe"] = False
+    never_members["dlyprc"] *= 3.0  # their levels sit among the members' ranks
+    never_members["dlyvol"] = never_members["dlyvol"].to_numpy()[::-1]
+    tree = parse("rank(close) - rank(volume)")
+    alone = ev.factor_weights(tree, build_panel(members))
+    with_others = ev.factor_weights(tree, build_panel(pd.concat([members, never_members])))
+    pd.testing.assert_frame_equal(with_others[alone.columns], alone)
+    assert (with_others.drop(columns=alone.columns).fillna(0) == 0).all().all()
+
+
+def test_a_member_without_a_value_does_not_blank_the_date():
+    rows = fake_rows(n_stocks=8, n_days=40)
+    rows.loc[(rows.permno == 10002) & (rows.date < rows.date.unique()[30]), "dlyprc"] = np.nan
+    panel = build_panel(rows)
+    signal = ev.factor_signal(parse("rank(close)"), panel)
+    day = signal.index[10]
+    assert signal.loc[day].notna().sum() == 7 and np.isnan(signal.loc[day, 10002])
+    assert signal.iloc[10:].notna().sum(axis=1).min() == 7
+
+
+def test_load_panel_refuses_an_end_after_discovery_before_reading(monkeypatch):
+    def read(*args, **kwargs):
+        raise AssertionError("holdout rows were read")
+
+    monkeypatch.setattr(sd, "load", read)
+    with pytest.raises(HoldoutError):
+        load_panel(end="2021-01-04")
+
+
 def test_costs_match_the_backtest_when_every_spread_is_the_same():
     rows = fake_rows(spread=0.002)
     panel = build_panel(rows)
@@ -161,10 +194,10 @@ def test_every_variant_is_a_logged_trial_and_a_column(tmp_path, monkeypatch):
     trees = {"f1": parse("volume"), "f2": parse("ts_mean(returns, 5)"), "f3": parse("open")}
     original = ev.evaluate
 
-    def failing(tree, fields):
+    def failing(tree, fields, **options):
         if tree == trees["f3"]:
             raise ValueError("cannot compute")
-        return original(tree, fields)
+        return original(tree, fields, **options)
 
     monkeypatch.setattr(ev, "evaluate", failing)
     specs = ev.grid(holds=[1, 5], neutral=["none", "sector"])
@@ -200,7 +233,7 @@ def test_a_tag_is_on_a_factor_that_cannot_be_computed_too(tmp_path, monkeypatch)
     monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
     panel = build_panel(fake_rows(n_stocks=6, n_days=40))
 
-    def failing(tree, fields):
+    def failing(tree, fields, **options):
         raise ValueError("cannot compute")
 
     monkeypatch.setattr(ev, "evaluate", failing)

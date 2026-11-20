@@ -110,13 +110,14 @@ def test_cross_sections_use_dated_members_and_keep_historical_exits():
     assert values.iloc[1, :2].tolist() == pytest.approx([5 / 12, 1.0])
 
 
-def test_a_member_without_a_value_blanks_that_dates_cross_section():
+def test_a_member_without_a_value_leaves_the_other_members_ranks_alone():
     close = pd.DataFrame([[1.0, 2.0, np.nan], [1.0, 2.0, 3.0]], columns=[1, 2, 3])
     mask = pd.DataFrame(True, index=close.index, columns=close.columns)
     values = evaluate(
         parse("rank(close)"), {"close": close}, strict_domains=True, cross_sectional_universe=mask
     )
-    assert values.iloc[0].isna().all()
+    assert values.iloc[0].tolist()[:2] == pytest.approx([0.5, 1.0])
+    assert np.isnan(values.iloc[0, 2])
     assert values.iloc[1].tolist() == pytest.approx([1 / 3, 2 / 3, 1.0])
 
 

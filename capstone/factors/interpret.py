@@ -89,7 +89,8 @@ def evaluate(
     the largest magnitude first, and zscore, winsorize and ts_corr are undefined
     wherever their moments are. `cross_sectional_universe` is a dated boolean frame on
     the panel's axes; with it, rank, scale and winsorize see only each date's members
-    (and are undefined on a date whose member has no value). It needs strict mode.
+    that have a value (a member without one is NaN and leaves the others' ranks alone).
+    It needs strict mode.
     """
     template = _template(panel)
     if cross_sectional_universe is not None:
@@ -278,10 +279,7 @@ def _plain(
     func: str, x: pd.DataFrame, *, strict_domains=False, cross_sectional_universe=None
 ) -> pd.DataFrame:
     if func in {"rank", "scale", "winsorize"} and cross_sectional_universe is not None:
-        mask = cross_sectional_universe.astype(bool)
-        x = x.where(mask)
-        complete = (x.notna() | ~mask).all(axis=1)
-        x = x.where(complete, axis=0)
+        x = x.where(cross_sectional_universe.astype(bool))
     if func == "rank":
         return x.rank(axis=1, pct=True)
     if func == "log":

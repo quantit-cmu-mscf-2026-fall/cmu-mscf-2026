@@ -300,7 +300,10 @@ def sector_groups(panel: Panel) -> pd.Series:
 
 def factor_signal(tree: Node, panel: Panel) -> pd.DataFrame:
     """The factor's value on the stocks that may be held that day, NaN elsewhere."""
-    return evaluate(tree, panel.fields).where(panel.universe)
+    values = evaluate(
+        tree, panel.fields, strict_domains=True, cross_sectional_universe=panel.universe
+    )
+    return values.where(panel.universe)
 
 
 def trading_signal(signal: pd.DataFrame, panel: Panel, neutral: Neutral = "none") -> pd.DataFrame:

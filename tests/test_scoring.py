@@ -31,7 +31,7 @@ def test_the_scorer_gives_the_screen_z_and_the_variants_net_returns(tmp_path, mo
 
 
 def test_the_scorer_returns_none_for_a_factor_it_cannot_compute(monkeypatch):
-    def failing(tree, fields):
+    def failing(tree, fields, **options):
         raise ValueError("cannot compute")
 
     monkeypatch.setattr(ev, "evaluate", failing)
