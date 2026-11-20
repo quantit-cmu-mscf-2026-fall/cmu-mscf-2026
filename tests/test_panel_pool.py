@@ -194,6 +194,21 @@ def test_an_error_in_a_worker_surfaces_as_a_typed_error_naming_the_factor(tmp_pa
     assert not (tmp_path / panel_pool.STAGING).exists()
 
 
+def test_two_pools_on_one_workdir_keep_their_own_panels(tmp_path):
+    first_panel, second_panel = _panel(6), _panel(8)
+    tree = parse("volume / shares")
+    with panel_pool.PanelPool(first_panel, 2, tmp_path) as first:
+        with panel_pool.PanelPool(second_panel, 2, tmp_path) as second:
+            assert first._path != second._path
+            ((_, a),) = first.outcomes(SPECS[:1])([("f", tree)])
+            ((_, b),) = second.outcomes(SPECS[:1])([("f", tree)])
+        # the second pool closing leaves the first one's panel in place
+        assert Path(first._path).exists()
+        ((_, again),) = first.outcomes(SPECS[:1])([("f", tree)])
+    assert a.results[0][0] == again.results[0][0] and a.results[0][0] != b.results[0][0]
+    assert not (tmp_path / panel_pool.STAGING).exists()
+
+
 def test_a_crashed_worker_surfaces_as_a_typed_error(tmp_path):
     panel = _panel()
     trees = {"a": parse("volume / shares"), "b": _Crash()}

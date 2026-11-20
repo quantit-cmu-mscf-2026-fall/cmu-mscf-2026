@@ -4,7 +4,8 @@
 factor traded by every holds x neutral spec, a pure function of a factor tree and the
 search panel. `PanelPool` runs those side by side:
 
-- **The panel is shared once.** The parent pickles it into `<workdir>/.parallel/` and each
+- **The panel is shared once.** The parent pickles it into its own directory under
+  `<workdir>/.parallel/` (so two pools on one workdir never share a file) and each
   worker loads it on its first task (one copy per worker process, `_worker_panel`).
 - **Workers compute, the parent writes.** A worker returns a factor's `FactorOutcome`; the
   parent records the variant rows, logs the trials and builds the frames in the trees'
@@ -24,6 +25,7 @@ from __future__ import annotations
 
 import pickle
 import shutil
+import tempfile
 from concurrent.futures.process import BrokenProcessPool
 from contextlib import ExitStack
 from pathlib import Path
@@ -33,7 +35,7 @@ from capstone.pipeline import executor
 
 __all__ = ["STAGING", "EvaluationWorkerError", "PanelPool", "panel_mb", "workers"]
 
-STAGING = ".parallel"  # under the workdir: the pickled panel, removed when the pool closes
+STAGING = ".parallel"  # under the workdir: a directory per pool, removed when the pool closes
 PANEL_FILE = "panel.pkl"
 PANEL_COPIES = 3  # per worker: the loaded panel plus a factor's signal and traded frames
 
@@ -98,7 +100,8 @@ class PanelPool:
     def __init__(self, panel: Panel, workers: int, workdir: str | Path):
         self.panel = panel
         self.workers = max(executor.INLINE, int(workers))
-        self.staging = Path(workdir) / STAGING
+        self.staging = Path(workdir) / STAGING  # holds one directory per open pool
+        self._dir: Path | None = None
         self._path: str | None = None
         self._pool = None
         self._stack = ExitStack()
@@ -109,15 +112,22 @@ class PanelPool:
 
     def __enter__(self) -> PanelPool:
         if self.parallel:
-            shutil.rmtree(self.staging, ignore_errors=True)  # a killed run's leftovers
-            self.staging.mkdir(parents=True)
-            path = self.staging / PANEL_FILE
+            self.staging.mkdir(parents=True, exist_ok=True)
+            self._dir = Path(tempfile.mkdtemp(prefix="pool-", dir=self.staging))  # its own
+            path = self._dir / PANEL_FILE
             with open(path, "wb") as handle:
                 pickle.dump(self.panel, handle, protocol=pickle.HIGHEST_PROTOCOL)
             self._path = str(path)
-            self._stack.callback(shutil.rmtree, self.staging, True)
+            self._stack.callback(self._unstage)
             self._pool = self._stack.enter_context(executor.process_pool(self.workers))
         return self
+
+    def _unstage(self) -> None:
+        shutil.rmtree(self._dir, ignore_errors=True)
+        try:
+            self.staging.rmdir()  # only once no other pool is staged under it
+        except OSError:
+            pass
 
     def __exit__(self, *exc_info) -> bool:
         self._pool = None
