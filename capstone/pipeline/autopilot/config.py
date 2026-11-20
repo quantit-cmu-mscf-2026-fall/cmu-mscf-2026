@@ -2,20 +2,21 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-AUTO = 0  # a resources value of 0 means "size it from the machine"
+AUTO = 0
 REQUIRED = object()
 KINDS = {
     "str": str,
     "int": int,
     "float": (int, float),
     "bool": bool,
-    "path": str,  # resolved against the config file's folder
+    "path": str,
     "list": list,
     "table": dict,
 }
@@ -49,8 +50,6 @@ CORE = {
         "bool", False, "without it a stage gets only an injected (fake) model client"
     ),
 }
-# Model-spend ceilings: owned by the core. The values are the caller's; the defaults allow
-# no calls at all, and nothing in this module enforces a number (a spend guard reads them).
 SPEND_SECTION = "spend"
 SPEND = {
     "run_ceiling": Key("int", 0, "per-run call ceiling over every spend scope; 0 = no calls"),
@@ -62,8 +61,6 @@ SPEND = {
         "list", [], "other run roots outside `runs_dir`, also counted toward the global ceiling"
     ),
 }
-# Owned by the core, read by whatever sizes worker pools. Not frozen and not part of any
-# stage's identity: no output depends on the worker count.
 RESOURCES_SECTION = "resources"
 RESOURCES = {
     "max_workers": Key(
@@ -82,9 +79,9 @@ class ConfigError(ValueError):
 @dataclass(frozen=True)
 class Config:
     path: Path
-    sections: dict  # section name -> validated values
-    section_of: dict  # stage name -> section name
-    legacy: dict = field(default_factory=dict)  # section -> {key: (default, legacy default)}
+    sections: dict
+    section_of: dict
+    legacy: dict = field(default_factory=dict)
 
     @property
     def core(self):
@@ -125,7 +122,7 @@ def _section(name, raw, schema, base, errors):
             if spec.default is REQUIRED:
                 errors.append(f"[{name}] missing required key {key!r}")
             else:
-                values[key] = spec.default
+                values[key] = copy.deepcopy(spec.default)
             continue
         value = raw[key]
         wrong = not isinstance(value, KINDS[spec.kind]) or (
@@ -161,12 +158,15 @@ def validate(raw, stages, *, extra=None, path="autopilot.toml"):
     }
     core, spend = sections[CORE_SECTION], sections[SPEND_SECTION]
     if core.get("real_model_calls") is True and spend.get("runs_dir") is None:
-        # With real calls the global ceiling must count every other run; without a
-        # discovered runs folder it would count only the listed roots.
         errors.append(
             "[spend] runs_dir is required when [autopilot] real_model_calls = true "
             "(the folder holding every run root, so the global ceiling counts them)"
         )
+    for key, value in sections[SPEND_SECTION].items():
+        if key.endswith("_ceiling") and value < 0:
+            errors.append(f"[{SPEND_SECTION}] {key} must be >= 0 (0 = no calls)")
+    if sections[CORE_SECTION].get("max_crashes", 1) < 1:
+        errors.append(f"[{CORE_SECTION}] max_crashes must be >= 1")
     for key, value in sections[RESOURCES_SECTION].items():
         if isinstance(value, int) and value < AUTO:
             errors.append(f"[{RESOURCES_SECTION}] {key} must be >= {AUTO} (0 = auto)")
@@ -184,6 +184,6 @@ def load(path, stages, *, extra=None):
     path = Path(path)
     try:
         raw = tomllib.loads(path.read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError) as error:
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
         raise ConfigError(f"{path}: {error}") from error
     return validate(raw, stages, extra=extra, path=path)

@@ -34,16 +34,13 @@ from capstone.pipeline import model_key
 from capstone.pipeline.autopilot import config as config_module
 
 STATUSES = ("ok", "missing", "wrong", "skipped")
-TODO = "TODO(person):"  # a marker: the text after the colon says what to choose
+TODO = "TODO(person):"
 SCHEMA = "autopilot-preflight-v1"
 REPORT = "preflight.json"
 REGISTRY_FILE = Path("deploy") / "strategies.yml"
-# Path keys a run creates itself: their parent folder only has to exist.
 CREATED = {("autopilot", "run_root")}
-# Path keys with a row of their own below.
 OWN_ROWS = {("autopilot", "checkout"), ("autopilot", "input_archive")}
 
-# code -> how to fix it (one line). Every row's code is one of these.
 CODES = {
     "ok": "nothing to do",
     "config_unreadable": "write the file from `autopilot init`, or fix the TOML syntax",
@@ -214,15 +211,12 @@ def _spend(checks, config, env):
     else:
         mode = "real model calls" if real else "no model calls (real_model_calls = false)"
         checks.ok("spend", f"{mode}; run_ceiling {section['run_ceiling']}")
-    if not real:  # the key is not looked at while model calls are off
+    if not real:
         checks.skip("api_key", "model calls are off (real_model_calls = false)")
     elif model_key.key_state(env) == "SET":
         checks.ok("api_key", "the key variable is SET")
     else:
         checks.add("api_key", "missing", "api_key_unset", "the key variable is UNSET")
-
-
-# the command
 
 
 def report_path(config_path, config=None):
@@ -282,7 +276,7 @@ def main(args, stages=(), extra=None):
         print(row.line())
     report = document(rows)
     target = report_path(args.config, config)
-    if config is not None or target.parent.is_dir():  # under the run root, or beside the config
+    if config is not None or target.parent.is_dir():
         _write_json(target, report)
     failed = report["failed"]
     summary = f"preflight: {len(rows)} checks, {len(failed)} required not ok; report {target}"

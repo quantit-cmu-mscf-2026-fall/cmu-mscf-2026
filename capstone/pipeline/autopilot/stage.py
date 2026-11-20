@@ -19,8 +19,8 @@ class StageResult:
     records their sha256 and STOPs if one later changes); `data` is small JSON that
     downstream stages read with `ctx.data(<stage>)`."""
 
-    status: str = "done"  # done | blocked | stopped
-    code: str | None = None  # required unless done; declared in Stage.reasons
+    status: str = "done"
+    code: str | None = None
     detail: str = ""
     artifacts: tuple = ()
     data: Mapping[str, Any] = field(default_factory=dict)
@@ -48,7 +48,7 @@ class Stage:
     unit: str
     run: Callable[[Context], StageResult]
     depends_on: tuple[str, ...] = ()
-    section: str | None = None  # default: the stage name
+    section: str | None = None
     schema: Mapping[str, Any] = field(default_factory=dict)
     reasons: Mapping[str, ReasonSpec] = field(default_factory=dict)
     recurring: bool = False
@@ -68,8 +68,8 @@ class Stage:
 class Context:
     """What a stage (or an ops hook, with `stage=None`) sees."""
 
-    config: Any  # config.Config
-    journal: Any  # journal.Journal
+    config: Any
+    journal: Any
     stage: str | None = None
     services: Mapping[str, Any] = field(default_factory=dict)
 
