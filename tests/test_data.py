@@ -1,5 +1,3 @@
-"""Tests for capstone.data. Network-marked tests skip cleanly offline."""
-
 from __future__ import annotations
 
 import pandas as pd
@@ -65,7 +63,6 @@ def test_load_ff5_momentum_columns_and_decimal_units():
 
     assert list(frame.columns) == FF5_MOMENTUM_COLUMNS
     assert frame["Mom"].notna().any()
-    # Percent-scaled daily factors would routinely exceed 1.0 in absolute value.
     assert (frame.abs().max() < 1.0).all()
 
 
@@ -99,6 +96,10 @@ def test_load_ff5_momentum_spans_only_the_overlap():
     assert frame.index.isin(mom.index).all()
 
 
+MOM_ONLY_DATE = "1963-06-28"
+FF5_ONLY_DATE = "1963-07-03"
+MOM_MISSING_CODE_DATE = "1963-07-02"
+
 _FAKE_FRENCH = {
     "F-F_Research_Data_5_Factors_2x3_daily_CSV.zip": (
         "notes\n\n,Mkt-RF,SMB,HML,RMW,CMA,RF\n"
@@ -119,12 +120,21 @@ def test_load_ff5_momentum_inner_joins_on_date_offline(monkeypatch, tmp_path):
     frame = load_ff5_momentum(use_cache=False)
 
     assert list(frame.columns) == FF5_MOMENTUM_COLUMNS
-    # 1963-06-28 is Mom-only and 1963-07-03 is FF5-only; both are dropped.
-    assert list(frame.index) == list(pd.to_datetime(["1963-07-01", "1963-07-02"]))
+    assert pd.Timestamp(MOM_ONLY_DATE) not in frame.index
+    assert pd.Timestamp(FF5_ONLY_DATE) not in frame.index
+    assert list(frame.index) == list(pd.to_datetime(["1963-07-01", MOM_MISSING_CODE_DATE]))
     assert frame.loc["1963-07-01", "Mom"] == pytest.approx(0.0055)
     assert frame.loc["1963-07-01", "Mkt-RF"] == pytest.approx(-0.0067)
-    # The -99.99 sentinel becomes NaN, not a -99.99% return.
-    assert pd.isna(frame.loc["1963-07-02", "Mom"])
+
+
+def test_load_ff5_momentum_french_missing_code_becomes_nan_offline(monkeypatch, tmp_path):
+    monkeypatch.setattr(data, "CACHE_DIR", tmp_path)
+    monkeypatch.setattr(data, "_download_french_csv", _FAKE_FRENCH.__getitem__)
+
+    frame = load_ff5_momentum(use_cache=False)
+
+    assert pd.isna(frame.loc[MOM_MISSING_CODE_DATE, "Mom"])
+    assert frame.loc[MOM_MISSING_CODE_DATE, "Mkt-RF"] == pytest.approx(0.0079)
 
 
 def test_rf_is_in_the_loader_output_but_not_a_regressor(monkeypatch, tmp_path):
