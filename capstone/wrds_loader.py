@@ -26,11 +26,20 @@ synthetic six-month panel, so you can build and test the whole pipeline first.
 
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 
 import pandas as pd
 
+from capstone.holdout_authority import (
+    HoldoutSealed,
+    guard_enabled,
+    require_discovery_query,
+)
+
 CACHE_DIR = Path(__file__).resolve().parent.parent / "data_cache"
+WRDS_HOST = "wrds-pgdata.wharton.upenn.edu"
 
 # CRSP share codes 10 and 11 = ordinary common shares of US-incorporated firms.
 # Without this filter you silently pull in ADRs, REITs, closed-end funds and
@@ -40,17 +49,119 @@ COMMON_SHARE_CODES = (10, 11)
 # Exchange codes 1/2/3 = NYSE / AMEX / NASDAQ.
 MAJOR_EXCHANGES = (1, 2, 3)
 
+# Date-bounded S&P 500 membership join, as documented on the WRDS "S&P 500 Data"
+# page. Bounding on the spell dates is what makes it point-in-time: a name that
+# left the index in 2014 contributes rows only through 2014. Selecting the same
+# permnos with an IN-list would pull their full history and quietly readmit them
+# to the universe for every year after they left.
+_SP500_JOIN = """join crsp.dsp500list as s
+          on {alias}.permno = s.permno
+         and {date_col} >= s.start
+         and {date_col} <= coalesce(s.ending, current_date)"""
+
+# --- CIZ (the _v2 family) ---------------------------------------------------
+#
+# CRSP's newer CIZ layout replaces the legacy SIZ tables, and it matters for a
+# blunt reason: on CMU's subscription legacy stops at 2024-12-31 while CIZ runs
+# to 2025-12-31, so anything built on `crsp.dsf` is quietly a year stale.
+#
+# CIZ drops the numeric shrcd/exchcd codes for named classification columns
+# carried inline on the daily file, which removes the `dsenames` join entirely.
+# These values were verified against legacy rather than taken from a mapping
+# table: on 2020-06-30, every security with shrcd in (10, 11) and exchcd in
+# (1, 2, 3) carried exactly this combination.
+#
+# All four parts are load-bearing. On that same day, relaxing `issuertype` would
+# admit 2,434 funds and 184 REITs, and relaxing `sharetype` a further 393 ADRs.
+CIZ_COMMON_SHARE = {
+    "sharetype": "NS",  # no special status (excludes ADRs, units, trackers)
+    "securitytype": "EQTY",  # equity, not fund or debt
+    "issuertype": "CORP",  # ordinary corporation (excludes REIT, ACOR)
+    "usincflg": "Y",  # US-incorporated
+}
+
+# Primary exchange letters, the CIZ spelling of NYSE / AMEX / NASDAQ.
+CIZ_MAJOR_EXCHANGES = ("N", "A", "Q")
+
+# Legacy name -> CIZ name. Aliasing in the SELECT means callers of the tidy
+# frame cannot tell which table family produced it.
+CIZ_COLUMN_ALIASES = {
+    "date": "dlycaldt",
+    "openprc": "dlyopen",
+    "askhi": "dlyhigh",
+    "bidlo": "dlylow",
+    "prc": "dlyprc",
+    "ret": "dlyret",
+    "vol": "dlyvol",
+    "cfacpr": "dlycumfacpr",
+    "cfacshr": "dlycumfacshr",
+}
+
+# Same shape, against the CIZ membership table.
+# How far before `delistingdt` a permno's last admitted price row may sit for
+# its delisting return to be kept: a week of trading days, with holidays.
+DELIST_MAX_GAP = pd.Timedelta(days=10)
+
+_SP500_JOIN_CIZ = """join crsp.dsp500list_v2 as s
+          on v.permno = s.permno
+         and v.dlycaldt >= s.mbrstartdt
+         and v.dlycaldt <= coalesce(s.mbrenddt, current_date)"""
+
 
 def _cache_path(name: str) -> Path:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     return CACHE_DIR / f"{name}.parquet"
 
 
+def pgpass_path() -> Path:
+    """Where the PostgreSQL driver keeps saved passwords on this machine."""
+    if os.environ.get("PGPASSFILE"):
+        return Path(os.environ["PGPASSFILE"])
+    if sys.platform == "win32":
+        return Path(os.environ.get("APPDATA", "")) / "postgresql" / "pgpass.conf"
+    return Path.home() / ".pgpass"
+
+
+def _pgpass_fields(line: str) -> list[str]:
+    """Split a pgpass line on ':', honouring the format's '\\:' and '\\\\' escapes."""
+    fields, current, chars = [], "", iter(line)
+    for ch in chars:
+        if ch == "\\":
+            current += next(chars, "")
+        elif ch == ":":
+            fields.append(current)
+            current = ""
+        else:
+            current += ch
+    return [*fields, current]
+
+
+def wrds_username(explicit: str | None = None) -> str | None:
+    """The WRDS username: `explicit`, else $WRDS_USERNAME, else the pgpass file.
+
+    The pgpass file's fourth field is the username, so scripts never need it
+    on the command line, where it would land in shell history and session logs.
+    """
+    if explicit:
+        return explicit
+    if os.environ.get("WRDS_USERNAME"):
+        return os.environ["WRDS_USERNAME"]
+    path = pgpass_path()
+    if not path.exists():
+        return None
+    for line in path.read_text().splitlines():
+        fields = _pgpass_fields(line)
+        if len(fields) >= 4 and not line.startswith("#") and fields[0] in (WRDS_HOST, "*"):
+            return fields[3] or None
+    return None
+
+
 def connect(username: str | None = None):
     """Open a WRDS connection, with an actionable error if the package is absent.
 
-    Kept as a thin wrapper so the import of `wrds` stays lazy: the rest of this
-    kit must import cleanly for someone who has no WRDS account at all.
+    The username comes from `wrds_username()` when not given. Kept as a thin
+    wrapper so the import of `wrds` stays lazy: the rest of this kit must
+    import cleanly for someone who has no WRDS account at all.
     """
     try:
         import wrds
@@ -60,6 +171,7 @@ def connect(username: str | None = None):
             "capstone.sample_data.load_sample_prices() to work without WRDS."
         ) from exc
 
+    username = wrds_username(username)
     return wrds.Connection(wrds_username=username) if username else wrds.Connection()
 
 
@@ -69,12 +181,22 @@ def crsp_daily(
     end: str,
     *,
     permnos: list[int] | None = None,
+    sp500_only: bool = False,
     share_codes: tuple[int, ...] = COMMON_SHARE_CODES,
     exchanges: tuple[int, ...] = MAJOR_EXCHANGES,
 ) -> pd.DataFrame:
     """Daily CRSP prices and returns for a date range, as a tidy frame.
 
+    Prefer `crsp_daily_ciz`: these legacy tables stop a year earlier.
+
     Returns columns [date, permno, ticker, prc, ret, vol, shrout, cfacpr].
+
+    `sp500_only` restricts the pull to index members, joined on the membership
+    spell so each name appears only for the dates it actually belonged. Prefer
+    it for index research: on a measured 2022-23 pull the unrestricted query
+    returns 4,742 securities where ~500 are wanted, roughly 10x the rows. The
+    wide pull stays the default because a cache of it can be re-filtered to any
+    universe definition without going back to WRDS.
 
     Two CRSP conventions bite everyone once:
 
@@ -89,6 +211,7 @@ def crsp_daily(
     (`crsp.dsenames`), which is time-varying: a company that changed listing is
     correctly included only for the period it qualified.
     """
+    require_discovery_query(end)
     where = [
         "d.date between %(start)s and %(end)s",
         f"n.shrcd in {tuple(share_codes)}",
@@ -100,14 +223,100 @@ def crsp_daily(
         where.append("d.permno in %(permnos)s")
         params["permnos"] = tuple(permnos)
 
+    membership_join = _SP500_JOIN.format(alias="d", date_col="d.date") if sp500_only else ""
     query = f"""
         select d.date, d.permno, n.ticker, d.prc, d.ret, d.vol,
                d.shrout, d.cfacpr
         from crsp.dsf as d
         join crsp.dsenames as n on d.permno = n.permno
+        {membership_join}
         where {" and ".join(where)}
     """
     frame = conn.raw_sql(query, params=params, date_cols=["date"])
+    return frame.sort_values(["date", "permno"]).reset_index(drop=True)
+
+
+def crsp_daily_ciz(
+    conn,
+    start: str,
+    end: str,
+    *,
+    permnos: list[int] | None = None,
+    sp500_only: bool = False,
+) -> pd.DataFrame:
+    """`crsp_daily` against the CIZ (`_v2`) tables, with legacy column names.
+
+    Prefer this over `crsp_daily`: on CMU's subscription the legacy tables stop
+    at 2024-12-31 and these run to 2025-12-31, so a legacy pull is silently a
+    year behind.
+
+    CIZ names are aliased back to `prc`, `ret`, `cfacpr` and friends in the
+    SELECT, so callers cannot tell which family produced the frame. It also
+    carries open/high/low and the delisting return, which the legacy query above
+    does not.
+
+    Two differences from legacy, both verified against the data rather than
+    assumed, because both corrupt silently if guessed wrong:
+
+    - Classification moved inline onto the daily file, so there is no `dsenames`
+      join. See `CIZ_COMMON_SHARE`.
+    - The delisting return sits on its own row. CIZ adds a row 1-7 days after
+      `delistingdt` with `dlydelflg == 'Y'`, `tradingstatusflg == 'D'` and
+      `dlyret` equal to `delret` (662 of 662 such rows in the 1990-2025 S&P 500
+      pull). That row carries `sharetype`/`securitytype` 'N/A' and
+      `primaryexch` 'X', so the classification filter below drops it. The
+      delisting return is therefore merged back from `stkdelists` as `dlret`,
+      on `delistingdt`, the last trading day, as in the legacy convention:
+      compound it with that day's `ret`, (1 + ret) * (1 + dlret) - 1. A delisting
+    row the merge adds on its own (no price row that day) has `ret` NaN, so
+    there the return is `dlret` alone: use `ret.fillna(0)` in the formula.
+    """
+    require_discovery_query(start)
+    require_discovery_query(end)
+    aliased = ", ".join(f"v.{source} as {legacy}" for legacy, source in CIZ_COLUMN_ALIASES.items())
+    classification = " and ".join(f"v.{col} = '{value}'" for col, value in CIZ_COMMON_SHARE.items())
+
+    where = [
+        "v.dlycaldt between %(start)s and %(end)s",
+        classification,
+        f"v.primaryexch in {CIZ_MAJOR_EXCHANGES}",
+    ]
+    params: dict[str, object] = {"start": start, "end": end}
+    if permnos:
+        where.append("v.permno in %(permnos)s")
+        params["permnos"] = tuple(permnos)
+
+    query = f"""
+        select {aliased}, v.permno, v.ticker, v.shrout
+        from crsp.dsf_v2 as v
+        {_SP500_JOIN_CIZ if sp500_only else ""}
+        where {" and ".join(where)}
+    """
+    frame = conn.raw_sql(query, params=params, date_cols=["date"])
+
+    # stkdelists carries no classification columns, so rather than reproduce the
+    # filter through another join we keep a delisting row only when the price
+    # pull admitted that permno up to (near) its delisting date. A permno match
+    # alone is not enough: a name that left the S&P 500, or stopped qualifying
+    # as common stock, and delisted years later would get an orphan row. The
+    # merge is outer so a delisting return survives even if its last trading
+    # day itself fell just outside the price rows pulled.
+    delist_query = """
+        select d.delistingdt as date, d.permno, d.delret as dlret
+        from crsp.stkdelists as d
+        where d.delistingdt between %(start)s and %(end)s
+          and d.delret is not null
+    """
+    delist = conn.raw_sql(delist_query, params={"start": start, "end": end}, date_cols=["date"])
+    last_admitted = pd.to_datetime(frame["date"]).groupby(frame["permno"]).max().to_dict()
+    near_last_admitted = [
+        permno in last_admitted and last_admitted[permno] >= day - DELIST_MAX_GAP
+        for day, permno in zip(pd.to_datetime(delist["date"]), delist["permno"], strict=True)
+    ]
+    delist = delist.loc[pd.Series(near_last_admitted, index=delist.index, dtype=bool)]
+    delist = delist.drop_duplicates(subset=["date", "permno"])
+
+    frame = frame.merge(delist, on=["date", "permno"], how="outer", validate="one_to_one")
     return frame.sort_values(["date", "permno"]).reset_index(drop=True)
 
 
@@ -134,12 +343,49 @@ def sp500_members(conn, start: str, end: str) -> pd.DataFrame:
     actually in it — which is the whole point. Building a universe from today's
     constituent list instead is the single most effective way to make a backtest
     look excellent for no reason.
+
+    A spell still running at `end` is clamped to `end`, so no row reaches past
+    the window asked for; `mbr_end_censored` marks those spells, whose true end
+    is unknown as of `end`. CRSP closes open spells at the table's last date
+    rather than leaving them NULL, so a spell is censored when it ends on or
+    after the earlier of `end` and that last date. A spell that really ended
+    on `end` cannot be told from an open one and is flagged too.
     """
+    require_discovery_query(end)
     query = """
-        select permno, start as mbr_start, ending as mbr_end
+        select permno, start as mbr_start,
+               case when ending > %(end)s then %(end)s::date else ending end as mbr_end,
+               ending >= least(
+                   %(end)s::date, (select max(ending) from crsp.dsp500list)
+               ) as mbr_end_censored
         from crsp.dsp500list
         where ending >= %(start)s and start <= %(end)s
     """
+    return _membership_frame(conn, query, start, end)
+
+
+def sp500_members_ciz(conn, start: str, end: str) -> pd.DataFrame:
+    """`sp500_members` against `crsp.dsp500list_v2`, same columns out (end clamp included).
+
+    A permno can hold SEVERAL spells — 11 do over 2010-2025 — because names
+    leave the index and later rejoin. Any membership check must test against
+    every spell, not against a single end date.
+    """
+    require_discovery_query(start)
+    require_discovery_query(end)
+    query = """
+        select permno, mbrstartdt as mbr_start,
+               case when mbrenddt > %(end)s then %(end)s::date else mbrenddt end as mbr_end,
+               mbrenddt >= least(
+                   %(end)s::date, (select max(mbrenddt) from crsp.dsp500list_v2)
+               ) as mbr_end_censored
+        from crsp.dsp500list_v2
+        where mbrenddt >= %(start)s and mbrstartdt <= %(end)s
+    """
+    return _membership_frame(conn, query, start, end)
+
+
+def _membership_frame(conn, query: str, start: str, end: str) -> pd.DataFrame:
     return conn.raw_sql(
         query,
         params={"start": start, "end": end},
@@ -154,10 +400,50 @@ def cached_crsp_daily(conn, start: str, end: str, *, name: str, **kwargs) -> pd.
     Cache aggressively while iterating; delete the file to refresh. The cache
     lives in data_cache/, which is gitignored — CRSP data must not enter the
     public repository.
+
+    Both the universe scope AND the table family are part of the cache key.
+    Without that, a scoped and a wide pull under one `name` would silently serve
+    each other's rows, and so would a legacy and a CIZ pull — which differ by a
+    year of history. A cache that returns the wrong data is worse than none.
+
+    BOTH families carry an explicit suffix, including the default. Leaving CIZ
+    unsuffixed would put it on the bare `crsp_<name>` path that every pull
+    written before this change already occupies — so the new default would
+    silently serve year-stale legacy rows as if they were current. Caches
+    predating this change are simply never hit again, which is the right
+    outcome: they are legacy, and legacy is a year behind.
+
+    With the holdout guard on (`CAPSTONE_HOLDOUT_GUARD`), the query dates must end by
+    2020-12-31 and a cache hit is read with the dates as a parquet filter, so rows
+    past `end` that an earlier, wider pull left in the file never reach memory.
     """
-    path = _cache_path(f"crsp_{name}")
+    require_discovery_query(start)
+    require_discovery_query(end)
+    ciz = kwargs.pop("ciz", True)
+    scope = "_sp500" if kwargs.get("sp500_only") else ""
+    family = "_ciz" if ciz else "_siz"
+    path = _cache_path(f"crsp_{name}{scope}{family}")
     if path.exists():
-        return pd.read_parquet(path)
-    frame = crsp_daily(conn, start, end, **kwargs)
+        if not guard_enabled():
+            return pd.read_parquet(path)
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        with path.open("rb") as source:
+            schema = pq.ParquetFile(source).schema_arrow
+            if len(schema.get_all_field_indices("date")) != 1:
+                raise HoldoutSealed("cached CRSP needs one authoritative date column")
+            kind = schema.field("date").type
+            if not (pa.types.is_date(kind) or (pa.types.is_timestamp(kind) and kind.tz is None)):
+                raise HoldoutSealed("cached CRSP date schema is not bounded timezone-naive dates")
+            bounds = [pd.Timestamp(start), pd.Timestamp(end)]
+            if pa.types.is_date(kind):
+                bounds = [value.date() for value in bounds]
+            source.seek(0)
+            return pq.read_table(
+                source, filters=[("date", ">=", bounds[0]), ("date", "<=", bounds[1])]
+            ).to_pandas()
+    puller = crsp_daily_ciz if ciz else crsp_daily
+    frame = puller(conn, start, end, **kwargs)
     frame.to_parquet(path)
     return frame

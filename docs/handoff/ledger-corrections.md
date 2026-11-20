@@ -2,8 +2,8 @@
 
 ## 1. What this PR adds
 - QUANTIT-112. `runlog.trial_count` and `python -m capstone.runlog stats` apply
-  ledger corrections: a later entry named `ledger-correction` lists runs that
-  are not trials. Nothing is deleted from the ledger.
+  ledger corrections: a later entry named `ledger-correction` can exclude
+  unseen runs from the count. Seen results always count. Nothing is deleted.
 - Code: `capstone/runlog.py` (`CORRECTION_NAME`, `_Corrections`,
   `trial_count`, `_cmd_stats`). Tests: `tests/test_runlog.py`. Docs: one
   paragraph in `docs/validation/handoff.md`.
@@ -11,10 +11,11 @@
   evaluation's own counter (#78's refresh does that).
 
 ## 2. Contract
-- An item `{"ts_utc": ..., **params}` excludes the run logged under
+- An item `{"ts_utc": ..., **params}` targets one run logged under
   `ledger_name` at that `ts_utc`, *before the correction*, whose params hold
   every other key with the same JSON value (`1` does not match `true`). The
-  correction entry is never a trial.
+  correction entry is never a trial. Each item consumes one earlier matching
+  entry; two identical ledger lines require two items to target both.
 - `params.reason` is required: a non-empty string.
 - A correction is undone by a later entry `{"retracts": [<ts_utc of earlier
   corrections>], "reason": ...}`. A retraction can be retracted in turn. The
@@ -24,10 +25,12 @@
   `excludes` not a list, an item without a string `ts_utc`, a bad `retracts`,
   both kinds in one entry) raises `ValueError` naming the file and line. Zero
   trials after corrections still raises `LookupError`.
-- A run with recorded `metrics` may have had its result seen. `trial_count`
-  warns when a correction drops one; `count_seen_exclusions=True` counts it.
-  `stats` prints `excluded by corrections`, how many were seen, the trial
-  count if seen exclusions were counted, and exclusions per name.
+- A run with non-empty `metrics` may have had its result seen and always
+  remains a trial, even when targeted by a correction. `trial_count` defaults
+  to this conservative count; the existing `count_seen_exclusions=True`
+  argument is accepted, while False raises `ValueError`. `stats` reports the
+  same count and per-name totals, correction targets, excluded unseen runs,
+  and seen targets retained as trials. Family and tag filters still apply.
 
 ## 3. How it was vetted
 
@@ -45,10 +48,9 @@
 - Matching is exact on `ts_utc` and on each named param's JSON value.
 - "Seen" is a heuristic: the run logged non-empty `metrics`.
 - A correction that matches no run is not an error; `stats` counts such items.
-- Whether a run whose result was seen may be excluded at all is an open team
-  policy question. The code does not decide it: exclusions are honoured but
-  warned about, and the stricter count is available.
-- Reviewer checklist: the matching rule in `_is_trial`; that `stats` and
+- No attempt is made to infer whether a result without recorded metrics was
+  seen elsewhere; recording results truthfully remains the caller's duty.
+- Reviewer checklist: the matching rule in `_Corrections`; that `stats` and
   `trial_count` agree; the error message for a malformed correction.
 
 ## 6. Public-repo safety

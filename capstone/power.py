@@ -72,7 +72,9 @@ __all__ = [
     "plant",
     "planted_side",
     "planted_sides",
+    "for_gate",
     "power_analysis",
+    "spec_for_gate",
 ]
 
 Stage = Literal["stage1", "stage2", "stage3", "stage4"]
@@ -106,7 +108,8 @@ class PowerSpec:
     the mean by the stated Sharpe whatever is switched on. The defaults (none)
     are the cross-correlated Gaussian world. Power measured only on that world
     flatters the gate: iid-over-time data is where HAC and bootstrap p-values
-    look best.
+    look best. idle_share / idle_run: days a family holds no position (NaN
+    returns), `calibration.make_family_set`'s; the default is none.
     """
 
     variants: Sequence[int] | int  # stored as a tuple
@@ -121,6 +124,8 @@ class PowerSpec:
     ar1: float = 0.0
     t_df: float | None = None
     garch: tuple[float, float] | None = None
+    idle_share: float = 0.0
+    idle_run: float = 21.0
 
     def __post_init__(self) -> None:
         v = self.variants
@@ -163,6 +168,15 @@ class PowerSpec:
             if len(garch) != 2 or min(garch) < 0 or sum(garch) >= 1:
                 raise ValueError(f"garch needs (alpha, beta) >= 0 with alpha + beta < 1: {garch}")
             object.__setattr__(self, "garch", garch)
+        if not 0.0 <= self.idle_share < 1.0 or not self.idle_run >= 1.0:
+            raise ValueError(
+                f"need idle_share in [0, 1) and idle_run >= 1, "
+                f"got {self.idle_share} and {self.idle_run}"
+            )
+        if self.idle_share / (self.idle_run * (1.0 - self.idle_share)) > 1.0:
+            raise ValueError(
+                f"idle_share {self.idle_share} needs idle runs longer than {self.idle_run} days"
+            )
 
     @classmethod
     def from_years(cls, *, search_years: float, holdout_years: float, **kwargs) -> PowerSpec:
@@ -204,6 +218,8 @@ def null_world(spec: PowerSpec, seed: int) -> FamilySet:
         0.0,
         within_rho=spec.within_rho,
         **spec.defects,
+        idle_share=spec.idle_share,
+        idle_run=spec.idle_run,
         n_search=spec.search_periods,
         n_holdout=spec.holdout_periods,
         seed=seed,
@@ -477,3 +493,67 @@ def power_analysis(spec: PowerSpec, budget: PowerBudget | None = None) -> PowerR
         end_to_end_mds50=_crossing(grid, hits, 0.5),
         end_to_end_mds80=_crossing(grid, hits, 0.8),
     )
+
+
+def spec_for_gate(
+    *,
+    thresholds: Thresholds,
+    n_boot: int,
+    search: pd.DataFrame,
+    family: pd.Series,
+    holdout_periods: int,
+    n_trials: int,
+) -> PowerSpec:
+    """A gate run's `PowerSpec`: its thresholds, bootstrap, family sizes,
+    search length and holdout days, and the correlations on its search period
+    (within: each family's average pairwise correlation, averaged over
+    families of 2+ variants; across: over pairs from different families).
+
+    Stage 3 is not modelled here (it is reported as no gate, as in
+    `power_analysis`).
+    """
+    missing = [c for c in search.columns if c not in family.index]
+    if missing:
+        raise ValueError(
+            f"family has no label for {len(missing)} search column(s): {missing[:5]}"
+            + (" ..." if len(missing) > 5 else "")
+        )
+    codes, names = pd.factorize(family.reindex(search.columns))
+    corr = search.corr().to_numpy()
+    same = codes[:, None] == codes[None, :]
+    across = np.nanmean(corr[~same]) if (~same).any() else 0.0
+    across = float(np.clip(np.nan_to_num(across), 0.0, 0.99))
+    off_diagonal = same & ~np.eye(len(codes), dtype=bool)
+    counts = np.bincount(codes, minlength=len(names))
+    within = [np.nanmean(corr[off_diagonal & (codes == c)]) for c in np.flatnonzero(counts > 1)]
+    within_corr = float(np.nanmean(within)) if within else across
+    return PowerSpec(
+        thresholds=thresholds,
+        variants=tuple(int(k) for k in counts),
+        within_corr=float(np.clip(np.nan_to_num(within_corr, nan=across), across, 1.0)),
+        across_corr=across,
+        search_periods=len(search),
+        holdout_periods=holdout_periods,
+        n_boot=n_boot,
+        n_trials=n_trials,
+    )
+
+
+def for_gate(
+    config, search: pd.DataFrame, family: pd.Series, n_trials: int, budget: PowerBudget
+) -> tuple[MinDetectableSharpe, ...]:
+    """The gate header's `min_detectable_sharpe` for a `gate.GateConfig` and its
+    search period (the holdout's length: its business days).
+
+    Reported only: it reads the registered config and the search period, logs
+    nothing and changes no decision. Simulated worlds are seeded by `budget`.
+    """
+    spec = spec_for_gate(
+        thresholds=config.thresholds,
+        n_boot=config.n_boot,
+        search=search,
+        family=family,
+        holdout_periods=len(pd.bdate_range(config.holdout_start, config.holdout_end)),
+        n_trials=n_trials,
+    )
+    return power_analysis(spec, budget).min_detectable_sharpe()

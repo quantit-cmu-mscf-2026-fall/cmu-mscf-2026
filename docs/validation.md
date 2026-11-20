@@ -161,6 +161,9 @@ all of it predates the cutoff. The split (decided 2026-10-05):
 | Search | 1990-01-02 to 2020-12-31 | Agents and stages 1-3 |
 | Holdout | 2021-01-01 to 2025-12-31 | The final stage only, looked at once |
 
+The holdout's first day is `capstone.gate.HOLDOUT_OPENS`: the gate refuses a
+real-data config whose search period reaches it.
+
 Five years rather than three because at 95% confidence (normal returns) an
 annual Sharpe of 1.0 needs about 2.7 years to tell from zero, 0.75 about 4.8
 and 0.5 about 11: five years can confirm 0.75 and up, three only about 1 and
@@ -176,17 +179,34 @@ estimated effective spread from CRSP times turnover, fixed before scoring.
 
 **Stage 3 comparison set.**
 
-- *Known factors:* Fama–French five factors plus momentum, from Ken French's
-  library (`load_french`; the momentum file still needs adding).
+- *Known factors (V-21):* the **daily** Fama–French five factors plus
+  momentum from Ken French's library, the same frequency as the candidate
+  returns. `capstone.data.load_ff5_momentum()` inner-joins the daily FF5 (2x3)
+  and Momentum files on date, so it covers only days present in both (FF5
+  starts 1963-07-01). Values are decimal returns; the library's `-99.99` /
+  `-999` missing-value codes become `NaN`.
+- *RF is returned, not regressed on.* The loader's columns are `Mkt-RF`,
+  `SMB`, `HML`, `RMW`, `CMA`, `RF`, `Mom`; the regressors are
+  `capstone.data.FF5_MOMENTUM_REGRESSORS`, the same list without `RF`. `RF`
+  is there to turn a raw return into an excess return: dollar-neutral
+  long-short candidates (the `backtest` default, `demean=True`) already are
+  one, while a long-only series needs `RF` subtracted before the regression.
+- *Why `capstone/data.py`, not `shared_data`:* Ken French data is public and
+  freely redistributable, so it uses the public-data loader, which downloads
+  and caches locally. `capstone.shared_data` is reserved for the licensed
+  CRSP/Compustat pull (`docs/shared_data.md`).
 - *Known signals:* the Chen & Zimmermann open-source anomaly portfolios (over
   200 published signals), plus any signal we already hold. An agent that has
   read the literature tends to rediscover published anomalies, and those earn
   about half as much after publication (McLean & Pontiff 2016). Adding value
   beyond this set is the test of novelty.
 
-Stage 3's frequency is an open decision for its owner: the anomaly portfolios
-are monthly, while #75 proposes daily factors to match the candidate returns.
-α₃ is chosen and calibrated only once the frequency is settled.
+Stage 3 will run at daily frequency against the factors above; α₃ is chosen
+and calibrated for that test once stage 3 is built. The Chen & Zimmermann
+portfolios are monthly and
+will be considered later, as a separate decision. The alpha regression itself
+(estimator, standard errors) belongs to `spanning`
+([`validation/incremental-value.md`](validation/incremental-value.md)).
 
 **Calibration range for the share of real candidates.** Start at 0 to 5% for
 agent-generated candidates. Harvey & Liu (2020) use up to 20% for a curated
@@ -208,12 +228,68 @@ backtest upward, and no method in this document can correct it.
 | `bootstrap` | stationary bootstrap, block-length selection | planned |
 | `snooping` | White's Reality Check, Romano–Wolf step-down | planned |
 | `cv` | purged k-fold with embargo (from the Alpha-GPT work), walk-forward | planned |
-| `pbo` | CSCV / probability of backtest overfitting | planned |
+| `pbo` | CSCV / probability of backtest overfitting | done |
 | `spanning` | incremental value over known factors and accepted signals | planned |
-| `evaluate` | Harvey–Liu haircut Sharpe | planned |
+| `evaluate` | `haircut_sharpe`: Harvey–Liu haircut (their reference code), ledger trial count | done |
 | `search_fdr` | search-adjusted p-value for a hypothesis's best of K variants: block bootstrap of the family maximum (`bootstrap_family_pvalues`, from Carl's branch), or exact for independent or equicorrelated variants (`rho=`); search-adjusted FDR (López de Prado & Fabozzi 2026); max-of-mixture fit over assumed K, a sensitivity table, not a gate | done |
-| `gate` | staged, pre-registered scorecard; trial count from the ledger; holdout looked at once | planned |
+| `grading` | the gate's graded scores (BY, Holm, local FDR, PSR, MinTRL, haircut Sharpe with the ledger trial count), batch diagnostics and the expected mean: reported, never read back into a decision | done |
+| `gate` | staged, pre-registered scorecard; trial count from the ledger; holdout looked at once, with a named authorizer; stage 3 not yet measured | done |
 
 Already in `evaluate`: `benjamini_hochberg`, `bonferroni`,
 `deflated_sharpe_ratio`, `expected_max_sharpe`, and `false_discovery_rate` /
 `power` for scoring a selection rule against known truth.
+
+## Reading the haircut Sharpe
+
+Notes from QUANTIT-51 and QUANTIT-52 (Pin-Hua).
+
+**The haircut Sharpe is a graded score, not a gate** (stage 4 in
+`validation/framework.md`; the gate there is BH across the survivors). The trial
+count comes from `runlog.trial_count()`, and an empty ledger raises rather than
+quietly applying no haircut. Estimate the returns' lag-1 autocorrelation and
+pass it as `autocorrelation`: the default assumes none, which on autocorrelated
+returns lets a no-skill winner through far above the level.
+
+`haircut_sharpe` follows **Harvey & Liu's own reference code**
+([`Haircut_SR.m`, `sample_random_multests.m`](https://people.duke.edu/~charvey/backtesting/)),
+not a reading of the paper, because the two differ in ways that change the
+number. `scripts/haircut_reference.py` is a literal transcription of those two
+files and is the oracle the tests compare against.
+
+What the authors do, and what it costs us:
+
+- **Two-sided p-values on a t distribution** with N−1 degrees of freedom for the
+  reported Sharpe, and on a *normal* for the simulated trials. There is no
+  one-sided option, so the haircut is the one place in this module that does not
+  screen on `pvalue_greater`.
+- **Everything is converted to months, and a daily year is 360 days.** This
+  contradicts the `periods_per_year=252` convention every other function here
+  uses. It is confined to `haircut_sharpe`, documented there, and a test pins
+  `sharpe_pvalue` at 252 so nobody "tidies up" the inconsistency in the wrong
+  direction. Pass `n_obs` in the units named by `frequency`.
+- **The unreported trials are simulated, not assumed away**, from the Harvey,
+  Liu & Zhu (2014) empirical p-value distribution selected by
+  `avg_correlation`. Holm and BHY are computed on each simulated family and the
+  **median** over `n_simulations` repetitions is taken, so the result is
+  stochastic — fix `seed` to reproduce it. Measured spread across 30 seeds: sd
+  ≤ 0.0003 (Holm), ≤ 0.0045 (BHY) in Sharpe units.
+- **The trial count is split, and the split is not cosmetic.** `n_trials` is the
+  ledger's total, *including* the strategy being haircut. The authors' `num_test`
+  (their `M`) is the number of **other** trials, so `num_test = n_trials - 1`.
+  Their own code is inconsistent about which to use: **Bonferroni multiplies by
+  `num_test`**, while **Holm and BHY use a family of `num_test + 1 = n_trials`**,
+  and BHY's harmonic constant runs over that same `n_trials`. Both are
+  reproduced as written; `.attrs` records `n_trials` and `num_test` separately so
+  the convention in force is never in doubt.
+
+Reference agreement (ours vs. the transcription, seed 0, 2,000 repetitions):
+closed-form quantities — the monthly conversion, the p-value and everything
+Bonferroni — agree to floating-point precision; Holm and BHY agree to within
+0.006 in Sharpe units, against a test tolerance of 0.02.
+
+One result worth keeping in mind: **BHY is *less* strict than Bonferroni here**,
+which is the opposite of what the same two procedures do when the unreported
+trials are assumed away instead of simulated. An earlier draft of this function
+padded the family with NaN p-values, which put the reported strategy at rank 1
+and made BHY the *strictest* of the three — out by 12 percentage points of
+haircut on the same inputs. Simulating the family is what fixes it.

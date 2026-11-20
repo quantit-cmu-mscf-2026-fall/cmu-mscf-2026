@@ -1,0 +1,10 @@
+{
+  "name": "mscf-pipeline",
+  "version": "0.1.0",
+  "description": "Skills for the Quantit x CMU MSCF 2026 alpha-discovery and validation pipeline (cmu-mscf-2026): shared data, the run ledger, validation, null calibration and the research PR workflow",
+  "author": {
+    "name": "quantit-cmu-mscf-2026-fall"
+  },
+  "repository": "https://github.com/quantit-cmu-mscf-2026-fall/cmu-mscf-2026",
+  "keywords": ["quant", "validation", "multiple-testing", "crsp", "capstone"]
+}

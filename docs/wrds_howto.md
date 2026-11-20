@@ -84,26 +84,43 @@ listing file, `crsp.dsp500list` the S&P 500 membership spells.
 
 > **Most of the time you don't need this.** The team keeps a shared pull
 > (S&P 500 members 1990–2025 plus Compustat) that loads without a WRDS
-> connection: see `docs/shared_data.md`. Also note that `wrds_loader` reads the
-> legacy `crsp.dsf` table, which ends at 2024-12-31; newer data is only in the
-> CIZ tables (`crsp.dsf_v2`), which the shared pull uses.
+> connection: see `docs/shared_data.md`. For a pull of your own, `wrds_loader`
+> reads the CIZ tables (`crsp.dsf_v2`, through 2025-12-31) by default; pass
+> `ciz=False` for the legacy `crsp.dsf`, which ends at 2024-12-31. The delisting
+> return comes back as `dlret` on the last trading day, in the default CIZ pull
+> only (the `ciz=False` legacy pull has no `dlret` column): compound it with that
+> day's `ret`, or take `dlret` alone on a row where `ret` is NaN.
 
 ```python
 from capstone import wrds_loader
 
-conn = wrds_loader.connect("YOUR_WRDS_ID")
+conn = wrds_loader.connect()   # username from your pgpass file or $WRDS_USERNAME
 
 daily = wrds_loader.cached_crsp_daily(
-    conn, "2015-01-01", "2025-12-31", name="us_2015_2025"
+    conn, "2015-01-01", "2025-12-31", name="sp500_2015_2025", sp500_only=True
 )
 prices = wrds_loader.to_price_panel(daily)   # date x ticker
 
-members = wrds_loader.sp500_members(conn, "2015-01-01", "2025-12-31")
+members = wrds_loader.sp500_members_ciz(conn, "2015-01-01", "2025-12-31")
 conn.close()
 ```
 
+This window runs past 2020-12-31, so it is a data-maintainer pull only. With the
+holdout guard on (`CAPSTONE_HOLDOUT_GUARD`), `crsp_daily`, `crsp_daily_ciz`,
+`sp500_members`, `sp500_members_ciz` and `cached_crsp_daily` refuse any `start`
+or `end` after 2020-12-31 whatever your credentials are. Research sessions keep
+the guard on and use a window ending by 2020-12-31. The maintainer refreshing
+the shared files (`docs/shared_data.md`, "Updating the data") is the only one
+who runs the 2021-2025 pull, with the guard off for that refresh.
+
 `cached_crsp_daily` writes to `data_cache/`, which is gitignored — CRSP data must
 not enter the public repo. Delete the parquet file to refresh.
+
+`sp500_members` (and `sp500_members_ciz`) clamp a spell still running at `end` to
+`end`, and flag it in `mbr_end_censored`: that name was still a member on the
+last day you asked about, and its real exit date is outside your window. CRSP
+closes open spells at the table's last date, so a spell ending on or after the
+earlier of `end` and that date is flagged.
 
 ## 5. Three CRSP conventions that bite everyone once
 
