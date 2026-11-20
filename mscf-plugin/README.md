@@ -11,8 +11,8 @@ Claude Code plugin for the Quantit x CMU MSCF 2026 alpha-discovery and validatio
 /plugin install mscf-pipeline@cmu-mscf-2026
 ```
 
-For development: `claude --plugin-dir ./mscf-plugin`. The hook runs `python`, so it must be on
-`PATH`.
+For development: `claude --plugin-dir ./mscf-plugin`. The hook runs `python3`, or `python` when there
+is no `python3`; with neither on `PATH` it denies the call.
 
 ## Contents
 

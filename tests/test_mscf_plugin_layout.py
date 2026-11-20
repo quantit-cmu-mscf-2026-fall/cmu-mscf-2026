@@ -5,9 +5,15 @@ from __future__ import annotations
 import builtins
 import importlib
 import json
+import os
 import pkgutil
 import re
+import shutil
+import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 import capstone
 
@@ -46,6 +52,49 @@ def test_manifest_and_marketplace_entry():
     assert (ROOT / entry["source"] / ".claude-plugin" / "plugin.json").is_file()
 
 
+def _hook_commands() -> list[str]:
+    hooks = json.loads((PLUGIN / "hooks" / "hooks.json").read_text(encoding="utf-8"))
+    return [h["command"] for groups in hooks["hooks"].values() for g in groups for h in g["hooks"]]
+
+
+def test_the_hook_command_is_not_bare_python():
+    commands = _hook_commands()
+    assert commands
+    for command in commands:
+        assert not re.match(r"\s*python\b", command), command
+        assert re.search(r"command -v python3\b.*exec python3 .*command -v python\b", command)
+        assert command.rstrip().endswith("exit 2; fi")
+
+
+def _run_hook(command: str, path: str, stdin: str):
+    sh = shutil.which("sh")
+    if sh is None:
+        pytest.skip("no POSIX sh to run the hook command")
+    env = {**os.environ, "PATH": path, "CLAUDE_PLUGIN_ROOT": str(PLUGIN)}
+    return subprocess.run(
+        [sh, "-c", command], input=stdin, capture_output=True, text=True, env=env, timeout=60
+    )
+
+
+def test_the_hook_command_denies_when_no_python_is_on_path(tmp_path):
+    for command in _hook_commands():
+        done = _run_hook(command, str(tmp_path), "{}")
+        assert done.returncode == 2 and "python" in done.stderr, done
+
+
+def test_the_hook_command_runs_the_guard_with_a_python_on_path():
+    path = str(Path(sys.executable).parent) + os.pathsep + os.environ["PATH"]
+    push = json.dumps(
+        {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "git push -f origin main"},
+        }
+    )
+    done = _run_hook(_hook_commands()[0], path, push)
+    assert done.returncode == 2 and "mscf-pipeline guard" in done.stderr, done
+
+
 def test_skills_have_usable_frontmatter():
     assert {p.parent.name for p in SKILLS} == {
         "pipeline-boundaries",
@@ -67,7 +116,7 @@ def test_skills_have_usable_frontmatter():
 
 
 def test_agents_are_read_only_and_defer_review_to_the_repo_harness():
-    assert [p.stem for p in AGENTS] == ["ship-checker"]  # review is the repo's pr-reviewer
+    assert [p.stem for p in AGENTS] == ["ship-checker"]
     assert (ROOT / ".claude" / "agents" / "pr-reviewer.md").is_file()
     for path in AGENTS:
         meta = frontmatter(path)
@@ -120,8 +169,6 @@ def _capstone_names() -> set[str]:
     return names
 
 
-# Backticked words that are ledger columns or other libraries' names, and the Claude Code
-# tool a command's `allowed-tools: Bash(...)` frontmatter names.
 NOT_CAPSTONE = {"bh", "by", "q", "lfdr", "Path", "Series", "DataFrame", "Bash"}
 CLASS_SPAN = re.compile(r"`([A-Z][a-z0-9]+(?:[A-Z][a-z0-9]*)+)`")  # a bare class name in prose
 CALL = re.compile(r"(?<![\w.])([A-Za-z_]\w*)\((?!s\))")  # not the prose "seed(s)"
