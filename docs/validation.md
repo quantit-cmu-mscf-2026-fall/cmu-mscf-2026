@@ -201,8 +201,9 @@ estimated effective spread from CRSP times turnover, fixed before scoring.
   about half as much after publication (McLean & Pontiff 2016). Adding value
   beyond this set is the test of novelty.
 
-Stage 3 runs at daily frequency against the factors above, and α₃ is chosen
-and calibrated for that test. The Chen & Zimmermann portfolios are monthly and
+Stage 3 will run at daily frequency against the factors above; α₃ is chosen
+and calibrated for that test once stage 3 is built. The Chen & Zimmermann
+portfolios are monthly and
 will be considered later, as a separate decision. The alpha regression itself
 (estimator, standard errors) belongs to `spanning`
 ([`validation/incremental-value.md`](validation/incremental-value.md)).
