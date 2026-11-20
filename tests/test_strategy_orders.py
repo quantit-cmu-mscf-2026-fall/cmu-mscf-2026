@@ -26,7 +26,6 @@ def test_a_trade_is_target_minus_current_with_a_missing_name_held_at_zero():
 
 
 def test_trades_below_the_minimum_are_dropped_and_one_at_it_is_kept():
-    # Binary fractions, so each difference is exact.
     target = book({1: 0.5, 2: 0.5, 3: 0.5})
     current = book({1: 0.375, 2: 0.4375, 3: 0.0})
     result = orders(target, current, min_trade=0.125)

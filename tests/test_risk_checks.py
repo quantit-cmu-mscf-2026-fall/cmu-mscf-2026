@@ -11,7 +11,6 @@ from capstone.execution.planning import execution_risk, portfolio_risk
 
 
 def test_the_default_limits_are_the_testbed_values_and_a_big_name_is_blocked():
-    # One name at 10.1% of capital breaks the 10% default.
     risk = portfolio_risk({1: 1}, {1: 101}, 1000, side="long_only")
     assert risk["blockers"] == ["rounded_single_name_limit"]
     assert risk["gross"] == pytest.approx(0.101) and risk["largest_weight"] == risk["gross"]
@@ -22,7 +21,7 @@ def test_each_limit_blocks_by_name():
     prices = {1: 10.0, 2: 10.0}
     limits = {"max_gross": 0.5, "max_weight": 0.4}
     gross = portfolio_risk({1: 30, 2: 30}, prices, 1000, side="long_short", **limits)
-    assert gross["blockers"] == ["rounded_gross_limit"]  # 0.6 in all; each name 0.3
+    assert gross["blockers"] == ["rounded_gross_limit"]
     name = portfolio_risk({1: 50}, prices, 1000, side="long_short", max_gross=1.0, max_weight=0.4)
     assert name["blockers"] == ["rounded_single_name_limit"]
     both = portfolio_risk({1: 60, 2: 60}, prices, 1000, side="long_short", **limits)
@@ -109,7 +108,6 @@ def test_the_recheck_never_resizes_and_closes_what_the_plan_drops():
     risk = execution_risk(
         plan(projected_shares={"1": 0}), {"positions": {1: 4}, "cash": 0}, {1: 50}
     )
-    # The 4 held shares are sold at the current mark, less the cost: cash comes in.
     assert risk["projected_cash_at_current_marks"] == pytest.approx(4 * 50 * (1 - 0.0011))
     assert risk["blockers"] == []
 
@@ -121,3 +119,34 @@ def test_the_recheck_refuses_fractional_shares_and_unusable_marks():
         execution_risk(plan(), {"positions": {}, "cash": 10}, {1: 0.0})
     with pytest.raises(ValueError, match="cash"):
         execution_risk(plan(), {"positions": {}, "cash": float("nan")}, {1: 5})
+
+
+def test_the_recheck_reports_the_portfolio_limits_at_current_marks():
+    tight = plan(limits={"max_gross": 1, "max_weight": 0.05, "max_order_notional": 1000})
+    risk = execution_risk(tight, {"positions": {1: 10}, "cash": 1000}, {1: 20})
+    assert "rounded_single_name_limit" in risk["blockers"]
+    big = plan(limits={"max_gross": 1, "max_weight": 1, "max_order_notional": 100})
+    risk = execution_risk(big, {"positions": {}, "cash": 1000}, {1: 20})
+    assert risk["blockers"] == ["order_notional_limit"]
+
+
+def test_the_recheck_refuses_keys_that_collide_as_integers():
+    marks = {1: 5}
+    with pytest.raises(ValueError, match="account positions collide"):
+        execution_risk(plan(), {"positions": {1: 5, "1": 5}, "cash": 10}, marks)
+    with pytest.raises(ValueError, match="projected shares collide"):
+        execution_risk(plan(projected_shares={1: 5, "1": 5}), {"positions": {}, "cash": 1}, marks)
+    with pytest.raises(ValueError, match="marks collide"):
+        execution_risk(plan(), {"positions": {}, "cash": 10}, {1: 5, "1": 5})
+
+
+@pytest.mark.parametrize("mark", [float("nan"), 0.0, -1.0])
+def test_an_order_on_an_unheld_name_needs_a_usable_mark(mark):
+    orders = [{"permno": 2, "shares": 5}]
+    with pytest.raises(ValueError, match="marks"):
+        portfolio_risk({1: 1}, {1: 10.0, 2: mark}, 1000, side="long_only", orders=orders)
+
+
+def test_fractional_positions_are_refused_not_truncated():
+    with pytest.raises(ValueError, match="whole-share"):
+        portfolio_risk({1: 1.5}, {1: 10.0}, 1000, side="long_only")

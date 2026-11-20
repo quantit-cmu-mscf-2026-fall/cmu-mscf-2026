@@ -17,8 +17,8 @@ import pandas as pd
 
 @dataclass(frozen=True, eq=False)
 class Orders:
-    trades: pd.Series  # permno -> signed weight to trade, sorted, |trade| >= min_trade
-    turnover: float  # sum of |trades|
+    trades: pd.Series
+    turnover: float
 
 
 def _check(book: pd.Series, name: str) -> None:

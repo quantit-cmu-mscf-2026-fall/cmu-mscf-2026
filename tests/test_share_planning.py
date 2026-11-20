@@ -27,7 +27,7 @@ def test_sizing_rounds_the_target_not_the_trade_and_exits_small_positions():
 def test_halves_round_away_from_zero_and_long_only_floors():
     weights = pd.Series({1: 0.25, 2: -0.25})
     plan = share_plan(weights, {}, {1: 10.0, 2: 10.0}, 20, min_notional=0)
-    assert plan["targets"] == {1: 1, 2: -1}  # 0.5 shares each way: away from zero
+    assert plan["targets"] == {1: 1, 2: -1}
     only = share_plan(pd.Series({1: 0.25}), {}, {1: 10.0}, 20, min_notional=0, side="long_only")
     assert only["targets"] == {1: 0} and only["orders"] == []
 
@@ -56,7 +56,7 @@ def test_an_unqualified_cost_is_refused_naming_the_instrument(bad):
     with pytest.raises(UnqualifiedCost, match="instrument 8$"):
         cost_rate({7: 1.0}, 8)
     assert cost_rate({7: 25}, 7) == 0.0025 and cost_rate(25, 7) == 0.0025
-    assert cost_rate({"7": 25}, 7) == 0.0025  # a frozen plan spells keys as strings
+    assert cost_rate({"7": 25}, 7) == 0.0025
     with pytest.raises(UnqualifiedCost):
         share_plan(pd.Series({7: 1.0}), {}, {7: 10.0}, 100, fee_bps={7: None})
 
@@ -92,11 +92,11 @@ def test_weights_and_holdings_must_be_well_formed():
 def test_a_small_opening_leg_is_omitted_but_a_close_never_is():
     weights = pd.Series({1: 0.01, 2: 0.0})
     plan = share_plan(weights, {2: 1}, {1: 10.0, 2: 10.0}, 1000, min_notional=100)
-    assert [o["permno"] for o in plan["orders"]] == [2]  # the exit trades
+    assert [o["permno"] for o in plan["orders"]] == [2]
     assert plan["omitted"] == [{"permno": 1, "shares": 1, "reason": "minimum_notional"}]
     flip = share_plan(pd.Series({1: -0.01}), {1: 1}, {1: 10.0}, 1000, min_notional=100)
     assert flip["omitted"][0]["reason"] == "minimum_notional_opening_leg"
-    assert flip["projected"] == {1: 0}  # closed, the short not opened
+    assert flip["projected"] == {1: 0}
 
 
 def test_positive_price_and_carry_marks():
@@ -104,7 +104,7 @@ def test_positive_price_and_carry_marks():
     row = pd.Series({1: 10.0, 2: float("nan"), 3: float("nan")})
     filled, carried = carry_marks(row, {1: 5, 2: 3, 3: 0}, {2: 7.0, 3: 9.0})
     assert carried == [2] and filled[2] == 7.0 and pd.isna(filled[3])
-    assert pd.isna(row[2])  # the caller's row is untouched
+    assert pd.isna(row[2])
     same, none = carry_marks(row, {2: 3}, None)
     assert same is row and none == []
     _, skipped = carry_marks(row, {2: 3}, {2: 7.0}, skip=(2,))
@@ -116,9 +116,9 @@ def test_carry_keeps_a_held_name_without_a_price_and_exits_one_without_a_quote_a
     plan = share_plan(
         pd.Series({1: 1.0, 2: 0.0, 3: 0.0}),
         {2: 4, 3: 10},
-        {1: 10.0, 3: 5.0},  # no sizing price for 2
+        {1: 10.0, 3: 5.0},
         1000,
-        fee_bps={1: 10, 2: 10},  # no qualified quote for 3
+        fee_bps={1: 10, 2: 10},
         carry=carry,
         min_notional=0,
     )
@@ -128,7 +128,6 @@ def test_carry_keeps_a_held_name_without_a_price_and_exits_one_without_a_quote_a
     assert plan["projected"][2] == 4 and plan["targets"][3] == 0
     exit_order = next(o for o in plan["orders"] if o["permno"] == 3)
     assert exit_order["shares"] == -10 and exit_order["fallback_cost"] == 50.0
-    # Without a carry the same missing quote is a blocker, not a silent fallback.
     with pytest.raises(UnqualifiedCost, match="instrument 3"):
         share_plan(pd.Series({1: 1.0}), {3: 10}, {1: 10.0, 3: 5.0}, 1000, fee_bps={1: 10, 2: 10})
 
@@ -187,3 +186,39 @@ def test_a_none_price_on_a_held_name_is_carried_not_a_type_error():
     carry = {"marks": {1: 5.0}, "fallback_bps": 50}
     plan = share_plan(pd.Series({1: 0.0}), {1: 2}, {1: None}, 1000, fee_bps=10, carry=carry)
     assert plan["carried"][0]["permno"] == 1 and plan["projected"] == {1: 2}
+
+
+def test_string_keyed_weights_read_as_the_same_targets_as_integer_keys():
+    args = ({1: 10}, {1: 10.0, 2: 10.0}, 1000)
+    want = share_plan(pd.Series({1: 0.5, 2: -0.5}), *args, min_notional=0)
+    got = share_plan(pd.Series({"1": 0.5, "2": -0.5}), *args, min_notional=0)
+    assert got["orders"] == want["orders"] and got["targets"] == want["targets"]
+    assert got["targets"] == {1: 50, 2: -50}
+    held = share_plan(pd.Series({"1": 0.5}), {1: 10}, {1: 10.0}, 1000, min_notional=0)
+    assert [(o["permno"], o["shares"]) for o in held["orders"]] == [(1, 40)]
+    empty = share_plan(pd.Series({"1": 0.5, "2": -0.5}), {}, {1: 10.0, 2: 10.0}, 1000)
+    assert empty["targets"] == {1: 50, 2: -50}
+
+
+def test_weights_keys_that_collide_as_integers_are_refused():
+    with pytest.raises(ValueError, match="weights collide"):
+        share_plan(pd.Series([0.5, 0.5], index=[1, "1"]), {1: 10}, {1: 10.0}, 1000)
+
+
+@pytest.mark.parametrize("mark", [float("nan"), 0.0, -3.0, float("inf")])
+def test_a_carried_mark_must_be_positive_and_finite(mark):
+    carry = {"marks": {1: mark}, "fallback_bps": 50}
+    with pytest.raises(ValueError, match="sizing prices"):
+        share_plan(
+            pd.Series({2: 0.5}),
+            {1: 5, 2: 50},
+            {1: float("nan"), 2: 10.0},
+            1000,
+            min_notional=0,
+            carry=carry,
+        )
+
+
+def test_a_nan_minimum_notional_is_refused():
+    with pytest.raises(ValueError, match="minimum notional"):
+        share_plan(pd.Series({1: 0.5}), {}, {1: 10.0}, 1000, min_notional=float("nan"))

@@ -37,7 +37,7 @@ def positive_price(price):
 
 
 def carry_marks(row, positions, marks, *, skip=()):
-    """Held names without a valid observation take their last valid mark (v3/v4 carry).
+    """Held names without a valid observation take their last valid mark.
 
     Returns the filled row and the carried names; `marks=None` leaves the row untouched.
     """
@@ -51,6 +51,14 @@ def carry_marks(row, positions, marks, *, skip=()):
     return row, carried
 
 
+def _int_keys(mapping, label):
+    """Re-key by integer permno; refuse keys that collide after conversion."""
+    out = {int(n): q for n, q in mapping.items()}
+    if len(out) != len(mapping):
+        raise ValueError(f"{label} collide after normalising keys to integer permnos")
+    return out
+
+
 def share_plan(
     weights,
     current,
@@ -62,25 +70,25 @@ def share_plan(
     fee_bps=0.0,
     carry=None,
 ):
-    """Fixed-share sizing. `carry` (fixed-share-next-open-v3, program-events-v4) is
+    """Fixed-share sizing. `carry` is
     `{"marks": last valid prices, "fallback_bps": scenario capped-spread rate}`: a held name
     without a sizing price keeps its shares (listed in `carried`); a held name with a price
     but no qualified quote exits at `fallback_bps` (recorded as the order's `fallback_cost`).
     """
-    if not math.isfinite(capital) or capital <= 0 or min_notional < 0:
+    if not math.isfinite(capital) or capital <= 0 or not min_notional >= 0:
         raise ValueError("positive finite capital and nonnegative minimum notional are required")
-    book = {int(n): q for n, q in current.items()}
-    if len(book) != len(current):
-        raise ValueError("current positions collide after normalising keys to integer permnos")
-    current = book
+    current = _int_keys(current, "current positions")
     prices = {n: (math.nan if p is None else p) for n, p in prices.items()}
     if not isinstance(weights, pd.Series) or not weights.index.is_unique:
         raise ValueError("weights require unique instrument identifiers")
+    keys = [int(n) for n in weights.index]
+    if len(set(keys)) != len(keys):
+        raise ValueError("weights collide after normalising keys to integer permnos")
+    weights = weights.copy()
+    weights.index = keys
     if not all(math.isfinite(float(w)) for w in weights):
         raise ValueError("weights must be finite")
-    names = sorted(
-        {int(n) for n, w in weights.items() if w} | {int(n) for n, q in current.items() if q}
-    )
+    names = sorted({n for n, w in weights.items() if w} | {n for n, q in current.items() if q})
     if side not in {"long_only", "long_short"}:
         raise ValueError("valid profile and finite nonnegative costs are required")
     if side == "long_only" and (weights < 0).any():
@@ -95,7 +103,7 @@ def share_plan(
             rates[n] = cost_rate(carry["fallback_bps"], n)
             fallback.add(n)
         if carry is not None and current.get(n) and not positive_price(prices.get(n)):
-            if n not in carry["marks"]:
+            if n not in carry["marks"] or not positive_price(carry["marks"][n]):
                 raise ValueError("sizing prices must be finite and positive")
             marks[n] = carry["marks"][n]
     rate = max(rates.values(), default=cost_rate(0 if isinstance(fee_bps, Mapping) else fee_bps, 0))
@@ -133,7 +141,6 @@ def share_plan(
         )
         quantity = target - int(held)
         targets[name] = target
-        # Closing a position is never suppressed by a minimum-size convenience rule.
         if held * target < 0 and abs(target) * price < min_notional:
             omitted.append(
                 {"permno": name, "shares": target, "reason": "minimum_notional_opening_leg"}
@@ -196,11 +203,12 @@ def portfolio_risk(
         raise ValueError("invalid portfolio limits")
     if not math.isfinite(max_order_notional) or max_order_notional <= 0:
         raise ValueError("invalid portfolio limits")
-    values = {n: int(q) * float(prices[n]) / capital for n, q in positions.items() if q}
-    if any(
-        not math.isfinite(float(prices[n])) or prices[n] <= 0 for n, q in positions.items() if q
-    ):
+    if any(isinstance(q, bool) or int(q) != q for q in positions.values()):
+        raise ValueError("risk checks require whole-share positions")
+    priced = [n for n, q in positions.items() if q] + [o["permno"] for o in orders]
+    if any(not math.isfinite(float(prices[n])) or prices[n] <= 0 for n in priced):
         raise ValueError("risk checks require positive finite marks")
+    values = {n: int(q) * float(prices[n]) / capital for n, q in positions.items() if q}
     if not all(math.isfinite(v) for v in values.values()):
         raise ValueError("position values must be finite")
     blockers = []
@@ -225,14 +233,16 @@ def portfolio_risk(
 
 def execution_risk(plan, account, marks):
     """Recheck remaining fixed quantities at current marks; never resize an instruction."""
-    marks = {int(n): float(p) for n, p in marks.items()}
+    marks = {n: float(p) for n, p in _int_keys(marks, "marks").items()}
     if any(
         isinstance(q, bool) or int(q) != q
         for q in [*plan["projected_shares"].values(), *account["positions"].values()]
     ):
         raise ValueError("execution risk requires whole-share positions")
-    target = {int(n): int(q) for n, q in plan["projected_shares"].items()}
-    held = {int(n): int(q) for n, q in account["positions"].items()}
+    target = _int_keys(plan["projected_shares"], "projected shares")
+    held = _int_keys(account["positions"], "account positions")
+    target = {n: int(q) for n, q in target.items()}
+    held = {n: int(q) for n, q in held.items()}
     required = {n for n, q in target.items() if q} | {n for n, q in held.items() if q}
     if any(not math.isfinite(marks[n]) or marks[n] <= 0 for n in required):
         raise ValueError("execution risk requires positive finite marks")

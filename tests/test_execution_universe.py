@@ -33,17 +33,17 @@ def test_the_universe_maps_permnos_to_symbols_both_ways():
 @pytest.mark.parametrize(
     "text",
     [
-        "permno,symbol,venue_symbol\n1,A,A\n",  # no version
-        "version = v1\npermno,symbol,venue_symbol\n1,A,A\n1,B,B\n",  # permno twice
-        "version = v1\npermno,symbol,venue_symbol\n1,A,A\n2,A,B\n",  # symbol twice
-        "version = v1\npermno,symbol,venue_symbol\n1,a b,A\n",  # not a symbol
-        "version = v1\npermno,symbol,venue_symbol\nx,A,A\n",  # not a permno
-        "version = v1\nsymbol,permno,venue_symbol\nA,1,A\n",  # wrong header
-        "version = v1\npermno,symbol\n1,A\n",  # a two-column header
-        "version = v1\npermno,symbol,venue_symbol\n1,A\n",  # a row without its venue spelling
-        "version = v1\npermno,symbol,venue_symbol\n1,A,brk b\n",  # not a venue symbol
-        "version = v1\npermno,symbol,venue_symbol\n1,A,BRK  B\n",  # two spaces
-        "version = v1\npermno,symbol,venue_symbol\n1,A,X\n2,B,X\n",  # venue symbol twice
+        "permno,symbol,venue_symbol\n1,A,A\n",
+        "version = v1\npermno,symbol,venue_symbol\n1,A,A\n1,B,B\n",
+        "version = v1\npermno,symbol,venue_symbol\n1,A,A\n2,A,B\n",
+        "version = v1\npermno,symbol,venue_symbol\n1,a b,A\n",
+        "version = v1\npermno,symbol,venue_symbol\nx,A,A\n",
+        "version = v1\nsymbol,permno,venue_symbol\nA,1,A\n",
+        "version = v1\npermno,symbol\n1,A\n",
+        "version = v1\npermno,symbol,venue_symbol\n1,A\n",
+        "version = v1\npermno,symbol,venue_symbol\n1,A,brk b\n",
+        "version = v1\npermno,symbol,venue_symbol\n1,A,BRK  B\n",
+        "version = v1\npermno,symbol,venue_symbol\n1,A,X\n2,B,X\n",
     ],
 )
 def test_a_malformed_universe_file_is_refused(text):
@@ -56,8 +56,8 @@ def test_the_universe_keeps_the_usual_ticker_and_the_venue_spelling():
         "version = v1\npermno,symbol,venue_symbol\n83443,BRK.B,BRK B\n14593,AAPL,AAPL\n"
     )
     assert u.symbol(83443) == "BRK.B" and u.venue_symbol(83443) == "BRK B"
-    assert u.permno("BRK B") == 83443  # positions come back in the venue's spelling
-    assert u.venue_symbols == ("AAPL", "BRK B")  # sorted by permno
+    assert u.permno("BRK B") == 83443
+    assert u.venue_symbols == ("AAPL", "BRK B")
     with pytest.raises(UniverseError, match=r"BRK\.B"):
         u.permno("BRK.B")
     with pytest.raises(UniverseError, match="99999"):

@@ -25,7 +25,7 @@ UNIVERSE_FILE = Path("deploy") / "universe.csv"
 HEADER = "permno,symbol,venue_symbol"
 TEMPLATE_PREFIX = "TEMPLATE"
 SYMBOL = re.compile(r"[A-Z][A-Z0-9.]{0,11}")
-VENUE_SYMBOL = re.compile(r"(?=.{1,12}$)[A-Z][A-Z0-9]*( [A-Z0-9]+)?")  # "BRK B": one space
+VENUE_SYMBOL = re.compile(r"(?=.{1,12}$)[A-Z][A-Z0-9]*( [A-Z0-9]+)?")
 
 
 class UniverseError(ValueError):
@@ -35,14 +35,14 @@ class UniverseError(ValueError):
 @dataclass(frozen=True)
 class Listing:
     permno: int
-    symbol: str  # the usual ticker, e.g. BRK.B
-    venue_symbol: str  # the venue's spelling, e.g. "BRK B"
+    symbol: str
+    venue_symbol: str
 
 
 @dataclass(frozen=True)
 class Universe:
     version: str
-    listings: tuple[Listing, ...]  # sorted by permno
+    listings: tuple[Listing, ...]
 
     def __post_init__(self) -> None:
         if not self.version:
