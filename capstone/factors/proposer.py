@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from capstone.factors import alignment, store
 from capstone.factors.hypotheses import _FIELDS
 from capstone.factors.llm import FactorConfig, call_tool, grammar_help
+from capstone.factors.research_requests import ResearchPaused
 from capstone.factors.tree import (
     Node,
     ParseError,
@@ -154,9 +155,13 @@ def _judge(
     else:
         # The judge runs last: it costs a model call, the checks above don't.
         if config.alignment_model:
+            from capstone.pipeline.budget import CallBudgetExceeded  # budget imports deepen
+
             try:
                 verdict = alignment.judge(client, config, hypothesis, expression, rationale, usage)
-            except Exception as exc:  # any judge failure: the batch and its record go on
+            except (CallBudgetExceeded, ResearchPaused):
+                raise
+            except Exception as exc:  # any other judge failure: the batch and its record go on
                 reason = f"alignment judge failed: {exc}"
                 store.reject(con, hypothesis_id, expression, reason, node=node, **meta)
                 return Outcome(expression, "rejected", reason)

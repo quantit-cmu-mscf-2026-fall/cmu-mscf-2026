@@ -323,6 +323,36 @@ def test_without_a_judge_model_no_alignment_call_is_made(con, hid):
     assert outcome.status == "stored" and len(client.calls) == 1
 
 
+class JudgeFails(FakeClient):
+    """Answers the proposal, then raises `error` on the alignment judge's call."""
+
+    def __init__(self, error, *answers):
+        super().__init__(*answers)
+        self.error = error
+
+    def create(self, **kwargs):
+        if self.calls:
+            raise self.error
+        return super().create(**kwargs)
+
+
+def test_a_judge_failure_is_a_rejection_but_a_stop_is_not_swallowed(con, hid):
+    from capstone.factors.research_requests import ResearchPaused
+    from capstone.pipeline.budget import CallBudgetExceeded
+
+    config = FactorConfig(model="m", alignment_model="j", factors_per_hypothesis=1)
+    (outcome,) = propose(
+        con, hid, JudgeFails(ValueError("x"), _factors("-ts_sum(returns, 5)")), config
+    )
+    assert outcome.status == "rejected" and "alignment judge failed" in outcome.reason
+    for stop in (CallBudgetExceeded("out of calls"), ResearchPaused("paused")):
+        before = con.execute("SELECT COUNT(*) FROM proposals").fetchone()[0]
+        client = JudgeFails(stop, _factors("-ts_sum(returns, 10)"))
+        with pytest.raises(type(stop)):
+            propose(con, hid, client, config)
+        assert con.execute("SELECT COUNT(*) FROM proposals").fetchone()[0] == before
+
+
 def test_shipped_config_records_alignment_but_rejects_nothing_until_calibrated():
     config = load_config()
     assert config.alignment_model == "claude-haiku-4-5"
