@@ -17,9 +17,11 @@ alpha).
 |---|---|---|
 | QUANTIT-48 | Decide on factor data | daily FF5 + Momentum, in #75 |
 | QUANTIT-49 | Alpha test against known factors | QUANTIT-48 / #75; #28 (QUANTIT-23) is on `main` |
-| QUANTIT-50 | Incremental value over accepted signals | QUANTIT-49 |
+| QUANTIT-50 | Incremental value over accepted signals | QUANTIT-49; Cal: accepted signals as regressors alone or with the factors |
 
-New module: `capstone/spanning.py`, with `tests/test_spanning.py`.
+New module: `capstone/spanning.py`, with `tests/test_spanning.py`. The first
+`spanning` PR implements QUANTIT-49 only; QUANTIT-50 is not implemented yet
+(see "Accepted signals" below).
 
 ## Factor data (QUANTIT-48)
 
@@ -71,6 +73,80 @@ on `main`, so a branch from `origin/main` has them together.
 cases as `factors @ betas + make_return_matrix(...).returns`, with synthetic
 factors generated in the test, so the tests don't download anything.
 
+## QUANTIT-49 implementation choices
+
+The design notes and tests above are the team contract. The choices below
+fill gaps the contract leaves open; they were agreed for the first
+`spanning` PR and bind only `spanning`. No threshold is set here: α₃ is
+registered when stage 3 is calibrated (`framework.md`), and stage 3 stays
+unmeasured in the funnel and the gate until that is done.
+
+```python
+factor_alpha(returns, factors, *, returns_are_excess: bool, lags: int | None = None) -> pd.DataFrame
+```
+
+- **Excess returns.** `returns_are_excess` has no default, so the caller
+  always says which kind of series it passes and `RF` is never subtracted
+  twice. `True`: the returns are used as given (the dollar-neutral
+  long-short backtest default). `False`: each date's `RF` is subtracted
+  once. Either way the regressors are exactly `FF5_MOMENTUM_REGRESSORS`;
+  `RF` is never one.
+- **Estimator.** `sm.OLS(y, sm.add_constant(X)).fit(cov_type="HAC",
+  cov_kwds={"maxlags": L}, use_t=False)`: the call above, with the normal
+  reference that `evaluate.sharpe_test` uses made explicit. Otherwise
+  statsmodels' defaults: Bartlett kernel, no small-sample correction.
+  `L = evaluate.newey_west_lags(n_obs)` per candidate, unless `lags` is
+  passed, as in `sharpe_test`.
+- **p-value.** `pvalue_greater = norm.sf(alpha / se)`, testing α = 0
+  against α > 0.
+- **Alignment, per candidate.** A candidate's own missing values are
+  removed first; what remains are its *available observations*. They are
+  matched to the factor dates that have every regressor (and `RF` when it
+  is subtracted). `n_dropped` counts available observations with no
+  complete factor row, so `n_obs + n_dropped` is the number of available
+  observations. Each candidate gets its own `n_obs` and `L`.
+- **Invalid input raises.** `ValueError` for: a frame without a unique,
+  increasing, timezone-naive `DatetimeIndex`; `returns` and `factors`
+  sharing no dates; non-numeric or infinite values in `returns` or in the
+  factor columns used (`RF` only when it is subtracted; other factor
+  columns are ignored); duplicate candidate names; a missing or duplicated
+  factor column (`RF` included when it is subtracted); a candidate date on
+  or after the holdout; input that is not daily; a negative or
+  non-integer `lags`. `TypeError` when `returns_are_excess` is not a bool.
+- **A candidate that cannot be estimated gets NaN, not an error.** That
+  covers: `n_obs` at most 7 (the intercept plus six loadings), `L` not
+  below `n_obs`, a rank-deficient design, or residuals with no variance
+  (residual RMS at most √ε times the largest return, which catches a
+  candidate that is an exact mix of the factors). Its statistics are NaN
+  and the rest of the batch still runs; `n_obs`, `n_dropped` and `lags`
+  are still reported. `holm_adjusted` and `by_adjusted` count a NaN toward
+  the family size and `bh_adjusted` does not (`evaluate.py`).
+- **Search period only.** If the candidate returns have any date on or
+  after `gate.HOLDOUT_OPENS` (2021-01-01), the call raises, for synthetic
+  data too. That is stricter than the gate's exemption for
+  `data_version="synthetic"`. Factor rows after that date are not an
+  error, because alignment never uses them. `HOLDOUT_OPENS` is imported
+  inside the function, not at module import, so `gate` can later import
+  `spanning` without a cycle, and the date is not copied. An earlier
+  registered `search_end` is still enforced by the funnel and the gate,
+  not here.
+- **Daily only.** In `returns` and in `factors`, consecutive dates must be
+  at least one day apart, and their median gap at most 4 calendar days
+  (`MAX_MEDIAN_GAP_DAYS`). Holidays and missing sessions leave the median
+  at 1; weekly or monthly series are refused.
+- **Output.** A DataFrame indexed by candidate, in `returns` column order:
+  `alpha` (per period, decimal), `se`, `tstat`, `pvalue_greater`, `n_obs`,
+  `n_dropped`, `lags` (nullable int), and one `beta_<factor>` column per
+  regressor. `pvalue_greater` is the Series for `holm_adjusted` /
+  `by_adjusted` / `evidence_profile`.
+- **Tests run offline.** Factors are generated in the test; candidates are
+  `factors @ betas + make_return_matrix(...).returns`, placed on dates
+  before 2021 (`make_return_matrix` dates start in 2015, so a long matrix
+  would reach the holdout). They cover: null calibration with IID, `ar1`
+  and `rho` noise; power with planted alpha; `RF` subtracted only when
+  asked; missing dates and `n_dropped`; degenerate designs returning NaN;
+  holdout and non-daily input refused.
+
 ## Accepted signals (QUANTIT-50): an open dependency
 
 Testing against "signals already held" needs a list of accepted signals and
@@ -85,6 +161,12 @@ which candidates were accepted, and the gate that will decide acceptance
   be rejected.
 - Where the accepted set comes from will be decided with the gate. Raise it
   with Cal when you get there.
+
+**Deferred from the first PR.** `spanning` does not implement QUANTIT-50
+yet. The docs do not settle whether accepted signals enter the regression
+alone or together with FF5 + Momentum, and that is waiting on Cal. Whichever
+is chosen, accepted signals' returns will be passed in as a matrix argument,
+never loaded inside `spanning`.
 
 ## Who uses your output
 
