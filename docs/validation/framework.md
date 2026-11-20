@@ -91,7 +91,7 @@ seen; that untouched holdout is what makes a loose screen safe.
 |---|---|---|---|---|
 | 1. Screen | Search period, 1990–2020 (#43) | BH ≤ q₁ across hypothesis families, on each family's search-adjusted p-value (bootstrap max) | BY, Holm, `lfdr`, raw p | Search-adjusted FDR, average correlation |
 | 2. Robustness | Search period | — (no gate; see "Stage 2" below) | PSR, lag / cost / sub-period sensitivity | PBO of the search |
-| 3. Incremental value | Search period; frequency to decide (monthly anomaly portfolios, or daily factors as #75 proposes) | Spanning alpha p ≤ α₃ | Factor loadings | — |
+| 3. Incremental value | Search period; daily FF5 + Momentum (#75); monthly anomaly portfolios deferred | Spanning alpha p ≤ α₃ | Factor loadings | — |
 | 4. Final decision | Holdout, 2021–2025, looked at once | BH ≤ q₄ across the survivors' one-sided holdout p-values | Deflated Sharpe, haircut Sharpe, Holm, MinTRL | — |
 | 5. Incubation | Live or paper | — | Realised vs. expected Sharpe | — |
 
@@ -390,7 +390,7 @@ Recorded 2026-10-05 and 2026-10-06 from the review of #50; updated 2026-10-21.
 | Q5 | Calibration target | A flat 10% end-to-end FDR; the baseline (BH on the bootstrap family p-values, #67) decides until the funnel beats it, at the level calibration registers (crsp-v1: q = 0.05) |
 | — | Where stage 2's fresh data comes from | **Proposed from calibration:** no separate period; stage 2 reports graded robustness checks and the holdout confirms (#68) |
 | — | Stage 3's gate is the spanning alpha test | **To confirm** with its owner |
-| — | Stage 3's frequency: monthly anomaly portfolios or daily factors (#75) | **Open**, with its owner; needed before α₃ means anything |
+| — | Stage 3's frequency: monthly anomaly portfolios or daily factors (#75) | **Daily** (#75): Fama–French five factors plus momentum first; Chen & Zimmermann's monthly anomaly portfolios considered later. α₃ is registered for the daily test once stage 3 is built |
 | — | Funnel or bootstrap baseline as the deciding rule | **Baseline for crsp-v1** (registered 2026-11-16): the funnel didn't beat it in calibration. Revisit if the team weighs the holdout's protection higher |
 
 ## What this page changes, and what it doesn't

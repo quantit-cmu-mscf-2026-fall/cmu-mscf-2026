@@ -15,7 +15,7 @@ alpha).
 
 | Jira | Task | Blocked by |
 |---|---|---|
-| QUANTIT-48 | Decide on factor data | choice documented in open #75; not yet on `main` |
+| QUANTIT-48 | Decide on factor data | daily FF5 + Momentum, in #75 |
 | QUANTIT-49 | Alpha test against known factors | QUANTIT-48 / #75; #28 (QUANTIT-23) is on `main` |
 | QUANTIT-50 | Incremental value over accepted signals | QUANTIT-49 |
 
@@ -31,9 +31,11 @@ ff5 = load_french("factors5_daily")   # daily Fama–French 5, decimal returns
 ```
 
 Available datasets: `factors_daily`, `factors_monthly`, `factors5_daily`,
-`industry49_daily`, `industry12_daily`. **Momentum is not on `main` yet:**
-#75 adds `momentum_daily` to `FRENCH_DATASETS` and `load_ff5_momentum()`, and
-records the choice of the public Ken French files in `docs/validation.md`. The
+`industry49_daily`, `industry12_daily`. #75 adds `momentum_daily` to
+`FRENCH_DATASETS` and `load_ff5_momentum()`, and records the choice in the
+Stage 3 comparison set of `docs/validation.md`: daily FF5 + Momentum from the
+public Ken French files first, with Chen & Zimmermann's monthly anomaly
+portfolios considered later. The
 other option was WRDS, through the shared-data loader,
 `capstone/shared_data.py` (#26). That loader and `make_return_matrix` are both
 on `main`, so a branch from `origin/main` has them together.
