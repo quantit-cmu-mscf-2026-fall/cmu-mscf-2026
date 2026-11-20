@@ -141,7 +141,7 @@ class Thresholds:
     tried; calibration found it cuts power to about a sixth).
 
     promote: "accept" (the default: stage 4 accepts or rejects) or "incubate"
-    (opt-in, see `capstone.promotion`): a stage-3 survivor that fails q4 but whose
+    (opt-in, see `capstone.promotion`): a stage-3 survivor the gate did not accept but whose
     BH-adjusted holdout p is <= `q4_incubate` is labelled incubate, never accepted.
     q4_incubate is set with "incubate" and only then, q4 < q4_incubate < 1, and
     needs final="bh" (it is a level on BH's adjusted p). Both stay out of
