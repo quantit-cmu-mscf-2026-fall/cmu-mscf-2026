@@ -298,9 +298,13 @@ look under the same config hash (`HoldoutAlreadyOpened`), but any change to the
 config is a new hash, so on its own it would allow a look per registration. The
 look that no registration renews is `holdout_authority` (#231): one durable look
 at the dataset, spent before any read, authorized by a named person, with
-shared-data reads past 2020-12-31 refused while `CAPSTONE_HOLDOUT_GUARD` is on.
-`run_gate` does not call it yet, so for crsp-v1 the holdout provider passed to
-`run_gate` reads through `holdout_authority.open_once`, with the guard on.
+shared-data reads past 2020-12-31 refused while `CAPSTONE_HOLDOUT_GUARD` is on
+(except a date-only calendar read). The two are not connected yet: `run_gate`
+does not call `holdout_authority`, and a provider that passes `run_gate`'s
+arguments to `open_once` fails after the gate has logged its look, since
+`open_once` needs ISO dates and the survivors' ids frozen in its protocol
+beforehand. Connecting them, with a test, comes before crsp-v1's holdout is
+opened.
 
 **Superseded hashes (2026-11-18).** `8bda49ec…` and `5e89d78a…` are superseded by `5f590f13…`.
 The decision rule, q, stage thresholds and data are unchanged. `5e89d78a…` → `8bda49ec…` added the

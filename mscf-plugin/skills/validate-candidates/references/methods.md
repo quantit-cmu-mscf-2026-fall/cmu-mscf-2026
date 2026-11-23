@@ -59,6 +59,7 @@ pass `stage1="bootstrap"`; registered values live in `docs/validation/framework.
 
 ## Planned (check open PRs before building)
 
-White's Reality Check, Romano-Wolf, SPA (#91); spanning over signals already held
+Stationary bootstrap and block-length selection (QUANTIT-37/38); White's Reality Check,
+Romano-Wolf, SPA (#91); spanning over signals already held
 (QUANTIT-50). Built: `pbo` CSCV, `evaluate.haircut_sharpe`, `evaluate.local_fdr`,
 `spanning.factor_alpha` and the `gate` pre-registered scorecard.
