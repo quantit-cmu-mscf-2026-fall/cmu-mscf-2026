@@ -167,7 +167,39 @@ def test_calendar_only_capability_returns_unique_session_labels(synthetic_source
         )
 
 
-@pytest.mark.parametrize("function", ["crsp_daily", "sp500_members", "cached_crsp_daily"])
+WRDS_PULLS = [
+    "crsp_daily",
+    "sp500_members",
+    "cached_crsp_daily",
+    "crsp_daily_ciz",
+    "sp500_members_ciz",
+]
+
+
+@pytest.mark.parametrize("function", WRDS_PULLS)
+@pytest.mark.parametrize("end", ["2021-01-04", "2025-12-31"])
+def test_wrds_pulls_refuse_a_holdout_dated_end(function, end, monkeypatch):
+    class ForbiddenConnection:
+        def raw_sql(self, *args, **kwargs):
+            raise AssertionError("protected SQL was sent")
+
+    monkeypatch.setattr(wrds_loader, "_cache_path", lambda n: pytest.fail("cache opened"))
+    kwargs = {"name": "synthetic-probe"} if function == "cached_crsp_daily" else {}
+    with pytest.raises(authority.HoldoutSealed):
+        getattr(wrds_loader, function)(ForbiddenConnection(), "2020-01-01", end, **kwargs)
+
+
+@pytest.mark.parametrize("function", ["crsp_daily_ciz", "sp500_members_ciz"])
+def test_ciz_pulls_refuse_a_holdout_dated_start(function):
+    class ForbiddenConnection:
+        def raw_sql(self, *args, **kwargs):
+            raise AssertionError("protected SQL was sent")
+
+    with pytest.raises(authority.HoldoutSealed):
+        getattr(wrds_loader, function)(ForbiddenConnection(), "2021-06-01", "2020-12-31")
+
+
+@pytest.mark.parametrize("function", WRDS_PULLS)
 def test_wrds_and_cache_guard_runs_before_queries_or_cache(function, monkeypatch):
     class ForbiddenConnection:
         def raw_sql(self, *args, **kwargs):

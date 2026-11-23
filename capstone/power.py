@@ -108,7 +108,8 @@ class PowerSpec:
     the mean by the stated Sharpe whatever is switched on. The defaults (none)
     are the cross-correlated Gaussian world. Power measured only on that world
     flatters the gate: iid-over-time data is where HAC and bootstrap p-values
-    look best.
+    look best. idle_share / idle_run: days a family holds no position (NaN
+    returns), `calibration.make_family_set`'s; the default is none.
     """
 
     variants: Sequence[int] | int  # stored as a tuple
@@ -123,6 +124,8 @@ class PowerSpec:
     ar1: float = 0.0
     t_df: float | None = None
     garch: tuple[float, float] | None = None
+    idle_share: float = 0.0
+    idle_run: float = 21.0
 
     def __post_init__(self) -> None:
         v = self.variants
@@ -165,6 +168,15 @@ class PowerSpec:
             if len(garch) != 2 or min(garch) < 0 or sum(garch) >= 1:
                 raise ValueError(f"garch needs (alpha, beta) >= 0 with alpha + beta < 1: {garch}")
             object.__setattr__(self, "garch", garch)
+        if not 0.0 <= self.idle_share < 1.0 or not self.idle_run >= 1.0:
+            raise ValueError(
+                f"need idle_share in [0, 1) and idle_run >= 1, "
+                f"got {self.idle_share} and {self.idle_run}"
+            )
+        if self.idle_share / (self.idle_run * (1.0 - self.idle_share)) > 1.0:
+            raise ValueError(
+                f"idle_share {self.idle_share} needs idle runs longer than {self.idle_run} days"
+            )
 
     @classmethod
     def from_years(cls, *, search_years: float, holdout_years: float, **kwargs) -> PowerSpec:
@@ -206,6 +218,8 @@ def null_world(spec: PowerSpec, seed: int) -> FamilySet:
         0.0,
         within_rho=spec.within_rho,
         **spec.defects,
+        idle_share=spec.idle_share,
+        idle_run=spec.idle_run,
         n_search=spec.search_periods,
         n_holdout=spec.holdout_periods,
         seed=seed,

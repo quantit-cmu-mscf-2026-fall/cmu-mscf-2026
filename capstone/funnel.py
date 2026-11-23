@@ -493,13 +493,20 @@ def screen(
 
 
 def run_funnel(
-    stats: pd.DataFrame, th: Thresholds, *, stage1: Stage1Method | None = None
+    stats: pd.DataFrame,
+    th: Thresholds,
+    *,
+    stage1: Stage1Method | None = None,
+    min_holdout_obs: int | None = None,
 ) -> pd.DataFrame:
     """The staged funnel. Returns per-hypothesis pass flags for each stage.
 
     `stage1` overrides `th.stage1`. Stages 1-3 are `screen`; stage 4 is the
-    final gate on the holdout statistics in `stats`.
+    final gate on the holdout statistics in `stats`. With `min_holdout_obs`
+    (the gate's `required_holdout_obs`), a survivor whose carried variant has
+    fewer holdout returns fails stage 4 untested, as in the gate.
     """
     stages = screen(stats, th, stage1=stage1)
-    stages["stage4"] = stages["stage3"] & _final_gate(stats, stages["stage3"], th)
+    covered = None if min_holdout_obs is None else stats["ho_n_obs"] >= min_holdout_obs
+    stages["stage4"] = stages["stage3"] & _final_gate(stats, stages["stage3"], th, covered=covered)
     return stages
