@@ -82,7 +82,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from capstone import funnel, grading, runlog
+from capstone import funnel, grading, holdout_authority, runlog
 from capstone.evaluate import average_correlation, bh_adjusted
 from capstone.funnel import Thresholds, thresholds_dict
 from capstone.scorecard import (
@@ -304,53 +304,78 @@ class GateConfig:
         return cls(**data)
 
     @property
-    def look_key(self) -> str:
-        """What a holdout look is spent on: the evidence, not the configuration.
+    def dataset(self) -> str:
+        """The holdout this config reads, in `holdout_authority`'s namespace.
 
-        `"<data_version>#<holdout_round>"`, and deliberately nothing else.
+        `REAL_DATASET` for real data, `"synthetic:<id>"` for simulated. Derived
+        from `data_version` rather than stored, so adding it moves no hash.
 
-        The holdout is worth something only because the search had no chance
-        to flatter it, and that is a property of **the data**. Spending a look
-        uses up the dataset, not the settings it was read under, so the budget
-        has to be counted per dataset.
-
-        Keying the budget on `config_hash` instead made every hashed field a
-        way to buy another look, including fields that cannot change which
-        candidates are selected. Measured on signal-free data before this
-        change: four looks under one dataset, from nothing but `seed` 0, 1, 2,
-        3, two of which accepted a family. The seed moves the bootstrap draws
-        and nothing else.
-
-        So only two things open a new look:
-
-        * **`data_version`** -- genuinely new data is genuinely new evidence.
-        * **`holdout_round`** -- a second look at the *same* data, declared on
-          purpose. It exists because without it the honest second round has no
-          sanctioned path, and people would reach for a seed change instead.
-          Bumping it is visible in the registration, the look entry and the
-          scorecard header; changing a seed is not.
-
-        Everything else is excluded on purpose:
-
-        * `seed`, `n_boot` -- computational, and cannot change the selection;
-        * `thresholds`, `decision_rule`, `min_holdout_coverage` -- the
-          pre-registered rules. Changing one after a holdout disappointed is
-          the exact move the funnel exists to prevent, so it must not be
-          rewarded with a fresh look;
-        * `search_end`, `holdout_start`, `holdout_end` -- re-slicing one
-          dataset is not new evidence. Genuinely new rows change
-          `data_version`, which is a hash of the files;
-        * `trial_scope` -- narrowing it shrinks the trial count *and* used to
-          mint a look, two anti-conservative effects from one edit;
-        * `generator`, `factors_digest` -- free-text provenance the gate
-          cannot verify. A new generator wanting a second look declares a
-          round.
-
-        The candidate set is not in the key either, and was never in the hash:
-        the same config with a fresh batch of candidates is refused, so a
-        screen that passed nothing cannot be retried until something passed.
+        **Every real `data_version` maps to the one real dataset.** There is a
+        single real holdout, 2021-2025, so it gets a single budget.
+        `sd.data_version()` hashes the whole shared manifest, so re-pulling a
+        1995 row or adding a Compustat column mints a new version while not one
+        holdout row changes; keying on it would reopen the holdout for a routine
+        refresh (@CPH200 on #360).
         """
-        return f"{self.data_version}#{self.holdout_round}"
+        version = self.data_version
+        if version == SYNTHETIC_DATA_VERSION:
+            return f"{SYNTHETIC_DATA_VERSION}:default"
+        if version.startswith(f"{SYNTHETIC_DATA_VERSION}:"):
+            return version
+        return holdout_authority.REAL_DATASET
+
+    @property
+    def look_key(self) -> str:
+        """What a holdout look is spent on: `"<dataset>#<holdout_round>"`.
+
+        A look is spent on the **evidence**, so the budget is counted per
+        holdout, not per configuration and not per label.
+
+        Within one key, a window already spent refuses any window overlapping
+        it (`_overlapping`), so re-slicing 2021-2025 or nudging `holdout_start`
+        by a day buys nothing, while a genuinely later window -- 2026 rows that
+        did not exist before -- opens a look. The dates are known before any
+        candidate is read, which is what lets the check run before the holdout
+        is touched.
+
+        Two earlier keys were wrong, both measured on signal-free data:
+
+        * **`config_hash`** (`daccc5d`) made every hashed field a way to buy a
+          look. Four looks from nothing but `seed` 0, 1, 2, 3; two accepted a
+          family. The seed moves the bootstrap draws and nothing else.
+        * **`data_version`** (`c7a569f`, the first attempt at this fix) moved
+          the hole rather than closing it: the field is free text that nothing
+          verified, so `"synthetic "`, `"Synthetic"` and `"synthetic-recheck"`
+          each bought a look on identical data (@CPH200 on #360). Real
+          `data_version`s now map to one dataset, and `run_gate` checks a real
+          config's version against `sd.data_version()` so the recorded
+          provenance is true.
+
+        Only two things open a look:
+
+        * **a later holdout window** under the same dataset -- genuinely new
+          dates are genuinely new evidence;
+        * **`holdout_round`** -- a second look at the *same* window, declared on
+          purpose, and allowed only once the round before it has been spent. It
+          exists because without it an honest second round has no sanctioned
+          path, and people would reach for a seed change instead. A bump is
+          visible in the registration, the look entry and the refusal; a changed
+          seed is not.
+
+        Everything else is excluded on purpose: `seed` and `n_boot` are
+        computational; `thresholds`, `decision_rule` and `min_holdout_coverage`
+        are the pre-registered rules, and changing one after a disappointing
+        holdout is the move the funnel exists to prevent; `trial_scope`
+        narrowing shrinks the trial count as well; `generator` and
+        `factors_digest` are provenance the gate cannot verify.
+
+        The candidate set is in neither the key nor the hash, so the same
+        config with a fresh batch is refused: a screen that passed nothing
+        cannot be retried until something passes. That is also why the holdout
+        rows themselves cannot be the key -- they are read after the look is
+        logged, and they depend on which candidates survived (@lyz1103 on #360).
+        """
+        return f"{self.dataset}#{self.holdout_round}"
 
     @property
     def config_hash(self) -> str:
@@ -367,20 +392,38 @@ def _entries_for(name: str, config_hash: str) -> list[dict]:
     ]
 
 
+def _dataset_of_version(version: object) -> str:
+    """`GateConfig.dataset`'s rule, for a recorded `data_version` string."""
+    text = str(version)
+    if text == SYNTHETIC_DATA_VERSION:
+        return f"{SYNTHETIC_DATA_VERSION}:default"
+    if text.startswith(f"{SYNTHETIC_DATA_VERSION}:"):
+        return text
+    return holdout_authority.REAL_DATASET
+
+
 def _look_key_of(entry: dict) -> str | None:
     """A look entry's key, deriving it for one written before `look_key` existed.
 
-    A look recorded by an earlier version carries `data_version` but no
-    `look_key`. Those predate `holdout_round`, so they are round 0, and
-    deriving the key makes the budget retroactive: a look already spent on a
-    dataset still counts against it.
+    An older entry carries `data_version` but no `look_key`, and predates
+    `holdout_round`, so it is round 0 of whatever dataset its version maps to.
+    Deriving it makes the budget retroactive: a look already spent still counts.
+
+    `None` only when the entry records no dataset and no version at all, which
+    `_looks_for` then treats as spending every key rather than nothing: an
+    unattributable look is the one case where guessing wrong must fail closed.
     """
     params = entry.get("params") or {}
     key = params.get("look_key")
     if key is not None:
         return str(key)
-    version = params.get("data_version")
-    return None if version is None else f"{version}#0"
+    dataset = params.get("dataset")
+    if dataset is None:
+        version = params.get("data_version")
+        if version is None:
+            return None
+        dataset = _dataset_of_version(version)
+    return f"{dataset}#{params.get('holdout_round', 0)}"
 
 
 def holdout_looks() -> list[dict]:
@@ -397,8 +440,11 @@ def holdout_looks() -> list[dict]:
         looks.append(
             {
                 "look_key": _look_key_of(entry),
+                "dataset": params.get("dataset"),
                 "data_version": params.get("data_version"),
                 "holdout_round": params.get("holdout_round", 0),
+                "holdout_start": params.get("holdout_start"),
+                "holdout_end": params.get("holdout_end"),
                 "config_hash": params.get("config_hash"),
                 "authorizer": params.get("authorizer"),
                 "ts_utc": entry.get("ts_utc"),
@@ -408,7 +454,33 @@ def holdout_looks() -> list[dict]:
 
 
 def _looks_for(look_key: str) -> list[dict]:
-    return [look for look in holdout_looks() if look["look_key"] == look_key]
+    """Looks already spent under `look_key`, plus any that name no dataset.
+
+    An entry with neither a key nor a version cannot be attributed, so it
+    counts against every key. Failing closed is the only safe reading: the
+    alternative hands out a look because a record is incomplete.
+    """
+    return [
+        look for look in holdout_looks() if look["look_key"] == look_key or look["look_key"] is None
+    ]
+
+
+def _overlapping(looks: list[dict], start: str, end: str) -> dict | None:
+    """The first look whose holdout window overlaps [`start`, `end`], if any.
+
+    Two windows overlap when each starts on or before the other ends. A look
+    with no window recorded is from before windows were logged, so it is taken
+    to cover whatever window is asked for: fail closed.
+    """
+    asked_start, asked_end = pd.Timestamp(start), pd.Timestamp(end)
+    for look in looks:
+        if look["holdout_start"] is None or look["holdout_end"] is None:
+            return look
+        spent_start = pd.Timestamp(look["holdout_start"])
+        spent_end = pd.Timestamp(look["holdout_end"])
+        if spent_start <= asked_end and asked_start <= spent_end:
+            return look
+    return None
 
 
 def register(config: GateConfig) -> dict:
@@ -432,6 +504,52 @@ def register(config: GateConfig) -> dict:
         tags=[GATE_TAG, SYNTHETIC_TAG],
         notes="pre-registered gate config: fixed before scoring, not a trial",
     )
+
+
+def _checked_provenance(config: GateConfig) -> None:
+    """A real config's `data_version` must be the live one.
+
+    `data_version` is no longer the look key, but it is still the provenance
+    every ledger entry records (`CLAUDE.md`), and a label nothing verifies is
+    a label nothing can rely on. Checked only for the real dataset: a
+    synthetic config names a simulated world that `shared_data` knows nothing
+    about, and the check must not require a CRSP copy to run the tests.
+    """
+    if config.dataset != holdout_authority.REAL_DATASET:
+        return
+    from capstone import shared_data
+
+    try:
+        live = shared_data.data_version()
+    except shared_data.SharedDataError as exc:
+        raise ValueError(
+            f"this config names real data ({config.data_version!r}) but the shared data "
+            f"is not available to confirm it: {exc}"
+        ) from exc
+    if config.data_version != live:
+        raise ValueError(
+            f"data_version {config.data_version!r} is not the local shared data "
+            f"({live!r}). Register the version actually being scored: the gate records "
+            "it as provenance, so a label that is not true makes the record useless."
+        )
+
+
+def _checked_round_order(config: GateConfig) -> None:
+    """Round *k* is available only once round *k-1* has been spent.
+
+    Otherwise a first run could register round 7 and keep six untouched looks
+    in reserve, which is the budget it was meant to bound (@CPH200 on #360).
+    """
+    if config.holdout_round == 0:
+        return
+    previous = f"{config.dataset}#{config.holdout_round - 1}"
+    if not _looks_for(previous):
+        raise ValueError(
+            f"holdout_round {config.holdout_round} needs round "
+            f"{config.holdout_round - 1} to have been spent first; the ledger holds no "
+            f"look for {previous}. Rounds are consecutive so the count of looks taken "
+            "is the count declared."
+        )
 
 
 def _trial_count(scope: TrialScope) -> int:
@@ -599,16 +717,20 @@ def run_gate(
     registration = _entries_for(REGISTRATION_NAME, h)
     if not registration:
         raise GateNotRegistered(f"gate config {h[:12]} is not registered; call register first")
-    spent = _looks_for(config.look_key)
-    if spent:
-        first = spent[0]
+    _checked_provenance(config)
+    _checked_round_order(config)
+    spent = _overlapping(_looks_for(config.look_key), config.holdout_start, config.holdout_end)
+    if spent is not None:
+        window = f"{spent['holdout_start']} to {spent['holdout_end']}"
         raise HoldoutAlreadyOpened(
-            f"the holdout for {config.data_version} round {config.holdout_round} was already "
-            f"opened on {first['ts_utc']} by {first['authorizer']} under config "
-            f"{str(first['config_hash'])[:12]}. A look is spent on the data, not on the "
-            "configuration: changing the seed, the draws, a threshold or the decision rule "
-            "does not open it again. To look at this dataset a second time on purpose, "
-            "register a config with holdout_round "
+            f"{config.dataset} round {config.holdout_round} was already opened over "
+            f"{window} on {spent['ts_utc']} by {spent['authorizer']} under config "
+            f"{str(spent['config_hash'])[:12]}, which overlaps the requested "
+            f"{config.holdout_start} to {config.holdout_end}. A look is spent on the "
+            "holdout, not on the configuration: the seed, the draws, a threshold, the "
+            "decision rule, the trial scope, the generator and the data label do not "
+            "open it again, and neither does re-slicing the same dates. To look at "
+            f"this window a second time on purpose, register holdout_round "
             f"{config.holdout_round + 1} and say why."
         )
     labels = _checked_search(returns, family, config)
@@ -647,7 +769,10 @@ def run_gate(
         params={
             "config_hash": h,
             "look_key": config.look_key,
+            "dataset": config.dataset,
             "holdout_round": config.holdout_round,
+            "holdout_start": config.holdout_start,
+            "holdout_end": config.holdout_end,
             "generator": config.generator,
             "data_version": config.data_version,
             "authorizer": authorizer,

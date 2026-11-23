@@ -84,13 +84,19 @@ NUISANCE: dict[str, dict] = {
     "trial_scope.include_tags": {"trial_scope": TrialScope(name=TRIAL_NAME, include_tags=("y",))},
     # Free-text provenance the gate cannot verify.
     "generator": {"generator": "a-different-generator"},
+    # Relabelling the data is not new data: every real version maps to the one
+    # real dataset, and a synthetic relabel stays in its namespace.
+    "data_version": {"data_version": "synthetic:default"},
 }
 
-#: The only two fields that may open a look, and why.
+#: What may open a look. `data_version` is NOT here: see `NUISANCE`.
 OPENS_A_LOOK = {
-    "data_version": "genuinely new data is genuinely new evidence",
-    "holdout_round": "a declared second look at the same data",
+    "holdout_round": "a declared second look at the same window",
 }
+
+#: Hashed fields covered by a window rule rather than a value comparison: a
+#: later, non-overlapping window opens a look, an overlapping one does not.
+BY_WINDOW = {"holdout_start", "holdout_end"}
 
 
 def changed(config: GateConfig, field: str) -> GateConfig:
@@ -130,7 +136,7 @@ def open_holdout(m, config) -> None:
 def test_a_nuisance_change_does_not_buy_a_look(spent, field):
     """Every hashed field but the two in `OPENS_A_LOOK`, one test each."""
     m, config = spent
-    with pytest.raises(HoldoutAlreadyOpened, match="spent on the data"):
+    with pytest.raises(HoldoutAlreadyOpened, match="spent on the holdout"):
         open_holdout(m, changed(config, field))
     assert len(holdout_looks()) == 1
 
@@ -179,12 +185,54 @@ def test_a_fresh_candidate_set_does_not_buy_a_look(spent):
 # --- what may open a look --------------------------------------------------
 
 
-def test_new_data_opens_a_look(spent):
+def test_a_later_window_opens_a_look(spent):
+    """Genuinely new dates are genuinely new evidence."""
     m, config = spent
-    fresh = dataclasses.replace(config, data_version="synthetic-refreshed")
-    open_holdout(m, fresh)
-    keys = {look["look_key"] for look in holdout_looks()}
-    assert keys == {config.look_key, fresh.look_key}
+    after = pd.Timestamp(config.holdout_end) + pd.Timedelta(days=1)
+    later = dataclasses.replace(
+        config,
+        holdout_start=after.date().isoformat(),
+        holdout_end=(after + pd.Timedelta(days=365)).date().isoformat(),
+    )
+    open_holdout(m, later)
+    assert len(holdout_looks()) == 2
+
+
+def test_relabelling_the_data_does_not_open_a_look(spent):
+    """@CPH200's finding on the first attempt: the label was the key."""
+    m, config = spent
+    with pytest.raises(HoldoutAlreadyOpened):
+        open_holdout(m, dataclasses.replace(config, data_version="synthetic:default"))
+    assert len(holdout_looks()) == 1
+
+
+def test_every_real_version_is_one_dataset():
+    """A data refresh must not reopen the holdout: one real holdout, one budget."""
+    from capstone.holdout_authority import REAL_DATASET
+
+    base = dict(
+        search_end="2020-12-31",
+        holdout_start="2021-01-01",
+        holdout_end="2025-12-31",
+        generator="g",
+    )
+    first = GateConfig(data_version="crsp-sp500-daily:aaaa:bbbb", **base)
+    second = GateConfig(data_version="crsp-sp500-daily:cccc:dddd", **base)
+    assert first.dataset == second.dataset == REAL_DATASET
+    assert first.look_key == second.look_key
+
+
+def test_each_synthetic_world_has_its_own_budget():
+    """@lyz1103's reverse case: one market's look must not refuse another's."""
+    base = dict(
+        search_end="2020-12-31",
+        holdout_start="2021-01-01",
+        holdout_end="2025-12-31",
+        generator="g",
+    )
+    one = GateConfig(data_version="synthetic:market-0", **base)
+    two = GateConfig(data_version="synthetic:market-1", **base)
+    assert one.look_key != two.look_key
 
 
 def test_a_declared_round_opens_a_look(spent):
@@ -209,11 +257,13 @@ def test_a_declared_round_is_itself_spent_once(spent):
 # --- the key, the audit, and the field inventory ---------------------------
 
 
-def test_the_look_key_is_the_data_and_the_round_and_nothing_else():
+def test_the_look_key_is_the_dataset_and_the_round_and_nothing_else():
     m = market(0)
     config = config_for(m, decision_rule=RULE)
-    assert config.look_key == f"{config.data_version}#0"
+    assert config.look_key == f"{config.dataset}#0"
     for field in NUISANCE:
+        if field in BY_WINDOW:
+            continue  # these change the window, which the overlap rule judges
         assert changed(config, field).look_key == config.look_key, field
 
 
@@ -233,7 +283,7 @@ def test_every_hashed_field_is_classified():
         ).to_dict()
     )
     hashed |= {"holdout_round"}  # omitted from content at its default
-    classified = {name.split(".")[0] for name in NUISANCE} | set(OPENS_A_LOOK)
+    classified = {name.split(".")[0] for name in NUISANCE} | set(OPENS_A_LOOK) | BY_WINDOW
     assert hashed == classified, (
         f"unclassified hashed field(s): {sorted(hashed - classified)}; "
         f"unknown name(s): {sorted(classified - hashed)}"
@@ -245,7 +295,7 @@ def test_the_refusal_says_what_to_do_instead(spent):
     with pytest.raises(HoldoutAlreadyOpened) as exc:
         open_holdout(m, dataclasses.replace(config, seed=5))
     message = str(exc.value)
-    assert config.data_version in message
+    assert config.dataset in message
     assert AUTHORIZER in message
     assert "holdout_round 1" in message
 
@@ -264,7 +314,7 @@ def test_an_earlier_look_without_a_key_still_counts(ledger):
         params={"config_hash": "old" * 12, "data_version": config.data_version},
         tags=["gate", "synthetic"],
     )
-    assert holdout_looks()[0]["look_key"] == f"{config.data_version}#0"
+    assert holdout_looks()[0]["look_key"] == f"{config.dataset}#0"
     with pytest.raises(HoldoutAlreadyOpened):
         open_holdout(m, config)
 
@@ -318,3 +368,69 @@ def test_the_registered_crsp_v1_hash_is_unchanged():
     assert config.config_hash == (
         "5f590f13f63e94f33fbdf960089c1fc01881a6fedf2437d8afbc3a0c396af7da"
     )
+
+
+# --- the window rule, provenance and round order ---------------------------
+
+
+def test_re_slicing_the_same_window_does_not_open_a_look(spent):
+    """Nudging a boundary leaves the same rows; the overlap rule sees that."""
+    m, config = spent
+    for field, days in (("holdout_start", 1), ("holdout_end", -1), ("holdout_end", 400)):
+        moved = pd.Timestamp(getattr(config, field)) + pd.Timedelta(days=days)
+        with pytest.raises(HoldoutAlreadyOpened, match="overlaps"):
+            open_holdout(m, dataclasses.replace(config, **{field: moved.date().isoformat()}))
+    assert len(holdout_looks()) == 1
+
+
+def test_a_look_with_no_window_recorded_covers_any_window(ledger):
+    """Fail closed: an older entry without a window must not hand out a look."""
+    m = market(0)
+    log_trials(m.returns.shape[1])
+    config = config_for(m, decision_rule=RULE)
+    runlog.log_run(
+        "gate-holdout-look",
+        params={"config_hash": "old" * 12, "dataset": config.dataset},
+        tags=["gate", "synthetic"],
+    )
+    with pytest.raises(HoldoutAlreadyOpened):
+        open_holdout(m, config)
+
+
+def test_a_look_naming_no_dataset_counts_against_every_key(ledger):
+    """An unattributable look is the one case where guessing wrong must fail closed."""
+    m = market(0)
+    log_trials(m.returns.shape[1])
+    config = config_for(m, decision_rule=RULE)
+    runlog.log_run("gate-holdout-look", params={"config_hash": "x" * 12}, tags=["gate"])
+    assert holdout_looks()[0]["look_key"] is None
+    with pytest.raises(HoldoutAlreadyOpened):
+        open_holdout(m, config)
+
+
+def test_a_real_config_must_name_the_live_data_version(ledger):
+    """@CPH200: a label nothing verifies is a label nothing can rely on."""
+    m = market(0)
+    log_trials(m.returns.shape[1])
+    real = dataclasses.replace(
+        config_for(m, decision_rule=RULE), data_version="crsp-sp500-daily:made:up"
+    )
+    register(real)
+    with pytest.raises(ValueError, match="shared data is not available|is not the local shared"):
+        run(real, m)
+    assert holdout_looks() == []
+
+
+def test_a_round_cannot_skip_the_one_before_it(spent):
+    """Registering round 7 first would stash six untouched looks."""
+    m, config = spent
+    with pytest.raises(ValueError, match="needs round 6 to have been spent"):
+        open_holdout(m, dataclasses.replace(config, holdout_round=7))
+    assert len(holdout_looks()) == 1
+
+
+def test_rounds_are_spent_in_order(spent):
+    m, config = spent
+    open_holdout(m, dataclasses.replace(config, holdout_round=1))
+    open_holdout(m, dataclasses.replace(config, holdout_round=2))
+    assert [look["holdout_round"] for look in holdout_looks()] == [0, 1, 2]

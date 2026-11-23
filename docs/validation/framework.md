@@ -290,22 +290,32 @@ The decision rule is a hashed field of `GateConfig` (`decision_rule`): the
 rule and its q (baseline, BH at 0.05) are in the config hash, so changing
 either re-registers the gate; the gate run takes them from the config.
 
-**One look per dataset, not per config.** Re-registering is how a *threshold*
-changes; it is not how a *look* is obtained. The holdout look is spent on
-`GateConfig.look_key` — `"<data_version>#<holdout_round>"` — so no change to
-the seed, the draws, a threshold, the decision rule, the coverage floor, the
-trial scope, the generator, the holdout dates, or the candidate set opens the
-holdout again. Only genuinely new data (a new `data_version`) or a **declared**
-second round (`holdout_round`, default 0) does, and a declared round is itself
-spent once. `gate.holdout_looks()` lists every look on the raw ledger for audit.
+**One look per holdout, not per config.** Re-registering is how a *threshold*
+changes; it is not how a *look* is obtained. The look is spent on
+`GateConfig.look_key` — `"<dataset>#<holdout_round>"` — where `dataset` is
+`holdout_authority.REAL_DATASET` for real data and `synthetic:<id>` for a
+simulated world, and within one key a window already spent refuses any
+**overlapping** window. So none of the seed, the draws, a threshold, the
+decision rule, the coverage floor, the trial scope, the generator, the data
+label, a re-slice of the same dates, or a fresh candidate set opens the holdout
+again. Only a genuinely later window, or a **declared** `holdout_round`
+(consecutive: round *k* needs round *k−1* spent), does.
 
-Keying the budget on the config hash instead made every hashed field a way to
-buy another look, including fields that cannot change which candidates are
-selected. Measured on signal-free data at `daccc5d`: four looks under one
-dataset from nothing but `seed` 0, 1, 2, 3 — two of which accepted a family.
+Two further guards: a real config's `data_version` must equal
+`sd.data_version()`, so the recorded provenance is true; and
+`gate.holdout_looks()` lists every look on the raw ledger for audit.
+
+Two earlier keys were wrong, both measured on signal-free data. **`config_hash`**
+(`daccc5d`) made every hashed field a way to buy a look — four looks from
+nothing but `seed` 0, 1, 2, 3, two of which accepted a family. **`data_version`**
+(#360's first attempt) only moved the hole: the field is free text that nothing
+verified, so `"synthetic "`, `"Synthetic"` and `"synthetic-recheck"` each bought
+a look on identical data. It is also the wrong unit — `sd.data_version()` hashes
+the whole manifest, so re-pulling one 1995 row would reopen 2021–2025.
+
 `tests/test_gate_look_budget.py` enumerates every hashed field and pins the
-refusal; its `test_every_hashed_field_is_classified` fails when a new hashed
-field is added without deciding which bucket it belongs in.
+refusal; `test_every_hashed_field_is_classified` fails when a new hashed field
+is added without deciding which bucket it belongs in.
 **Superseded hashes (2026-11-18).** `8bda49ec…` and `5e89d78a…` are superseded by `5f590f13…`.
 The decision rule, q, stage thresholds and data are unchanged. `5e89d78a…` → `8bda49ec…` added the
 stage-4 coverage guard (`min_holdout_coverage`), and `8bda49ec…` → `5f590f13…` moved `decision_rule` into
