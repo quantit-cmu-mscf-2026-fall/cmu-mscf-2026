@@ -49,6 +49,12 @@ their own name.
    The provider's answer is refused unless it is exactly those columns on
    dates in [`holdout_start`, `holdout_end`], finite (the look stays spent).
    A survivor with no holdout returns fails stage 4.
+   Real data (a `data_version` other than "synthetic") also needs a
+   `holdout_authority` protocol, authorized for this config and generator
+   and checked before anything is computed. The gate spends it with
+   `open_once` (ISO dates, the survivors' ids) before it logs its own look,
+   so a refused authority leaves no look on the ledger, and the provider
+   reads inside that look with the `access` it is passed.
 4. **Graded scores never decide.** `grading` computes them from the search
    period; nothing reads them back.
 5. **The decision rule decides `accepted`.** The config carries a `DecisionRule`
@@ -79,7 +85,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from capstone import funnel, grading, runlog
+from capstone import funnel, grading, holdout_authority, runlog
 from capstone.evaluate import average_correlation, bh_adjusted
 from capstone.funnel import Thresholds, thresholds_dict
 from capstone.scorecard import (
@@ -129,6 +135,8 @@ DEFAULT_MIN_HOLDOUT_COVERAGE = 0.5
 # Stage 4's source of holdout returns: (variant ids, holdout_start, holdout_end)
 # -> dates x those variants, on holdout dates only. The gate ships no provider:
 # the caller supplies one, and it is called only after the look is logged.
+# With a `holdout_authority` protocol it is also passed `access=` (the open
+# look's token for `shared_data.load(..., holdout_access=access)`).
 HoldoutProvider = Callable[[Sequence[str], pd.Timestamp, pd.Timestamp], pd.DataFrame]
 
 
@@ -442,6 +450,43 @@ def required_holdout_obs(config: GateConfig) -> int:
     return max(funnel.MIN_PERIOD_OBS, math.ceil(config.min_holdout_coverage * n_days))
 
 
+def _checked_protocol(
+    config: GateConfig,
+    protocol: holdout_authority.FinalHoldoutProtocol | None,
+    authority_root: str | Path | None,
+) -> None:
+    """Real data opens its holdout only through an authorized protocol for this config.
+
+    Read-only (`require_authorized` inspects the store), so a refusal spends
+    nothing. Synthetic data may run without one, as the tests do.
+    """
+    real = config.data_version != SYNTHETIC_DATA_VERSION
+    if protocol is None:
+        if real:
+            raise holdout_authority.HoldoutSealed(
+                f"data_version {config.data_version!r} is real data: pass the "
+                "holdout_authority protocol authorized for this config (protocol=...)"
+            )
+        return
+    if real and protocol.payload["dataset"] != holdout_authority.REAL_DATASET:
+        raise holdout_authority.HoldoutSealed(
+            f"real data needs a protocol on {holdout_authority.REAL_DATASET!r}, "
+            f"not {protocol.payload['dataset']!r}"
+        )
+    holdout_authority.require_authorized(
+        protocol,
+        config_hash=config.config_hash,
+        generator_id=config.generator,
+        synthetic_root=authority_root,
+    )
+    first, last = protocol.payload["period"]
+    if not first <= config.holdout_start <= config.holdout_end <= last:
+        raise holdout_authority.HoldoutSealed(
+            f"the protocol's period [{first}, {last}] does not cover the registered holdout "
+            f"[{config.holdout_start}, {config.holdout_end}]"
+        )
+
+
 def _checked_stage3(config: GateConfig) -> None:
     if config.factors_digest is not None:
         raise ValueError(
@@ -457,6 +502,8 @@ def run_gate(
     *,
     holdout: HoldoutProvider,
     authorizer: str,
+    protocol: holdout_authority.FinalHoldoutProtocol | None = None,
+    authority_root: str | Path | None = None,
 ) -> GateResult:
     """Run the registered gate once.
 
@@ -471,6 +518,14 @@ def run_gate(
             called when nothing reaches stage 4.
         authorizer: who authorises the look at the holdout; required, recorded
             in the look entry.
+        protocol: the `holdout_authority` protocol for this look; required on
+            real data. It must be authorized, bound to this config's hash and
+            generator, on the real dataset for real data, and its frozen
+            candidate ids must include the stage-3 survivors' variants (freezing
+            every searched variant id does). The gate spends it with `open_once`
+            before logging its own look and passes the provider `access=`.
+        authority_root: the protocol's `synthetic_root` (tests only; the real
+            dataset's store is fixed).
         (The config's `decision_rule` decides `accepted`: the baseline is BH
         on the stage-1 bootstrap p-values at its q; the funnel is every
         stage passing. The other is reported (`funnel_pass`, the stage
@@ -485,8 +540,12 @@ def run_gate(
         GateNotRegistered: no registration entry has this config's hash.
         HoldoutAlreadyOpened: the holdout was looked at under this hash.
         LookupError: from `runlog.trial_count`, when the scope matches nothing.
+        holdout_authority.HoldoutSealed: the protocol is missing on real data,
+            unauthorized, bound elsewhere, or does not cover the survivors or
+            the holdout dates; raised before either look is logged.
     """
     authorizer = _checked_authorizer(authorizer)
+    _checked_protocol(config, protocol, authority_root)
     decision_rule = config.decision_rule
     if decision_rule.rule == "baseline" and config.thresholds.stage1 != "bootstrap":
         raise ValueError(
@@ -530,25 +589,43 @@ def run_gate(
     # The look: logged before the provider is asked for anything.
     chosen = stats["best"].where(stages["stage3"])
     ids = tuple(chosen.dropna())
-    runlog.log_run(
-        LOOK_NAME,
-        params={
-            "config_hash": h,
-            "generator": config.generator,
-            "data_version": config.data_version,
-            "authorizer": authorizer,
-            "decision_rule": dataclasses.asdict(decision_rule),
-            "candidates": [str(b) for b in ids],
-        },
-        seed=config.seed,
-        tags=[GATE_TAG, SYNTHETIC_TAG],
-        notes="stage 4 opens the holdout under this config; it may not be opened again",
-    )
-    if ids:
-        start, end = pd.Timestamp(config.holdout_start), pd.Timestamp(config.holdout_end)
+
+    def log_look() -> None:
+        runlog.log_run(
+            LOOK_NAME,
+            params={
+                "config_hash": h,
+                "generator": config.generator,
+                "data_version": config.data_version,
+                "authorizer": authorizer,
+                "decision_rule": dataclasses.asdict(decision_rule),
+                "candidates": [str(b) for b in ids],
+            },
+            seed=config.seed,
+            tags=[GATE_TAG, SYNTHETIC_TAG],
+            notes="stage 4 opens the holdout under this config; it may not be opened again",
+        )
+
+    start, end = pd.Timestamp(config.holdout_start), pd.Timestamp(config.holdout_end)
+    if not ids:
+        log_look()
+        ho_returns = pd.DataFrame(index=pd.DatetimeIndex([]))
+    elif protocol is None:
+        log_look()
         ho_returns = _checked_holdout(holdout(ids, start, end), ids, config)
     else:
-        ho_returns = pd.DataFrame(index=pd.DatetimeIndex([]))
+        # The authority refuses (candidates, dates, state) before it spends
+        # anything, so the gate's look is logged only once the dataset's is.
+        with holdout_authority.open_once(
+            protocol,
+            candidates=[str(b) for b in ids],
+            start=start.date().isoformat(),
+            end=end.date().isoformat(),
+            synthetic_root=authority_root,
+        ) as access:
+            log_look()
+            frame = holdout(ids, start, end, access=access)
+        ho_returns = _checked_holdout(frame, ids, config)
     # Every stage-3 survivor reaches stage 4. One whose chosen variant has too
     # few holdout returns (`required_holdout_obs`: none, or a sliver of the
     # window) is not tested: it fails, and stays in the family at p = 1.

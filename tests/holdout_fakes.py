@@ -23,6 +23,8 @@ def make_protocol(
     source_version="synthetic:v1",
     procedure_id=None,
     calibrated=True,
+    period=authority.REAL_PERIOD,
+    candidate_ids=("a" * 16,),
 ):
     cfg = cfg or FakeConfig()
     procedure_id = procedure_id or digest("synthetic allocation procedure")
@@ -47,11 +49,11 @@ def make_protocol(
     return authority.prepare_protocol(
         cfg,
         dataset=dataset,
-        period=authority.REAL_PERIOD,
+        period=period,
         source_version=source_version,
         sources=sources or {"synthetic_daily": "1" * 64},
         procedure_id=procedure_id,
-        candidate_ids=["a" * 16],
+        candidate_ids=list(candidate_ids),
         calibration=calibration,
     )
 
