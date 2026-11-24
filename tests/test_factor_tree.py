@@ -6,6 +6,7 @@ import pytest
 
 from capstone.factors.tree import (
     FIELDS,
+    FUNDAMENTAL_FIELDS,
     OHLCV,
     BinOp,
     Const,
@@ -168,7 +169,24 @@ def test_a_verbatim_alpha101_member_is_not_original(verbatim):
 def test_new_fields_parse_and_turnover_is_expressible():
     node = parse("rank(ts_mean(volume / shares, 21)) * -ts_sum(returns, 5) / log(cap)")
     assert features_used(node) == {"volume", "shares", "returns", "cap"}
-    assert set(FIELDS) == {*OHLCV, "returns", "shares", "cap"}
+    assert set(FIELDS) == {*OHLCV, "returns", "shares", "cap", "mkt_return", *FUNDAMENTAL_FIELDS}
+
+
+def test_market_return_writes_beta_and_idiosyncratic_volatility():
+    # QUANTIT-82: Ang et al. (2006)'s idiosyncratic volatility, the residual of
+    # returns on the market, is now expressible without a new operator, and
+    # stays inside the proposer's node limit.
+    beta = "ts_cov(returns, mkt_return, 63) / ts_cov(mkt_return, mkt_return, 63)"
+    idio = parse(f"-ts_std(returns - {beta} * mkt_return, 21)")
+    assert features_used(idio) == {"returns", "mkt_return"}
+    assert node_count(idio) <= 30
+    assert "mkt_return" in features_used(parse("ts_std(mkt_return, 21) * rank(cap)"))
+
+
+def test_a_factor_from_market_fields_alone_is_rejected():
+    # Same value for every stock on a date: it cannot rank stocks.
+    with pytest.raises(ParseError, match="no stock field"):
+        parse("ts_std(mkt_return, 21)")
 
 
 def test_a_published_alpha_is_not_original_with_the_returns_field_either():
@@ -268,6 +286,43 @@ def test_every_capstone_subpackage_is_listed_for_installation():
         for init in (root / "capstone").rglob("__init__.py")
     }
     assert found <= listed, f"add to [tool.setuptools] packages: {sorted(found - listed)}"
+
+
+# ---------------------------------------------------------------------------
+# Frequent subtree avoidance (Alpha Jungle Sec. 3)
+
+
+def test_root_genes_have_only_field_leaves_and_ignore_windows():
+    from capstone.factors.tree import gene_text, root_genes
+
+    genes = root_genes(parse("rank(ts_mean(close, 5) / volume) * signed_power(returns, 2)"))
+    # signed_power(returns, 2) has a constant leaf; bare fields are not genes.
+    assert genes == root_genes(parse("rank(ts_mean(close, 20) / volume)"))
+    assert "(signed_power F:returns C)" not in genes and "F:close" not in genes
+    assert root_genes(parse("ts_mean(close, 5)")) == root_genes(parse("ts_mean(close, 63)"))
+    assert gene_text(parse("ts_corr(close, volume, 21)")) == "ts_corr(close, volume, t)"
+
+
+def test_frequent_genes_are_closed_counted_once_per_factor_and_capped_at_k():
+    from capstone.factors.tree import frequent_root_genes
+
+    trees = [
+        parse("rank(close / shift(close, 5))"),
+        parse("rank(close / shift(close, 20))"),
+        parse("close / shift(close, 10) * volume"),
+        parse("ts_std(returns, 21) + ts_std(returns, 63)"),
+    ]
+    found = frequent_root_genes(trees, k=3)
+    texts = [text for _, _, text in found]
+    # shift(close, t) is in three factors, but so is its parent close / shift(close, t):
+    # only the larger, closed structure is named.
+    assert texts[0] == "(close / shift(close, t))" and found[0][1] == 0.75
+    assert "shift(close, t)" not in texts
+    assert texts[1] == "rank((close / shift(close, t)))"
+    # ts_std(returns, t) twice in one factor still counts once, and once is not frequent.
+    assert all("ts_std" not in t for t in texts)
+    assert len(frequent_root_genes(trees, k=1)) == 1
+    assert frequent_root_genes([], k=3) == []
 
 
 NEGATED_CORR = [
@@ -388,3 +443,42 @@ def test_subtracting_is_adding_a_negation():
     assert factor_id(parse("close - (open + volume)")) == factor_id(parse("close - open - volume"))
     assert factor_id(parse("close - 0 - open")) != factor_id(parse("close - open"))
     assert factor_id(parse("close + 0 - open")) != factor_id(parse("close - open"))
+
+
+@pytest.mark.parametrize(
+    ("spelling", "gene"),
+    [
+        ("shift({}, {})", "shift(returns, t)"),
+        ("-(-({}))", "(close / open)"),
+        ("-(-(close) * volume)", None),
+    ],
+)
+def test_a_gene_that_canonicalises_into_its_own_parent_is_still_frequent(spelling, gene):
+    # `shift(shift(x, a), b)` and `-(-K)` share a key with their own child: the gene
+    # must not close itself out.
+    from capstone.factors.tree import frequent_root_genes
+
+    if spelling.startswith("-(-(close) *"):
+        # Each spelling of the product is the other's parent in one tree.
+        trees = [
+            parse("-(-(close) * volume) + returns"),
+            parse("-(close * volume) + high"),
+            parse("-(-(close) * volume) / open"),
+        ]
+        supports = [s for _, s, text in frequent_root_genes(trees, k=5) if "volume" in text]
+        assert supports == [1.0]
+        return
+    if spelling.startswith("shift"):
+        trees = [
+            parse("shift(shift(returns, 1), 5) * volume"),
+            parse("shift(returns, 3) / close"),
+            parse("shift(returns, 10) * volume"),
+        ]
+    else:
+        trees = [
+            parse("-(-(close / open)) * volume"),
+            parse("-(-(close / open)) + returns"),
+            parse("-(-(close / open)) - high"),
+        ]
+    found = {text: support for _, support, text in frequent_root_genes(trees, k=5)}
+    assert found.get(gene) == 1.0

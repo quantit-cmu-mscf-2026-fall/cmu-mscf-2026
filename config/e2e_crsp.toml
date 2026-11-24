@@ -1,0 +1,88 @@
+# The end-to-end driver on CRSP, real-data mode (capstone.pipeline.config).
+#
+# The search covers 1990-2020 and registers the gate config; the holdout
+# (2021-2025) is opened once, later, and never by the search driver. Data is
+# loaded only through `capstone.shared_data` (`sd.load`).
+
+[run]
+run_id = "crsp-v1"
+seed = 0
+# Data version: this label, the caller's `source_version` (sd.data_version())
+# and a digest of the search rows.
+data_label = "crsp-sp500-daily"
+# Every model call of the run (papers, alignment judge, deepen edits, the
+# agent) counts; the call that would exceed this raises before it is sent.
+# 300 is the team default (capstone.pipeline.config.DEFAULT_MAX_MODEL_CALLS).
+max_model_calls = 300
+# The paper list is the team's choice; this is the checked-in example file.
+papers = "config/papers.example.toml"
+
+[periods]
+search_start = "1990-01-01"   # loaded through capstone.shared_data
+search_end = "2020-12-31"     # DISCOVERY_END: deepen, evaluation, gate stages 1-3
+holdout_start = "2021-01-01"  # gate stage 4 only, once, by the holdout look
+holdout_end = "2025-12-31"
+
+[factors]
+# config/factors.toml is the baseline; this run states what it relies on.
+model = "claude-opus-5"
+max_tokens = 16000
+prompt_version = "v7"
+hypotheses_per_paper = 3
+factors_per_hypothesis = 4
+max_repairs = 2
+max_zoo_share = 0.75
+max_store_share = 1.0
+max_nodes = 30
+avoid_frequent_subtrees = 3
+alignment_model = "claude-haiku-4-5"
+min_alignment = 0.0
+
+[deepen]
+rounds = 20
+max_calls = 100  # deepen's own cap on its editor's and agent's calls
+selector = "agent"
+# The run's call budget used up during deepen: stop deepening and go on to
+# evaluation and registration with every child so far ("stop"), or raise.
+on_budget = "stop"
+# Monthly, not sector-neutral.
+hold = 21
+neutral = "none"
+
+[evaluation]
+holds = [1, 5, 21]
+neutral = ["none", "sector"]
+
+[gate]
+# The registered generator (scripts/gate_crsp_v1.json): the model, prompt version
+# and selector above. tests/test_e2e_config.py checks it and the thresholds.
+generator = "factor-trees/claude-opus-5/v7/agent-deepen"
+# A floor: the driver raises it to the family count's need (>= 20 x families,
+# n_boot + 1 rounded up to a multiple of 500).
+n_boot = 1999
+# The registered thresholds: stage 1 is the bootstrap family maximum, then BH
+# across families; stage 4 is BH at q4 = 0.50 over the survivors.
+[gate.thresholds]
+q1 = 0.1
+stage1 = "bootstrap"
+alpha2 = 1.0
+final = "bh"
+d4 = 0.95
+q4 = 0.5
+final_trials = "survivors"
+
+# Fama-French 5 + momentum (capstone.data.load_ff5_momentum; downloaded once
+# and cached), cut to the search period.
+[stage3]
+factors = "ff5_momentum"
+seed = 0
+
+[trading]
+gross = 1.0
+min_trade = 0.0001
+
+[incubation]
+alpha = 0.05
+horizon = 252
+live_edge = "expected"
+block = 20

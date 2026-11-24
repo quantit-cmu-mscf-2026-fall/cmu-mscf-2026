@@ -12,9 +12,10 @@ behave over time (autocorrelation, tails, volatility clustering).
 It reads only the return matrix and each variant's family. It never keeps or
 reports a mean, Sharpe ratio or p-value (returns are only centred), so nothing
 it reports says whether any strategy works, and the thresholds calibrated from
-it can't be steered by which real candidates look good. The result is logged to
-the ledger (tags `synthetic` and `methodology`: bookkeeping, not a trial) before
-it is printed.
+it can't be steered by which real candidates look good. A matrix with any date on
+or after `gate.HOLDOUT_OPENS` is refused before anything is measured or logged.
+The result is logged to the ledger (tags `synthetic` and `methodology`:
+bookkeeping, not a trial) before it is printed.
 """
 
 from __future__ import annotations
@@ -26,9 +27,21 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from capstone.gate import HOLDOUT_OPENS
 from capstone.runlog import log_run
 
 MIN_OVERLAP = 252  # days two variants must share for their correlation to count
+
+
+def search_period_only(returns: pd.DataFrame) -> pd.DataFrame:
+    """`returns` unchanged; raises ValueError if any date is on or after `HOLDOUT_OPENS`."""
+    last = returns.index.max()
+    if len(returns) and last.date() >= HOLDOUT_OPENS:
+        raise ValueError(
+            f"the matrix runs to {last.date()}, past the search period: the holdout opens "
+            f"{HOLDOUT_OPENS}, and its structure is not measured"
+        )
+    return returns
 
 
 def _pair_means(corr: pd.DataFrame, family: pd.Series) -> tuple[float, float, float]:
@@ -120,7 +133,7 @@ def main() -> None:
     returns = pd.read_parquet(args.matrix)
     if "date" in returns.columns:
         returns = returns.set_index("date")
-    returns.index = pd.DatetimeIndex(returns.index)
+    returns = search_period_only(returns.set_axis(pd.DatetimeIndex(returns.index)))
     # Only the family label: the summary's performance columns are never loaded.
     family = pd.read_parquet(args.summary, columns=["hypothesis_id"])["hypothesis_id"]
 

@@ -61,6 +61,31 @@ def test_days_before_a_variants_first_return_are_not_idle():
     assert m["idle_share"]["median"] == pytest.approx(495 / 2495, abs=1e-4)
 
 
+@pytest.mark.parametrize(("last", "refused"), [("2020-12-31", False), ("2021-01-01", True)])
+def test_a_matrix_reaching_the_holdout_is_refused(last, refused):
+    returns = pd.DataFrame({"a-v": [0.01, 0.02]}, index=pd.to_datetime(["2020-12-30", last]))
+    if refused:
+        with pytest.raises(ValueError, match="past the search period"):
+            measure_generator.search_period_only(returns)
+    else:
+        assert measure_generator.search_period_only(returns) is returns
+
+
+def test_the_script_refuses_holdout_dates_before_logging(tmp_path, monkeypatch):
+    dates = pd.bdate_range("2020-12-01", "2021-01-29")
+    returns = pd.DataFrame({"a-v": 0.01, "b-v": -0.01}, index=dates).rename_axis("date")
+    returns.reset_index().to_parquet(tmp_path / "matrix.parquet")
+    family = pd.DataFrame({"hypothesis_id": ["f", "f"]}, index=returns.columns)
+    family.to_parquet(tmp_path / "summary.parquet")
+    logged = []
+    monkeypatch.setattr(measure_generator, "log_run", lambda *a, **k: logged.append(a))
+    argv = ["measure_generator.py", "--matrix", str(tmp_path / "matrix.parquet")]
+    monkeypatch.setattr("sys.argv", [*argv, "--summary", str(tmp_path / "summary.parquet")])
+    with pytest.raises(ValueError, match="past the search period"):
+        measure_generator.main()
+    assert logged == []
+
+
 def test_measure_reports_each_familys_correlation_apart_from_the_pooled_mean():
     # One large tight family and one small loose one: the pooled mean follows
     # the large family's pairs, the per-family numbers keep the small one visible.
