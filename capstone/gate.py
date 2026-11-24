@@ -239,6 +239,11 @@ class GateConfig:
         if not 0.0 < float(coverage) <= 1.0:
             raise ValueError(f"min_holdout_coverage must be in (0, 1], got {coverage!r}")
         object.__setattr__(self, "min_holdout_coverage", float(coverage))
+        if self.thresholds.promote != "accept":
+            raise ValueError(
+                'promote="incubate" is not wired into the gate yet: it would be registered '
+                "and then never emitted. Use promotion.decide on a decided card."
+            )
         if not isinstance(self.decision_rule, DecisionRule):
             raise TypeError(
                 f"decision_rule must be a DecisionRule, not {type(self.decision_rule).__name__}"

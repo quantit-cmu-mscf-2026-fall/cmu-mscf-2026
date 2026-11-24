@@ -46,10 +46,12 @@ from capstone.search_fdr import bootstrap_family_pvalues, search_adjusted_pvalue
 Stage1Method = Literal["independent", "rho", "bootstrap"]
 FinalGate = Literal["dsr", "bh"]
 FinalTrials = Literal["searched", "survivors"]
+Promote = Literal["accept", "incubate"]
 
 STAGE1_METHODS: tuple[str, ...] = get_args(Stage1Method)
 _FINAL_GATES: tuple[str, ...] = get_args(FinalGate)
 _FINAL_TRIALS: tuple[str, ...] = get_args(FinalTrials)
+PROMOTE_MODES: tuple[str, ...] = get_args(Promote)
 
 # The holdout statistics stage 4 reads, per carried-forward variant.
 _HOLDOUT_FIELDS = ("p", "sharpe", "n_obs", "skew", "kurtosis", "variance")
@@ -137,6 +139,13 @@ class Thresholds:
     "dsr", the trial count it charges, "survivors" (only the candidates taken
     to the holdout, which is independent data) or "searched" (every variant
     tried; calibration found it cuts power to about a sixth).
+
+    promote: "accept" (the default: stage 4 accepts or rejects) or "incubate"
+    (opt-in, see `capstone.promotion`): a stage-3 survivor the gate did not accept but whose
+    BH-adjusted holdout p is <= `q4_incubate` is labelled incubate, never accepted.
+    q4_incubate is set with "incubate" and only then, q4 < q4_incubate < 1, and
+    needs final="bh" (it is a level on BH's adjusted p). Both stay out of
+    `thresholds_dict` while at their defaults.
     """
 
     q1: float = 0.10
@@ -146,6 +155,8 @@ class Thresholds:
     d4: float = 0.95
     q4: float = 0.30
     final_trials: FinalTrials = "survivors"
+    promote: Promote = "accept"
+    q4_incubate: float | None = None
 
     def __post_init__(self) -> None:
         if self.stage1 not in STAGE1_METHODS:
@@ -167,6 +178,7 @@ class Thresholds:
                 raise ValueError(f"{name} must be in (0, 1)")
         if not 0.0 < self.alpha2 <= 1.0:
             raise ValueError("alpha2 must be in (0, 1]; 1.0 means no stage-2 gate")
+        _check_promotion(self)
 
 
 _NUMERIC_FIELDS = ("q1", "alpha2", "d4", "q4")
@@ -188,6 +200,22 @@ def thresholds_dict(th: Thresholds) -> dict:
         if f.name not in _REGISTERED_FIELDS and out[f.name] == f.default:
             del out[f.name]
     return out
+
+
+def _check_promotion(th: Thresholds) -> None:
+    """`q4_incubate` is registered with, and only with, promote="incubate"."""
+    if th.promote not in PROMOTE_MODES:
+        raise ValueError(f"promote must be one of {PROMOTE_MODES}")
+    if th.promote == "accept":
+        if th.q4_incubate is not None:
+            raise ValueError('q4_incubate is read only with promote="incubate"; leave it None')
+        return
+    if th.final != "bh":
+        raise ValueError('promote="incubate" needs final="bh": q4_incubate is a BH level')
+    level = th.q4_incubate
+    if isinstance(level, bool) or not isinstance(level, numbers.Real) or not th.q4 < level < 1.0:
+        raise ValueError(f"q4_incubate must satisfy q4 ({th.q4}) < q4_incubate < 1, got {level}")
+    object.__setattr__(th, "q4_incubate", float(level))
 
 
 # ---------------------------------------------------------------------------
