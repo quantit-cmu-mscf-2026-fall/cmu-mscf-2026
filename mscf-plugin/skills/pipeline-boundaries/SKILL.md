@@ -5,8 +5,8 @@ description: The rules no change to the cmu-mscf-2026 pipeline may break - seale
 
 # Pipeline boundaries
 
-These are the project's invariants. Each one names where it is written down; a hook
-can only be a coarse second line, never a replacement. When a request
+These are the project's invariants. Each one names where it is written down; the plugin's
+guard hook (`hooks/guard.py`) is a coarse second line, never a replacement. When a request
 would cross one, stop and say which rule it crosses instead of finding a way around it.
 
 ## 1. The holdout is sealed

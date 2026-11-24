@@ -5,16 +5,30 @@ from __future__ import annotations
 import builtins
 import importlib
 import json
+import os
 import pkgutil
 import re
+import shutil
+import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 import capstone
 
 ROOT = Path(__file__).resolve().parent.parent
 PLUGIN = ROOT / "mscf-plugin"
 SKILLS = sorted(PLUGIN.glob("skills/*/SKILL.md"))
-MARKDOWN = [*SKILLS, *PLUGIN.glob("skills/*/references/*.md"), PLUGIN / "README.md"]
+AGENTS = sorted(PLUGIN.glob("agents/*.md"))
+COMMANDS = sorted(PLUGIN.glob("commands/*.md"))
+MARKDOWN = [
+    *SKILLS,
+    *AGENTS,
+    *COMMANDS,
+    *PLUGIN.glob("skills/*/references/*.md"),
+    PLUGIN / "README.md",
+]
 
 
 def frontmatter(path: Path) -> dict[str, str]:
@@ -27,9 +41,58 @@ def frontmatter(path: Path) -> dict[str, str]:
 def test_manifest_and_marketplace_entry():
     plugin = json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
     assert plugin["name"] == "mscf-pipeline" and plugin["version"]
+    hooks = json.loads((PLUGIN / plugin["hooks"]).read_text(encoding="utf-8"))
+    commands = [
+        h["command"] for groups in hooks["hooks"].values() for g in groups for h in g["hooks"]
+    ]
+    assert commands and all("${CLAUDE_PLUGIN_ROOT}/hooks/guard.py" in c for c in commands)
+    assert (PLUGIN / "hooks" / "guard.py").is_file()
     market = json.loads((ROOT / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8"))
     (entry,) = [p for p in market["plugins"] if p["name"] == "mscf-pipeline"]
     assert (ROOT / entry["source"] / ".claude-plugin" / "plugin.json").is_file()
+
+
+def _hook_commands() -> list[str]:
+    hooks = json.loads((PLUGIN / "hooks" / "hooks.json").read_text(encoding="utf-8"))
+    return [h["command"] for groups in hooks["hooks"].values() for g in groups for h in g["hooks"]]
+
+
+def test_the_hook_command_is_not_bare_python():
+    commands = _hook_commands()
+    assert commands
+    for command in commands:
+        assert not re.match(r"\s*python\b", command), command
+        assert re.search(r"command -v python3\b.*exec python3 .*command -v python\b", command)
+        assert command.rstrip().endswith("exit 2; fi")
+
+
+def _run_hook(command: str, path: str, stdin: str):
+    sh = shutil.which("sh")
+    if sh is None:
+        pytest.skip("no POSIX sh to run the hook command")
+    env = {**os.environ, "PATH": path, "CLAUDE_PLUGIN_ROOT": str(PLUGIN)}
+    return subprocess.run(
+        [sh, "-c", command], input=stdin, capture_output=True, text=True, env=env, timeout=60
+    )
+
+
+def test_the_hook_command_denies_when_no_python_is_on_path(tmp_path):
+    for command in _hook_commands():
+        done = _run_hook(command, str(tmp_path), "{}")
+        assert done.returncode == 2 and "python" in done.stderr, done
+
+
+def test_the_hook_command_runs_the_guard_with_a_python_on_path():
+    path = str(Path(sys.executable).parent) + os.pathsep + os.environ["PATH"]
+    push = json.dumps(
+        {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "git push -f origin main"},
+        }
+    )
+    done = _run_hook(_hook_commands()[0], path, push)
+    assert done.returncode == 2 and "mscf-pipeline guard" in done.stderr, done
 
 
 def test_skills_have_usable_frontmatter():
@@ -50,6 +113,18 @@ def test_skills_have_usable_frontmatter():
             r"Use (when|before)", meta["description"]
         )
         assert len(path.read_text(encoding="utf-8").splitlines()) < 500
+
+
+def test_agents_are_read_only_and_defer_review_to_the_repo_harness():
+    assert [p.stem for p in AGENTS] == ["ship-checker"]
+    assert (ROOT / ".claude" / "agents" / "pr-reviewer.md").is_file()
+    for path in AGENTS:
+        meta = frontmatter(path)
+        body = path.read_text(encoding="utf-8")
+        assert meta["name"] == path.stem and body.count("<example>") >= 2
+        tools = {t.strip() for t in meta["tools"].split(",")}
+        assert tools == {"Read", "Grep", "Glob", "Bash"}
+        assert "/review-pr" in body and "REVIEW.md" in body
 
 
 ALIASES = {"sd": "shared_data", "ev": "evaluate"}
@@ -94,8 +169,7 @@ def _capstone_names() -> set[str]:
     return names
 
 
-# Backticked words that are ledger columns or other libraries' names.
-NOT_CAPSTONE = {"bh", "by", "q", "lfdr", "Path", "Series", "DataFrame"}
+NOT_CAPSTONE = {"bh", "by", "q", "lfdr", "Path", "Series", "DataFrame", "Bash"}
 CLASS_SPAN = re.compile(r"`([A-Z][a-z0-9]+(?:[A-Z][a-z0-9]*)+)`")  # a bare class name in prose
 CALL = re.compile(r"(?<![\w.])([A-Za-z_]\w*)\((?!s\))")  # not the prose "seed(s)"
 SPAN = re.compile(r"`([^`\n]+)`")
@@ -147,5 +221,5 @@ def test_the_plugin_carries_no_private_or_host_specific_text():
     banned = re.compile(
         r"ibkr|interactive brokers|OMP_NUM_THREADS|[A-Za-z]:\\[A-Za-z]|/Users/|/home/", re.I
     )
-    for path in [*MARKDOWN, *PLUGIN.rglob("*.json")]:
+    for path in [*MARKDOWN, *PLUGIN.rglob("*.json"), PLUGIN / "hooks" / "guard.py"]:
         assert not banned.search(path.read_text(encoding="utf-8")), path

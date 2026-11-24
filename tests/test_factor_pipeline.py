@@ -10,7 +10,7 @@ import pytest
 from capstone.factors import __main__ as cli
 from capstone.factors import store
 from capstone.factors.llm import FactorConfig
-from capstone.factors.pipeline import run
+from capstone.factors.pipeline import RunSummary, default_zoo, process_paper, run
 from capstone.factors.sources import FileSource, PaperlogSource
 
 HYPOTHESIS = {
@@ -97,6 +97,101 @@ def test_run_stores_the_chain_and_marks_only_finished_papers(tmp_path):
     assert citation == "A et al., 2025"
 
 
+class MeteredClient(ScriptedClient):
+    """Reports 100 input and 10 output tokens per call, so usage is not all zeros."""
+
+    def create(self, **kwargs):
+        response = super().create(**kwargs)
+        response.usage = SimpleNamespace(input_tokens=100, output_tokens=10)
+        return response
+
+
+class RefusingSource(ListSource):
+    """Cannot record the hand-off for one paper (as when paperlog's database is locked)."""
+
+    def done(self, keys):
+        if "arxiv:locked" in keys:
+            raise OSError("database is locked")
+        super().done(keys)
+
+
+# Written out by hand from the pipeline's contract, not computed by the code under test:
+# "ok" and "locked" each cost an extraction and a proposal call (two calls); "bad" fails
+# on its first call, which is never metered. A paper whose hand-off fails is failed, not
+# done, but its spend is still recorded.
+PAPERS = [
+    {"key": "arxiv:ok", "title": "Works"},
+    {"key": "arxiv:bad", "title": "FAIL here"},
+    {"key": "arxiv:locked", "title": "Hand-off fails"},
+]
+EXPECTED_DONE = ["arxiv:ok"]
+EXPECTED_FAILED = {
+    "arxiv:bad": "RuntimeError: model unavailable",
+    "arxiv:locked": "OSError: database is locked",
+}
+EXPECTED_HYPOTHESES = {"market": 2}
+EXPECTED_USAGE = {"calls": 4, "input_tokens": 400, "output_tokens": 40}
+EXPECTED_USAGE_ROWS = [
+    ("arxiv:ok", "test-model", 2, 200, 20),
+    ("arxiv:locked", "test-model", 2, 200, 20),
+]
+
+
+def _what_was_kept(con):
+    papers = [r[0] for r in con.execute("SELECT key FROM papers ORDER BY key")]
+    spend = [
+        tuple(r)
+        for r in con.execute(
+            "SELECT paper_key, model, calls, input_tokens, output_tokens FROM usage ORDER BY id"
+        )
+    ]
+    return papers, spend, len(store.factors(con))
+
+
+def _check_summary(summary):
+    assert summary.papers_done == EXPECTED_DONE
+    assert summary.papers_failed == EXPECTED_FAILED
+    assert dict(summary.hypotheses) == EXPECTED_HYPOTHESES
+    assert sum(summary.outcomes.values()) == 2  # one proposal per market hypothesis
+    assert dict(summary.usage) == EXPECTED_USAGE
+
+
+def test_run_over_a_source_matches_the_hand_written_expectation(tmp_path):
+    con = store.connect(tmp_path / "run.db")
+    source = RefusingSource(PAPERS)
+    _check_summary(run(con, source, MeteredClient(), CONFIG))
+    assert source.marked == EXPECTED_DONE
+    papers, spend, n_factors = _what_was_kept(con)
+    assert papers == ["arxiv:bad", "arxiv:locked", "arxiv:ok"]
+    assert spend == EXPECTED_USAGE_ROWS
+    assert n_factors == 1  # both papers propose the same expression: one factor
+
+
+def test_process_paper_one_at_a_time_matches_the_same_expectation(tmp_path):
+    con = store.connect(tmp_path / "each.db")
+    source = RefusingSource(PAPERS)
+    summary, zoo = RunSummary(), default_zoo()
+    for paper in source.papers():
+        process_paper(
+            con, paper, MeteredClient(), CONFIG, zoo, "RefusingSource", summary, source.done
+        )
+    _check_summary(summary)
+    assert source.marked == EXPECTED_DONE
+    papers, spend, n_factors = _what_was_kept(con)
+    assert papers == ["arxiv:bad", "arxiv:locked", "arxiv:ok"]
+    assert spend == EXPECTED_USAGE_ROWS
+    assert n_factors == 1
+
+
+def test_process_paper_without_a_hand_off_still_finishes_the_paper(tmp_path):
+    con = store.connect(tmp_path / "solo.db")
+    summary = RunSummary()
+    process_paper(
+        con, PAPERS[0], MeteredClient(), CONFIG, default_zoo(), "ListSource", summary, None
+    )
+    assert summary.papers_done == ["arxiv:ok"] and not summary.papers_failed
+
+
 def test_paperlog_source_claims_papers_through_its_api(monkeypatch):
     calls = {}
 
@@ -154,6 +249,29 @@ def test_cli_run_list_lineage_and_stats(tmp_path, monkeypatch, capsys):
     assert cli.main(["--db", db, "stats"]) == 0
     assert "factors 1" in capsys.readouterr().out
     assert cli.main(["--db", db, "lineage", "0000000000000000"]) == 1
+
+
+def test_cli_isolated_paper_mode_stores_what_sequential_does(tmp_path, monkeypatch, capsys):
+    papers = tmp_path / "papers.toml"
+    papers.write_text('[[papers]]\nkey = "arxiv:1"\ntitle = "Reversal"\nabstract = "A"\n')
+    config = tmp_path / "factors.toml"
+    config.write_text(
+        'model = "test-model"\nhypotheses_per_paper = 1\nfactors_per_hypothesis = 1\n'
+    )
+    monkeypatch.setattr(cli, "make_client", ScriptedClient)
+    base = ["run", "--source", "file", str(papers), "--config", str(config)]
+
+    out = {}
+    for name, extra in (("seq", []), ("iso", ["--paper-mode", "isolated", "--concurrency", "2"])):
+        db = str(tmp_path / f"{name}.db")
+        assert cli.main(["--db", db, *base, *extra]) == 0
+        out[name] = capsys.readouterr().out
+        assert cli.main(["--db", db, "list"]) == 0
+        out[name + "-list"] = capsys.readouterr().out
+    assert out["seq"] == out["iso"] and out["seq-list"] == out["iso-list"]
+
+    assert cli.main(["--db", str(tmp_path / "x.db"), *base, "--concurrency", "2"]) == 2
+    assert "--paper-mode isolated" in capsys.readouterr().err
 
 
 def _fake_paperlog(monkeypatch, rows):
@@ -297,6 +415,8 @@ def test_read_commands_leave_legacy_stores_unchanged(tmp_path, command):
     con = store.connect(path)
     con.execute("ALTER TABLE hypotheses DROP COLUMN kind")
     con.execute("ALTER TABLE proposals DROP COLUMN proposed_factor_id")
+    for column in ("alignment", "alignment_reason", "alignment_model"):
+        con.execute(f"ALTER TABLE proposals DROP COLUMN {column}")
     con.execute("DROP TABLE usage")
     con.commit()
     con.close()
