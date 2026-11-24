@@ -91,7 +91,7 @@ seen; that untouched holdout is what makes a loose screen safe.
 |---|---|---|---|---|
 | 1. Screen | Search period, 1990–2020 (#43) | BH ≤ q₁ across hypothesis families, on each family's search-adjusted p-value (bootstrap max) | BY, Holm, `lfdr`, raw p | Search-adjusted FDR, average correlation |
 | 2. Robustness | Search period | — (no gate; see "Stage 2" below) | PSR, lag / cost / sub-period sensitivity | PBO of the search |
-| 3. Incremental value | Search period; frequency to decide (monthly anomaly portfolios, or daily factors as #75 proposes) | Spanning alpha p ≤ α₃ | Factor loadings | — |
+| 3. Incremental value | Search period; daily FF5 + Momentum (#75); monthly anomaly portfolios deferred | Spanning alpha p ≤ α₃ | Factor loadings | — |
 | 4. Final decision | Holdout, 2021–2025, looked at once | BH ≤ q₄ across the survivors' one-sided holdout p-values | Deflated Sharpe, haircut Sharpe, Holm, MinTRL | — |
 | 5. Incubation | Live or paper | — | Realised vs. expected Sharpe | — |
 
@@ -326,6 +326,26 @@ the baseline in simulation, so the baseline decides (Q5); the funnel is
 reported beside it because its holdout guards against what the simulation
 doesn't model.
 
+**Idle days (2026-11-19, `scripts/calibrate_crsp_v1_idle.json`, 400 seeds).** The worlds
+above trade every day, so stage 4's coverage guard never fired in them. Rerun with each
+family idle (NaN returns) a share of days, in runs of 21 days on average, and the guard
+applied as the gate applies it (`min_holdout_coverage = 0.5`):
+
+| Idle share | 0 | 0.2 | 0.4 | 0.6 |
+|---|---|---|---|---|
+| Baseline, q = 0.05 | 0.042 / 0.865 | 0.050 / 0.816 | 0.036 / 0.765 | 0.059 / 0.682 |
+| Funnel, q₁ = 0.10, q₄ = 0.50 | 0.047 / 0.850 | 0.058 / 0.803 | 0.038 / 0.687 | 0.000 / 0.025 |
+
+Worst-setting FDR / mean power. Both rules stay under 0.08 at every share, so idle days
+don't change the registration. The baseline loses power gradually, since fewer active days
+carry less evidence. The funnel collapses once the idle share nears the guard: at 0.6 almost
+every survivor has returns on fewer than half the holdout's days and fails stage 4 untested.
+The 0 column reproduces the registered numbers above, so the guard changes nothing on
+worlds without idle days. `measure_generator.py` now reports each variant's idle share and
+idle-run length, counted from its first to its last return. If crsp-v1's idle share is
+near 0.5, the funnel column reported beside the baseline says little, and the guard
+should be set relative to each variant's own activity rather than to the calendar.
+
 These thresholds belong to this generator. A new agent, model, prompt set or
 search budget needs `measure_generator.py` and a new calibration.
 
@@ -390,7 +410,7 @@ Recorded 2026-10-05 and 2026-10-06 from the review of #50; updated 2026-10-21.
 | Q5 | Calibration target | A flat 10% end-to-end FDR; the baseline (BH on the bootstrap family p-values, #67) decides until the funnel beats it, at the level calibration registers (crsp-v1: q = 0.05) |
 | — | Where stage 2's fresh data comes from | **Proposed from calibration:** no separate period; stage 2 reports graded robustness checks and the holdout confirms (#68) |
 | — | Stage 3's gate is the spanning alpha test | **To confirm** with its owner |
-| — | Stage 3's frequency: monthly anomaly portfolios or daily factors (#75) | **Open**, with its owner; needed before α₃ means anything |
+| — | Stage 3's frequency: monthly anomaly portfolios or daily factors (#75) | **Daily** (#75): Fama–French five factors plus momentum first; Chen & Zimmermann's monthly anomaly portfolios considered later. α₃ is registered for the daily test once stage 3 is built |
 | — | Funnel or bootstrap baseline as the deciding rule | **Baseline for crsp-v1** (registered 2026-11-16): the funnel didn't beat it in calibration. Revisit if the team weighs the holdout's protection higher |
 
 ## What this page changes, and what it doesn't

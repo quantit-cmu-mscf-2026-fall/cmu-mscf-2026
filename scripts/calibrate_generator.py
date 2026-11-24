@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import itertools
 import json
+import math
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
@@ -28,7 +29,7 @@ import numpy as np
 import pandas as pd
 
 from capstone.calibration import run_baseline
-from capstone.funnel import Thresholds, run_funnel
+from capstone.funnel import MIN_PERIOD_OBS, Thresholds, run_funnel
 from capstone.power import PowerSpec, null_side, planted_side
 from capstone.runlog import log_run
 
@@ -45,7 +46,20 @@ def _spec(p: dict) -> PowerSpec:
         garch=tuple(p["garch"]) if p["garch"] else None,
         n_boot=p["n_boot"],
         thresholds=Thresholds(stage1="bootstrap"),
+        idle_share=p.get("idle_share", 0.0),
+        idle_run=p.get("idle_run", 21.0),
     )
+
+
+def _min_holdout_obs(p: dict) -> int | None:
+    """Stage 4's coverage guard as the gate applies it (`gate.required_holdout_obs`),
+    on the simulated holdout's length; None when the file registers no guard."""
+    coverage = p.get("min_holdout_coverage")
+    if coverage is None:
+        return None
+    if not 0.0 < coverage <= 1.0:
+        raise ValueError(f"min_holdout_coverage must be in (0, 1], got {coverage!r}")
+    return max(MIN_PERIOD_OBS, math.ceil(coverage * _spec(p).holdout_periods))
 
 
 def _rules(p: dict) -> dict:
@@ -65,6 +79,7 @@ def one_seed(args: tuple[dict, int]) -> list[dict]:
     families = side.stats.index
     rng = np.random.default_rng(seed)
     rules = _rules(p)
+    min_holdout_obs = _min_holdout_obs(p)
     out = []
     for n_real, sharpe in itertools.product(p["n_real"], p["sharpe_real"]):
         if n_real == 0 and sharpe != p["sharpe_real"][0]:
@@ -74,7 +89,7 @@ def one_seed(args: tuple[dict, int]) -> list[dict]:
         real = families.isin(targets)
         for name, rule in rules.items():
             if isinstance(rule, Thresholds):
-                accepted = run_funnel(stats, rule)["stage4"]
+                accepted = run_funnel(stats, rule, min_holdout_obs=min_holdout_obs)["stage4"]
             else:
                 accepted = run_baseline(stats, q=rule, stage1="bootstrap")
             accepted = accepted.reindex(families, fill_value=False).to_numpy()
@@ -124,7 +139,10 @@ def main() -> None:
     args = parser.parse_args()
     p = json.loads(args.params.read_text(encoding="utf-8"))
     seeds = range(*p["seeds"])
-    _spec(p)  # refuse a configuration the funnel can't run before logging it
+    idle = p.get("idle_share", 0.0)
+    settings = [p | {"idle_share": s} for s in idle] if isinstance(idle, list) else [p]
+    for setting in settings:
+        _min_holdout_obs(setting)
 
     log_run(
         "generator-calibration",
@@ -132,19 +150,26 @@ def main() -> None:
         tags=["synthetic", "calibration"],
         notes=f"{args.params.name}; capstone.power worlds, stage 1 bootstrap",
     )
-    with ProcessPoolExecutor(args.workers) as pool:
-        rows = pd.DataFrame(
-            [r for batch in pool.map(one_seed, [(p, s) for s in seeds]) for r in batch]
-        )
-    if args.out:
-        rows.to_csv(args.out, index=False)
-    by_rule, per_setting = summarise(rows, p["target_fdr"], p["margin"])
     pd.set_option("display.width", 160)
-    print(f"{len(seeds)} seeds; target FDR {p['target_fdr']} with margin {p['margin']}\n")
-    print(by_rule.round(3).to_string())
-    best = by_rule[by_rule["safe"]].index
-    for name in [*best[:1], *[r for r in by_rule.index if r.startswith("baseline")]]:
-        print(f"\n{name}\n{per_setting.loc[name].round(3).to_string()}")
+    print(f"{len(seeds)} seeds; target FDR {p['target_fdr']} with margin {p['margin']}")
+    for setting in settings:
+        with ProcessPoolExecutor(args.workers) as pool:
+            rows = pd.DataFrame(
+                [r for batch in pool.map(one_seed, [(setting, s) for s in seeds]) for r in batch]
+            )
+        if args.out:
+            out = args.out
+            if len(settings) > 1:
+                out = out.with_stem(f"{out.stem}_idle{setting['idle_share']}")
+            rows.to_csv(out, index=False)
+        by_rule, per_setting = summarise(rows, p["target_fdr"], p["margin"])
+        if len(settings) > 1:
+            print(f"\n=== idle_share {setting['idle_share']} ===")
+        print(f"\n{by_rule.round(3).to_string()}")
+        best = by_rule[by_rule["safe"]].index
+        shown = [*best[:1], *[r for r in by_rule.index if r.startswith("baseline")]]
+        for name in dict.fromkeys(shown):
+            print(f"\n{name}\n{per_setting.loc[name].round(3).to_string()}")
 
 
 if __name__ == "__main__":
