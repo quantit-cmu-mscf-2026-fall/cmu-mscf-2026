@@ -14,7 +14,7 @@ from capstone.factors import store
 from capstone.factors.hypotheses import extract
 from capstone.factors.llm import FactorConfig, grammar_help, load_config
 from capstone.factors.proposer import propose
-from capstone.factors.tree import BINARY_PARAMETER_FUNCS, BINARY_WINDOW_FUNCS, FUNCS
+from capstone.factors.tree import BINARY_PARAMETER_FUNCS, BINARY_WINDOW_FUNCS, FUNCS, parse
 from capstone.factors.zoo import ALPHA101_EXPRESSIONS
 
 
@@ -273,3 +273,174 @@ def test_call_tool_counts_calls_and_tokens():
     for _ in range(2):
         call_tool(client, CONFIG, system="s", user="u", tool={"name": "t"}, usage=usage)
     assert usage == {"calls": 2, "input_tokens": 2400, "output_tokens": 600}
+
+
+def test_grammar_help_explains_the_market_field():
+    help_text = grammar_help()
+    assert "mkt_return" in help_text and "value-weighted market return" in help_text
+    assert "per-stock field" in help_text
+
+
+# ---------------------------------------------------------------------------
+# Hypothesis-formula alignment (QUANTIT-83)
+
+
+def _verdict(variables=True, direction=True, horizon=True, reason="ok"):
+    return {"variables": variables, "direction": direction, "horizon": horizon, "reason": reason}
+
+
+def test_alignment_score_is_the_share_of_checks_passed_and_uses_the_judge_model():
+    from capstone.factors.alignment import judge
+
+    config = FactorConfig(model="proposer-model", alignment_model="judge-model")
+    hypothesis = {**HYPOTHESIS, "id": "h1"}
+    client = FakeClient(_verdict(), _verdict(direction=False, reason="sign flipped"))
+    assert judge(client, config, hypothesis, "-ts_sum(returns, 5)").score == 1.0
+    half = judge(client, config, hypothesis, "ts_sum(returns, 5)")
+    assert half.score == pytest.approx(2 / 3)
+    assert half.reason == "fails direction: sign flipped"
+    assert {call["model"] for call in client.calls} == {"judge-model"}
+    assert "Minus the 5-day return." in client.calls[0]["messages"][0]["content"]
+
+
+def test_a_misaligned_formula_is_rejected_and_its_score_kept(con, hid):
+    strict = FactorConfig(model="m", alignment_model="j", min_alignment=1.0, max_repairs=0)
+    answers = _factors("-ts_sum(returns, 5)", "ts_mean(volume / shares, 21) / log(cap)")
+    client = FakeClient(answers, _verdict(), _verdict(direction=False, reason="sign"))
+    kept, dropped = propose(con, hid, client, strict)
+    assert kept.status == "stored" and dropped.status == "rejected"
+    assert dropped.reason.startswith("misaligned: 0.67 < 1.0; fails direction")
+    rows = con.execute("SELECT status, alignment, alignment_model FROM proposals").fetchall()
+    assert {(r["status"], round(r["alignment"], 2), r["alignment_model"]) for r in rows} == {
+        ("stored", 1.0, "j"),
+        ("rejected", 0.67, "j"),
+    }
+
+
+def test_without_a_judge_model_no_alignment_call_is_made(con, hid):
+    client = FakeClient(_factors("-ts_sum(returns, 5)"))
+    (outcome,) = propose(con, hid, client, CONFIG)
+    assert outcome.status == "stored" and len(client.calls) == 1
+
+
+class JudgeFails(FakeClient):
+    """Answers the proposal, then raises `error` on the alignment judge's call."""
+
+    def __init__(self, error, *answers):
+        super().__init__(*answers)
+        self.error = error
+
+    def create(self, **kwargs):
+        if self.calls:
+            raise self.error
+        return super().create(**kwargs)
+
+
+def test_a_judge_failure_is_a_rejection_but_a_stop_is_not_swallowed(con, hid):
+    from capstone.factors.research_requests import ResearchPaused
+    from capstone.pipeline.budget import CallBudgetExceeded
+
+    config = FactorConfig(model="m", alignment_model="j", factors_per_hypothesis=1)
+    (outcome,) = propose(
+        con, hid, JudgeFails(ValueError("x"), _factors("-ts_sum(returns, 5)")), config
+    )
+    assert outcome.status == "rejected" and "alignment judge failed" in outcome.reason
+    for stop in (CallBudgetExceeded("out of calls"), ResearchPaused("paused")):
+        before = con.execute("SELECT COUNT(*) FROM proposals").fetchone()[0]
+        client = JudgeFails(stop, _factors("-ts_sum(returns, 10)"))
+        with pytest.raises(type(stop)):
+            propose(con, hid, client, config)
+        assert con.execute("SELECT COUNT(*) FROM proposals").fetchone()[0] == before
+
+
+def test_shipped_config_records_alignment_but_rejects_nothing_until_calibrated():
+    config = load_config()
+    assert config.alignment_model == "claude-haiku-4-5"
+    assert config.min_alignment == 0.0
+
+
+def test_a_store_from_before_alignment_gains_the_columns(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path)
+    lines = store.SCHEMA.splitlines()
+    old.executescript("\n".join(line for line in lines if "alignment" not in line))
+    assert "alignment" not in {row[1] for row in old.execute("PRAGMA table_info(proposals)")}
+    old.commit()
+    old.close()
+    con = store.connect(path)
+    columns = {row[1] for row in con.execute("PRAGMA table_info(proposals)")}
+    assert {"alignment", "alignment_reason", "alignment_model"} <= columns
+
+
+def test_judge_tokens_are_counted_apart_from_the_proposer():
+    from collections import Counter
+
+    from capstone.factors.alignment import judge
+
+    class Metered(FakeClient):
+        def create(self, **kwargs):
+            response = super().create(**kwargs)
+            response.usage = SimpleNamespace(input_tokens=500, output_tokens=40)
+            return response
+
+    usage = Counter()
+    config = FactorConfig(alignment_model="judge-model")
+    judge(Metered(_verdict()), config, {**HYPOTHESIS, "id": "h"}, "-returns", usage=usage)
+    expected = {"alignment_calls": 1, "alignment_input_tokens": 500, "alignment_output_tokens": 40}
+    assert usage == expected
+
+
+# ---------------------------------------------------------------------------
+# Frequent subtree avoidance in the proposer
+
+
+def test_an_overused_structure_is_named_in_the_prompt_and_rejected(con, hid):
+    for expression in ("rank(close / shift(close, 5))", "ts_mean(close / shift(close, 20), 5)"):
+        store.add_factor(con, parse(expression), hid)
+    config = FactorConfig(model="m", avoid_frequent_subtrees=1, max_repairs=0)
+    candidate = "ts_rank(close / shift(close, 10), 21) * log(cap)"
+    client = FakeClient(_factors(candidate, "ts_mean(volume / shares, 21) / log(cap)"))
+    overused, fresh = propose(con, hid, client, config)
+    assert overused.status == "rejected"
+    assert overused.reason == "frequent subtree: (close / shift(close, t))"
+    assert fresh.status == "stored"
+    assert "do not use them: (close / shift(close, t))." in client.calls[0]["system"]
+
+
+def test_avoidance_off_leaves_the_prompt_and_checks_unchanged(con, hid):
+    for expression in ("rank(close / shift(close, 5))", "ts_mean(close / shift(close, 20), 5)"):
+        store.add_factor(con, parse(expression), hid)
+    config = FactorConfig(model="m", avoid_frequent_subtrees=0, max_repairs=0)
+    client = FakeClient(_factors("ts_rank(close / shift(close, 10), 21) * log(cap)"))
+    (outcome,) = propose(con, hid, client, config)
+    assert outcome.status == "stored" and "overused" not in client.calls[0]["system"]
+
+
+def test_a_failed_judge_call_is_still_counted_and_the_batch_is_recorded(con, hid):
+    # The judge answers in text instead of calling the tool. Its call
+    # and tokens must reach `usage`, and both parsed proposals must get a row.
+    from collections import Counter
+
+    class TextJudge(FakeClient):
+        def create(self, **kwargs):
+            if kwargs["tools"][0]["name"] == "record_alignment":
+                self.calls.append(kwargs)
+                usage = SimpleNamespace(input_tokens=7, output_tokens=3)
+                return SimpleNamespace(content=[SimpleNamespace(type="text")], usage=usage)
+            return super().create(**kwargs)
+
+    client = TextJudge(
+        {
+            "factors": [{"expression": "-ts_mean(returns, 5)", "rationale": "r"}] * 1
+            + [{"expression": "-ts_mean(returns, 9)", "rationale": "r"}]
+        }
+    )
+    config = FactorConfig(model="m", alignment_model="j", factors_per_hypothesis=2, max_repairs=0)
+    usage: Counter = Counter()
+    outcomes = propose(con, hid, client, config, zoo=[], usage=usage)
+    assert [o.status for o in outcomes] == ["rejected", "rejected"]
+    assert all("alignment judge failed" in o.reason for o in outcomes)
+    assert usage["alignment_calls"] == 2 and usage["alignment_input_tokens"] == 14
+    assert con.execute("SELECT COUNT(*) FROM proposals").fetchone()[0] == 2

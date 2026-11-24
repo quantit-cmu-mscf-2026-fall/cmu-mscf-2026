@@ -58,43 +58,61 @@ def run(con: sqlite3.Connection, source, client, config: FactorConfig) -> RunSum
     """
     summary = RunSummary()
     zoo = default_zoo()
+    name = type(source).__name__
     for paper in source.papers():
-        key = paper["key"]
-        usage: Counter = Counter()
-        try:
-            store.add_paper(
-                con,
-                key,
-                paper["title"],
-                url=paper.get("url") or "",
-                citation=_citation(paper),
-                source=type(source).__name__,
+        process_paper(con, paper, client, config, zoo, name, summary, source.done)
+    return summary
+
+
+def process_paper(
+    con: sqlite3.Connection,
+    paper: dict,
+    client,
+    config: FactorConfig,
+    zoo,
+    source_name: str,
+    summary: RunSummary,
+    done=None,
+) -> None:
+    """One paper, as `run` processes it; `done([key])` (if given) is the source's hand-off."""
+    key = paper["key"]
+    usage: Counter = Counter()
+    try:
+        store.add_paper(
+            con,
+            key,
+            paper["title"],
+            url=paper.get("url") or "",
+            citation=_citation(paper),
+            source=source_name,
+        )
+        for hypothesis in extract(paper, client, config, usage=usage):
+            hid = store.add_hypothesis(
+                con, hypothesis, model=config.model, prompt_version=config.prompt_version
             )
-            for hypothesis in extract(paper, client, config, usage=usage):
-                hid = store.add_hypothesis(
-                    con, hypothesis, model=config.model, prompt_version=config.prompt_version
-                )
-                summary.hypotheses[hypothesis.kind] += 1
-                if hypothesis.kind != "market":
-                    continue
-                for outcome in propose(con, hid, client, config, zoo=zoo, usage=usage):
-                    summary.outcomes[outcome.status] += 1
-            # Inside the try: if the source cannot record the hand-off (paperlog's
-            # database locked, say), this paper is reported as failed and stays
-            # pending, and the rest of the run goes on.
-            source.done([key])
-            summary.papers_done.append(key)
-        except Exception as exc:  # noqa: BLE001 - one paper's failure must not stop the run
-            summary.papers_failed[key] = f"{type(exc).__name__}: {exc}"
-        finally:
-            summary.usage.update(usage)
-            if usage["calls"]:
+            summary.hypotheses[hypothesis.kind] += 1
+            if hypothesis.kind != "market":
+                continue
+            for outcome in propose(con, hid, client, config, zoo=zoo, usage=usage):
+                summary.outcomes[outcome.status] += 1
+        # Inside the try: if the source cannot record the hand-off (paperlog's
+        # database locked, say), this paper is reported as failed and stays
+        # pending, and the rest of the run goes on.
+        if done is not None:
+            done([key])
+        summary.papers_done.append(key)
+    except Exception as exc:  # noqa: BLE001 - one paper's failure must not stop the run
+        summary.papers_failed[key] = f"{type(exc).__name__}: {exc}"
+    finally:
+        summary.usage.update(usage)
+        # The alignment judge runs on its own model, priced separately.
+        for model, prefix in ((config.model, ""), (config.alignment_model, "alignment_")):
+            if usage[f"{prefix}calls"]:
                 store.record_usage(
                     con,
                     key,
-                    config.model,
-                    calls=usage["calls"],
-                    input_tokens=usage["input_tokens"],
-                    output_tokens=usage["output_tokens"],
+                    model,
+                    calls=usage[f"{prefix}calls"],
+                    input_tokens=usage[f"{prefix}input_tokens"],
+                    output_tokens=usage[f"{prefix}output_tokens"],
                 )
-    return summary
