@@ -6,6 +6,7 @@ nothing is pushed and no network is used (a remote's URL is only read, never con
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import subprocess
@@ -61,9 +62,6 @@ def note(done) -> str:
     return json.loads(done.stdout)["systemMessage"] if done.stdout else ""
 
 
-# --- the always-on rules ----------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     "command",
     [
@@ -76,7 +74,6 @@ def note(done) -> str:
         "printenv",
         "git add experiments/runs.jsonl",
         "git add data_cache/wrds/sp500_daily_1990_2025.parquet",
-        # force pushes through global options, +refspec and clustered flags
         "git -C . push --force origin main",
         "git -c push.default=simple push -f origin main",
         "git --git-dir=.git push --force origin main",
@@ -88,32 +85,100 @@ def note(done) -> str:
         "git push --force-with-lease origin HEAD:main",
         "sudo git push -f",
         'bash -c "git push --force origin main"',
-        # forced or aliased adds of working data
         "git add -f .sessions",
         "git add -f .sessions/2026-11-19.jsonl",
         "git stage -f experiments/runs.jsonl",
         "git stage -f .sessions",
         "git -C . add -f data_cache",
         "git add -f experiments/RUNS.JSONL",
-        # holdout dates: ends after 2020, compact dates, as-of and before
         "python -m experiments.momentum --end 2026-06-30",
         "python -m experiments.momentum --end 20230630",
         "python -m experiments.momentum --as-of=2024-01-01",
         "python -c \"sd.load('x', end='2026-01-01')\"",
         "python -c \"sd.load('x', end='20260101')\"",
         "python -m experiments.momentum --start 20210104",
-        # secrets read without a print verb
         "printenv ANTHROPIC_API_KEY",
         "cat <<< $ANTHROPIC_API_KEY",
         "$env:ANTHROPIC_API_KEY",
         "gci env:ANTHROPIC_API_KEY",
         "Get-ChildItem env:",
         "Get-Item env:WRDS_PASSWORD",
-        # the ledger written through the shell
         "echo x >> experiments/runs.jsonl",
         "rm experiments/runs.jsonl",
         "sed -i '$d' experiments/runs.jsonl",
         "Remove-Item experiments/RUNS.jsonl",
+        "(git push -f origin main)",
+        "{ git push -f origin main; }",
+        "if true; then git push -f origin main; fi",
+        "! git push --force origin main",
+        "true & git push -f origin main",
+        "eval 'git push -f origin main'",
+        "eval git push -f origin main",
+        "xargs git push --force",
+        "xargs -n1 git push -f",
+        "git push --mirror",
+        "git push --mirror origin",
+        "echo $(git push -f origin main)",
+        "echo `git push -f origin main`",
+        'echo "$(git push -f origin main)"',
+        "env -i git push -f origin main",
+        "bash -ec 'git push -f origin main'",
+        "git push --for origin topic",
+        "git add -f .",
+        "git add -f -A",
+        "git add -fA",
+        "git add --force experiments",
+        "git add -f experiments/",
+        "git add -f ':/'",
+        "git add -f 'exp*'",
+        "git add -f mscf-plugin",
+        "git -C . add --force .",
+        "python -m experiments.momentum --end-date 2026-06-30",
+        "python -m experiments.momentum --end_date=2026-06-30",
+        "python -m experiments.momentum --test-start 2022-01-01",
+        "python -m experiments.momentum --start-date 2021-01-04",
+        "python3 -m experiments.momentum --end 2023-01-01",
+        "uv run python s.py --end 2023-01-01",
+        "uv run s.py --end 2023-01-01",
+        "cd experiments && python s.py --end 2023-01-01",
+        'bash -c "python s.py --end 2023-01-01"',
+        "python -c \"import pandas as pd; pd.Timestamp('2023-01-01')\"",
+        "cat ~/.pgpass",
+        "cat ~/.netrc",
+        "gh auth token",
+        "export",
+        "export -p",
+        "declare -x",
+        "env -0",
+        "env -0 2>&1",
+        "python -c \"import os; print(os.environ['ANTHROPIC_API_KEY'])\"",
+        'python -c "import os; print(dict(os.environ))"',
+        "python -c \"import os; print(os.getenv('WRDS_PASSWORD'))\"",
+        "sed --in-place '$d' experiments/runs.jsonl",
+        "sed -i.bak '$d' experiments/runs.jsonl",
+        "perl -pi -e 's/a/b/' experiments/runs.jsonl",
+        "awk -i inplace '1' experiments/runs.jsonl",
+        "python -c \"open('experiments/runs.jsonl', 'w').write('')\"",
+        "python -c \"open('experiments/runs.jsonl', mode='a')\"",
+        "python -c \"import pathlib; pathlib.Path('experiments/runs.jsonl').write_text('')\"",
+        "rm experiments/run?.jsonl",
+        "rm experiments/*.jsonl",
+        "mv experiments/runs.jsonl /tmp/gone.jsonl",
+        "cp /tmp/x.jsonl experiments/runs.jsonl",
+        "echo x | tee -a experiments/runs.jsonl",
+        "git rm experiments/runs.jsonl",
+        "find experiments -name runs.jsonl -delete",
+        "Copy-Item -Destination experiments/runs.jsonl -Path x.jsonl",
+        "bash -c 'rm experiments/runs.jsonl'",
+        "> experiments/runs.jsonl",
+        ">experiments/runs.jsonl",
+        "cd experiments && > runs.jsonl",
+        "git push origin :main",
+        "git push origin :master",
+        "git push origin :refs/heads/main",
+        "git push --delete origin main",
+        "git push origin --delete main",
+        "git push -d origin main",
     ],
 )
 def test_denies(command):
@@ -141,11 +206,71 @@ def test_denies(command):
         'if ($env:ANTHROPIC_API_KEY) { "set" }',
         "tail -n 3 experiments/runs.jsonl 2>&1",
         "python -m capstone.runlog stats",
+        'git commit -m "run python s.py --end 2022-12-31 later"',
+        'gh pr create --body "we ran python -m scripts.x --start 2021-01-01"',
+        'git commit -m "never git push -f; open a PR"',
+        "echo 'git push --force is denied'",
+        "git add -n .",
+        "git add -- mscf-plugin",
+        "cp experiments/runs.jsonl /tmp/backup.jsonl",
+        "cp experiments/runs.jsonl /tmp/backup.jsonl 2>&1",
+        "wc -l experiments/runs.jsonl",
+        "cat experiments/runs.jsonl > /tmp/copy.jsonl",
+        "grep rm experiments/notes.txt",
+        "export FOO=bar",
+        "env FOO=1 pytest -q",
+        "gh auth status",
+        "cat ~/.gitconfig",
+        "python -c \"import os; print('ANTHROPIC_API_KEY' in os.environ)\"",
+        "python -c \"import os; print(os.environ.get('HOME'))\"",
+        "python -c \"import pandas as pd; pd.Timestamp('2019-01-01')\"",
+        "python -c \"print(open('experiments/runs.jsonl').read())\"",
     ],
 )
 def test_allows_including_a_clone_of_the_team_repo(command):
     done = guard(bash(command))
     assert done.returncode == 0 and not done.stderr
+
+
+def test_a_forced_add_is_denied_in_a_scratch_repo_where_it_would_stage_working_data(tmp_path):
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    git(scratch, "init", "-q", "-b", "topic")
+    (scratch / ".gitignore").write_text(".sessions/\nexperiments/runs.jsonl\n", encoding="utf-8")
+    (scratch / ".sessions").mkdir()
+    (scratch / ".sessions" / "s.jsonl").write_text("{}", encoding="utf-8")
+    (scratch / "experiments").mkdir()
+    (scratch / "experiments" / "runs.jsonl").write_text("{}", encoding="utf-8")
+    (scratch / "ok.py").write_text("x = 1", encoding="utf-8")
+
+    git(scratch, "add", "-f", ".")
+    staged = git(scratch, "ls-files").split()
+    assert ".sessions/s.jsonl" in staged and "experiments/runs.jsonl" in staged
+    git(scratch, "rm", "-r", "-q", "--cached", ".")
+
+    for command in ["git add -f .", "git add -f experiments", "git add -f -A", "git add -f :/"]:
+        assert denied(guard(bash(command, cwd=scratch), cwd=scratch)), command
+    for command in ["git add .", "git add ok.py", "git add -A"]:
+        done = guard(bash(command, cwd=scratch), cwd=scratch)
+        assert done.returncode == 0 and not done.stderr, command
+
+
+def test_force_with_lease_without_a_refspec_is_denied_only_on_main(tmp_path):
+    scratch = tmp_path / "lease"
+    scratch.mkdir()
+    git(scratch, "init", "-q", "-b", "main")
+    commit(scratch, "a.txt")
+    for command in [
+        "git push --force-with-lease",
+        "git push --force-with-lease origin",
+        "git push --force-with-lease origin HEAD",
+        "git push origin --force-with-lease",
+    ]:
+        assert denied(guard(bash(command, cwd=scratch), cwd=scratch)), command
+    git(scratch, "checkout", "-q", "-b", "cal/topic")
+    for command in ["git push --force-with-lease", "git push --force-with-lease origin"]:
+        done = guard(bash(command, cwd=scratch), cwd=scratch)
+        assert done.returncode == 0 and not done.stderr, command
 
 
 def test_denies_editing_the_ledger_and_data_and_warns_on_holdout_dates_in_code():
@@ -205,9 +330,6 @@ def test_reports_the_ledger_count_after_an_experiment_script(tmp_path):
     assert guard(bash("ls", "PostToolUse")).stdout == ""
 
 
-# --- opt-in: guarded paths --------------------------------------------------------------------
-
-
 def test_no_path_is_guarded_unless_configured():
     for command in [r"git -C D:\other\clone status", "ls /srv/shared/clone"]:
         assert guard(bash(command)).returncode == 0
@@ -224,7 +346,6 @@ def test_guarded_paths_deny_commands_and_edits_that_name_them(tmp_path):
         done = guard(bash(command), env)
         assert denied(done) and "MSCF_GUARD_DENY_PATHS" in done.stderr, command
     assert denied(guard(edit("Write", Path("/srv/shared/clone/a.py"), content="x"), env))
-    # a sibling with the same stem, and everything else (the team repo included), is untouched
     for command in [
         "ls /srv/shared/clone-two",
         "ls /srv/shared/cloned",
@@ -232,9 +353,6 @@ def test_guarded_paths_deny_commands_and_edits_that_name_them(tmp_path):
     ]:
         assert guard(bash(command), env).returncode == 0, command
     assert guard(edit("Write", tmp_path / "ok.py", content="x"), env).returncode == 0
-
-
-# --- opt-in: no-reply emails on pushes --------------------------------------------------------
 
 
 def git(repo: Path, *args: str, email: str = NOREPLY) -> str:
@@ -304,7 +422,7 @@ def test_denies_a_push_carrying_a_non_noreply_email(repo):
 
 
 def test_allows_a_push_whose_commits_are_all_noreply(repo):
-    commit(repo, "b.txt")  # the bad first commit is already on origin/topic
+    commit(repo, "b.txt")
     for command in ["git push", "git push origin topic", f"git -C {repo} push origin topic"]:
         done = guard(bash(command, cwd=repo.parent if "-C" in command else repo), ON, repo)
         assert done.returncode == 0 and not done.stderr, (command, done)
@@ -328,3 +446,19 @@ def test_an_undeterminable_push_warns_rather_than_denies(repo):
     for command in ["git push --all origin", f"git push {TEAM_URL} topic"]:
         done = guard(bash(command, cwd=repo), ON, repo)
         assert "could not work out" in note(done), command
+
+
+def test_guard_source_has_no_python_310_syntax():
+    source = (ROOT / "mscf-plugin" / "hooks" / "guard.py").read_text(encoding="utf-8")
+    tree = ast.parse(source, feature_version=(3, 9))
+    assert not any(isinstance(n, ast.Match) for n in ast.walk(tree))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "zip":
+            assert all(k.arg != "strict" for k in node.keywords)
+
+
+@pytest.mark.parametrize(
+    "command", ["git push origin :feature", "git push --delete origin cal/topic"]
+)
+def test_deleting_a_non_protected_remote_branch_is_allowed(command):
+    assert not denied(guard(bash(command)))

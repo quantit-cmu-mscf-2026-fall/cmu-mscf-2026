@@ -51,6 +51,14 @@ def test_the_check_command_matches_the_repositorys_rules():
     assert "runs.jsonl" in text and "gitignored" in text
 
 
+def test_the_check_command_keeps_its_honesty_rules():
+    text = " ".join((ROOT / "mscf-plugin" / "commands" / "qp-check.md").read_text("utf-8").split())
+    assert "each command's exit code; all must be 0" in text
+    assert "Ruff must report no findings and no files to reformat" in text
+    assert 'Reporting "green" when any exit code is nonzero, a command was skipped' in text
+    assert "run with a different marker expression" in text
+
+
 def test_the_commands_carry_no_private_or_host_specific_text():
     banned = re.compile(
         r"ibkr|interactive brokers|OMP_NUM_THREADS|[A-Za-z]:\\[A-Za-z]|/Users/|/home/", re.I

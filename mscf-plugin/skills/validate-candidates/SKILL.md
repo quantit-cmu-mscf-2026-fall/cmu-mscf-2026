@@ -63,7 +63,7 @@ yes; a candidate strong only under `q` is not a discovery.
 |---|---|---|
 | 1 Screen | Worth a closer look? | BH across families on each family's `bootstrap_family_pvalues` (block bootstrap of the family maximum); `search_adjusted_pvalue` is a cross-check, not the gate |
 | 2 Robustness | Survives other lags, costs, sub-periods? Search overfit? | graded checks (CV, PBO) |
-| 3 Incremental | Adds beyond FF5 + momentum and known anomalies? | spanning alpha (planned) |
+| 3 Incremental | Adds beyond FF5 + momentum and known anomalies? | spanning alpha (`spanning.factor_alpha`; run on its own, not in `run_gate` yet) |
 | 4 Final | Allocate? | BH across survivors' holdout p-values, holdout looked at once |
 | 5 Incubation | Works live? | small paper capital |
 

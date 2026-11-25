@@ -12,9 +12,10 @@ behave over time (autocorrelation, tails, volatility clustering).
 It reads only the return matrix and each variant's family. It never keeps or
 reports a mean, Sharpe ratio or p-value (returns are only centred), so nothing
 it reports says whether any strategy works, and the thresholds calibrated from
-it can't be steered by which real candidates look good. The result is logged to
-the ledger (tags `synthetic` and `methodology`: bookkeeping, not a trial) before
-it is printed.
+it can't be steered by which real candidates look good. A matrix with any date on
+or after `gate.HOLDOUT_OPENS` is refused before anything is measured or logged.
+The result is logged to the ledger (tags `synthetic` and `methodology`:
+bookkeeping, not a trial) before it is printed.
 """
 
 from __future__ import annotations
@@ -26,9 +27,21 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from capstone.gate import HOLDOUT_OPENS
 from capstone.runlog import log_run
 
 MIN_OVERLAP = 252  # days two variants must share for their correlation to count
+
+
+def search_period_only(returns: pd.DataFrame) -> pd.DataFrame:
+    """`returns` unchanged; raises ValueError if any date is on or after `HOLDOUT_OPENS`."""
+    last = returns.index.max()
+    if len(returns) and last.date() >= HOLDOUT_OPENS:
+        raise ValueError(
+            f"the matrix runs to {last.date()}, past the search period: the holdout opens "
+            f"{HOLDOUT_OPENS}, and its structure is not measured"
+        )
+    return returns
 
 
 def _pair_means(corr: pd.DataFrame, family: pd.Series) -> tuple[float, float, float]:
@@ -56,6 +69,18 @@ def _within_by_family(corr: pd.DataFrame, family: pd.Series) -> dict[str, float]
     return out
 
 
+def _live(s: pd.Series) -> pd.Series:
+    """`s` from its first to its last return: days before inception are not idle days."""
+    return s.loc[s.first_valid_index() : s.last_valid_index()]
+
+
+def _mean_run(idle: pd.Series) -> float:
+    """Mean length of a variant's runs of idle (NaN) days; NaN if never idle."""
+    flags = np.r_[False, idle.to_numpy(), False].astype(int)
+    starts, ends = np.flatnonzero(np.diff(flags) == 1), np.flatnonzero(np.diff(flags) == -1)
+    return float((ends - starts).mean()) if len(starts) else np.nan
+
+
 def measure(returns: pd.DataFrame, family: pd.Series) -> dict:
     """Structure of a dates x variants matrix with one family label per variant."""
     returns = returns[family.index]
@@ -68,6 +93,9 @@ def measure(returns: pd.DataFrame, family: pd.Series) -> dict:
     sq_ar1 = (demeaned**2).apply(lambda s: s.dropna().autocorr(1))
     kurt = returns.apply(lambda s: s.dropna().kurt())  # excess kurtosis
     days = returns.notna().sum()
+    live = {c: _live(returns[c]) for c in returns.columns if returns[c].notna().any()}
+    idle_share = pd.Series({c: s.isna().mean() for c, s in live.items()})
+    idle_runs = pd.Series({c: _mean_run(s.isna()) for c, s in live.items()})
     variants = family.value_counts()
 
     def q(s: pd.Series) -> dict:
@@ -81,6 +109,8 @@ def measure(returns: pd.DataFrame, family: pd.Series) -> dict:
         "n_dates": int(len(returns)),
         "dates": [str(returns.index.min().date()), str(returns.index.max().date())],
         "days_per_variant": q(days),
+        "idle_share": q(idle_share),
+        "idle_run": q(idle_runs.dropna()),
         "within_family_corr": round(within, 4),
         "across_family_corr": round(across, 4),
         "within_factor_corr": round(within_factor, 4),
@@ -103,7 +133,7 @@ def main() -> None:
     returns = pd.read_parquet(args.matrix)
     if "date" in returns.columns:
         returns = returns.set_index("date")
-    returns.index = pd.DatetimeIndex(returns.index)
+    returns = search_period_only(returns.set_axis(pd.DatetimeIndex(returns.index)))
     # Only the family label: the summary's performance columns are never loaded.
     family = pd.read_parquet(args.summary, columns=["hypothesis_id"])["hypothesis_id"]
 
