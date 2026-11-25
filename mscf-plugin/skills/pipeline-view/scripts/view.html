@@ -154,7 +154,7 @@
   </section>
   <section id="tab-ledger" role="tabpanel" hidden>
   <div class="grid">
-    <div class="card tile"><h2>Trials in ledger</h2><div class="v" id="t-trials">–</div><div class="s">the n every correction uses</div></div>
+    <div class="card tile"><h2>Trials in ledger</h2><div class="v" id="t-trials">–</div><div class="s" id="t-trials-s">the n every correction uses</div></div>
     <div class="card tile"><h2>Experiments</h2><div class="v" id="t-names">–</div><div class="s" id="t-names-s"></div></div>
     <div class="card tile"><h2>Holdout reads</h2><div class="v" id="t-holdout">–</div><div class="s" id="t-holdout-s"></div></div>
     <div class="card tile"><h2>Ledger hygiene</h2><div class="v" id="t-hyg">–</div><div class="s" id="t-hyg-s"></div></div>
@@ -241,7 +241,8 @@ function status(kind, text) {
 
 function render(st) {
   $("meta").textContent = [st.branch && `${st.branch}@${st.sha}`, st.data_version && `data ${st.data_version}`, st.ledger].filter(Boolean).join(" · ");
-  $("t-trials").textContent = fmt(st.trials);
+  $("t-trials").textContent = st.ledger_error ? "error" : fmt(st.trials);
+  $("t-trials-s").textContent = st.ledger_error || "the n every correction uses";
   $("t-names").textContent = fmt(st.names);
   $("t-names-s").textContent = `${st.users} people · ${st.families} families`;
   const h = st.holdout_reads.length;
@@ -256,6 +257,7 @@ function render(st) {
   hbars($("names"), st.top_names, r => r.name.length > 16 ? r.name.slice(0, 15) + "…" : r.name, r => r.runs);
 
   const checks = [];
+  if (st.ledger_error) checks.push(status("bad", `Ledger problem: ${st.ledger_error}. The trial count is not shown until it is fixed (python -m capstone.runlog stats)`));
   if (!st.ledger_exists) checks.push(status("warn", "No ledger file yet: nothing has been logged with runlog.log_run"));
   checks.push(h > 1 ? status("bad", `Holdout read ${h} times: every read after the first is a new trial on 2021-2025`)
     : status("ok", h ? "Holdout read once" : "Holdout untouched"));

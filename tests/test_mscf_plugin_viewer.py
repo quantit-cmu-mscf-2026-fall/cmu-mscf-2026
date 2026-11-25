@@ -168,10 +168,23 @@ def test_snapshot_embeds_scene_and_escaped_state_without_the_session_id(tmp_path
     assert '<svg id="lab"' in html and "@font-face" not in html  # no bundled fonts: system faces
     assert "/*FONTS*/" not in html and "<!--SCENE-->" not in html
     assert "</script><b>" not in html and "secret-session" not in html
-    state = json.loads(
-        html.split("const SNAPSHOT = ", 1)[1].split(";\n", 1)[0].replace("<\\/", "</")
-    )
+    embedded = html.split("const SNAPSHOT = ", 1)[1].split(";\n", 1)[0]
+    state = json.loads(embedded)
     assert state["trials"] == 1 and state["rejects"]["screen"]["window"] == 1
+    assert str(tmp_path) not in html  # file names only: no home-directory paths
+    assert state["ledger"] == "runs.jsonl" and state["line"]["progress_dir"] == "p"
+
+
+def test_every_less_than_in_the_embedded_state_is_escaped(tmp_path):
+    ledger = tmp_path / "ledger"
+    ledger.mkdir()
+    entry = {"name": "<!--<script>", "ts_utc": datetime.now(UTC).isoformat(), "tags": []}
+    (ledger / "runs.jsonl").write_text(json.dumps(entry) + "\n", encoding="utf-8")
+    state = pipeline_view.build_state(ledger / "runs.jsonl", ROOT, tmp_path / "p", 24.0)
+    html = pipeline_view.render(state)
+    embedded = html.split("const SNAPSHOT = ", 1)[1].split(";\n", 1)[0]
+    assert "<" not in embedded
+    assert json.loads(embedded)["top_names"][0]["name"] == "<!--<script>"
 
 
 def test_scene_file_is_in_sync_with_its_generator_and_has_every_hook_the_page_uses():
@@ -272,6 +285,68 @@ def test_trials_come_from_runlog_so_a_ledger_correction_is_not_a_trial(tmp_path,
     assert [n["name"] for n in state["top_names"]] == ["mom"]
     assert next(x for x in state["stages"] if x["stage"] == "screen")["runs"] == 1
     assert state["hygiene"].get("no data_version") == 1  # the correction is not a trial run
+
+
+def test_a_line_that_is_json_but_not_an_object_is_skipped_with_an_error(tmp_path):
+    ledger = tmp_path / "ledger"
+    ledger.mkdir()
+    good = json.dumps({"name": "mom", "ts_utc": "2026-01-01T00:00:00+00:00", "tags": []})
+    (ledger / "runs.jsonl").write_text(good + "\n[1, 2]\n", encoding="utf-8")
+    state = pipeline_view.build_state(ledger / "runs.jsonl", ROOT, tmp_path / "p", 24.0)
+    assert state["names"] == 1 and state["trials"] == 0
+    assert "line 2 is not a JSON object" in state["ledger_error"]
+    assert str(tmp_path) not in json.dumps(state)
+
+
+def test_a_ledger_error_does_not_carry_the_folder_path(tmp_path):
+    ledger = tmp_path / "ledger"
+    ledger.mkdir()
+    (ledger / "runs.jsonl").write_text("{not json\n", encoding="utf-8")
+    state = pipeline_view.build_state(ledger / "runs.jsonl", ROOT, tmp_path / "p", 24.0)
+    assert "runs.jsonl:1" in state["ledger_error"] and str(tmp_path) not in state["ledger_error"]
+    page = (SCRIPTS / "view.html").read_text(encoding="utf-8")
+    assert "st.ledger_error" in page.split("function render", 1)[1]  # the tile shows it
+
+
+@pytest.mark.parametrize(
+    "entry,reads",
+    [
+        ({"params": {"holdout_start": "2021-01-01"}}, True),
+        ({"tags": ["stage:final"]}, True),
+        ({"tags": ["holdout"]}, True),
+        ({"params": {"end": "2024-12-31"}}, True),
+        ({"params": {"end": "2020-12-31"}, "tags": ["stage:screen"]}, False),
+        ({"tags": ["stage:incubation"]}, False),
+    ],
+)
+def test_the_markers_of_a_holdout_read(entry, reads):
+    assert pipeline_view.reads_holdout(entry) is reads
+
+
+def test_the_server_answers_only_a_loopback_host(tmp_path):
+    import http.client
+    import threading
+
+    server = pipeline_view.make_server(tmp_path / "runs.jsonl", ROOT, 0, tmp_path / "p", 24.0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+
+        def status(host):
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+            conn.putrequest("GET", "/state.json", skip_host=True)
+            conn.putheader("Host", host)
+            conn.endheaders()
+            code = conn.getresponse().status
+            conn.close()
+            return code
+
+        assert status(f"127.0.0.1:{port}") == 200 and status(f"localhost:{port}") == 200
+        assert status(f"evil.example:{port}") == 403 and status("rebind.example") == 403
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 def test_an_unreadable_ledger_line_is_an_error_not_a_trial(tmp_path):

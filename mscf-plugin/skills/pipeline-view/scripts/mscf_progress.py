@@ -17,9 +17,13 @@ In an experiment script::
 
 Or run an unmodified script under `pipeline_run.py`, which tracks start, the ledger entry and
 exit. Both write to $MSCF_PROGRESS_DIR (default ~/.cache/mscf-pipeline/progress), outside
-the repository. Files hold the experiment name, station, progress and timestamps only:
-nothing about the session, the data or the results. If the directory cannot be written,
-tracking turns itself off and the experiment carries on.
+the repository. The run file holds `run_id`, experiment `name`, `pid`, `user` ($GITHUB_USER or
+$USER), `started`, `heartbeat`, `status`, `exit_code` and `ended`; the events file holds
+`station`, `pct`, `waiting`, `note` and `ts`. A note is only text the experiment passes to
+`stage`/`wait`/`progress`, the exception class name when it crashes, or the script's file name
+under `pipeline_run.py`: never an exception message or a command argument. Nothing about the
+session, the data or the results. If the directory cannot be written, tracking turns itself
+off and the experiment carries on.
 """
 
 from __future__ import annotations
@@ -140,7 +144,7 @@ class Run:
         elif exc_type is KeyboardInterrupt:
             self.finish("failed", 130)
         elif exc_type is not None:
-            self._event(note=f"{exc_type.__name__}: {str(exc)[:120]}")
+            self._event(note=exc_type.__name__)  # the type only: the message can hold data
             self.finish("failed", 1)
         else:
             self.finish("done", 0)

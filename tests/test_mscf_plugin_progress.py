@@ -53,7 +53,7 @@ def test_track_marks_a_crash_but_not_a_clean_sys_exit(pdir):
     with pytest.raises(RuntimeError), mscf_progress.track("crashes") as run:
         raise RuntimeError("NaN spread")
     assert json.loads(run.meta_path.read_text(encoding="utf-8"))["status"] == "failed"
-    assert "RuntimeError" in events(pdir, run.run_id)[-1]["note"]
+    assert events(pdir, run.run_id)[-1]["note"] == "RuntimeError"  # the type, not "NaN spread"
     with pytest.raises(SystemExit), mscf_progress.track("exits") as run:
         raise SystemExit(0)
     assert json.loads(run.meta_path.read_text(encoding="utf-8"))["status"] == "done"
@@ -82,6 +82,19 @@ def test_pipeline_run_passes_the_exit_code_and_lets_the_script_attach(pdir):
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     assert meta["status"] == "failed" and meta["exit_code"] == 3 and meta["name"] == "wrapped"
     assert [e.get("station") for e in events(pdir, meta["run_id"])] == ["hypothesis", "signal"]
+
+
+def test_the_wrapper_notes_a_script_name_never_the_command_arguments(pdir):
+    runner = SCRIPTS / "pipeline_run.py"
+    for command, note in (
+        ([sys.executable, "-c", "print('sharpe 1.37 on AAPL')"], ""),
+        ([sys.executable, "experiments/mom.py", "--secret-flag", "x"], "mom.py"),
+    ):
+        pdir_files = set(pdir.glob("*.json")) if pdir.is_dir() else set()
+        subprocess.run([sys.executable, str(runner), "--name", "n", "--", *command])
+        (meta_path,) = set(pdir.glob("*.json")) - pdir_files
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        assert events(pdir, meta["run_id"])[0]["note"] == note
 
 
 def test_progress_files_stay_outside_the_repository_and_hold_no_host_or_session(pdir, monkeypatch):

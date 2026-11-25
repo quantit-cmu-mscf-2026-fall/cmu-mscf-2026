@@ -32,7 +32,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("give the command after --")
 
     run = Run(args.name).start()
-    run.stage("hypothesis", note=Path(command[-1]).name if command else "")
+    script = next((Path(a).name for a in command if a.endswith(".py")), "")  # a name, never -c code
+    run.stage("hypothesis", note=script)
     env = dict(os.environ, MSCF_RUN_ID=run.run_id, MSCF_PROGRESS_DIR=str(run.dir))
     here = str(Path(__file__).resolve().parent)
     env["PYTHONPATH"] = os.pathsep.join(p for p in (env.get("PYTHONPATH"), here) if p)

@@ -7,8 +7,9 @@
 Two tabs: "Production line" (experiments in progress, from mscf_progress / pipeline_run.py
 heartbeats in $MSCF_PROGRESS_DIR) and "Ledger" (everything logged). The page reads only those
 files, the ledger (runs.jsonl) and git metadata. It never writes to the
-repository, never reads market data, and binds to 127.0.0.1 only. A snapshot carries
-user names and metrics: keep it out of the public repository.
+repository, never reads market data, binds to 127.0.0.1 only and answers only a loopback Host.
+A snapshot carries user names and metrics (file names, not folder paths): it is refused
+inside the repository; keep it out of the public repository.
 """
 
 from __future__ import annotations
@@ -64,9 +65,13 @@ def counted_entries(path: Path, repo: Path) -> tuple[list[dict], int, str | None
     The count is `capstone.runlog`'s own: ledger corrections applied, correction entries never
     trials, an unreadable line an error (not a trial). Without `capstone` importable the
     viewer cannot apply corrections, so it reports the error instead of a raw line count."""
-    entries = read_entries(path)
+    not_objects: list[int] = []
+    entries = read_entries(path, not_objects)
     corrupt = [e for e in entries if "corrupt" in (e.get("tags") or [])]
     plain = [e for e in entries if e not in corrupt]
+    if not_objects:
+        lines = ", ".join(str(n) for n in not_objects[:5])
+        return plain, 0, f"{path.name}: line {lines} is not a JSON object (skipped); no trial count"
     try:
         if str(repo) not in sys.path:
             sys.path.insert(0, str(repo))
@@ -85,7 +90,7 @@ def counted_entries(path: Path, repo: Path) -> tuple[list[dict], int, str | None
         kept = [e for e in plain if e.get("name") != "ledger-correction"]
         return kept, len(kept), "capstone.runlog not importable: corrections not applied"
     except ValueError as exc:
-        return plain, 0, str(exc)
+        return plain, 0, str(exc).replace(str(path), path.name)
     return trials, len(trials), None
 
 
@@ -94,19 +99,27 @@ def ledger_path(ledger_dir: str | None, repo: Path) -> Path:
     return (Path(root) if root else repo / "experiments") / "runs.jsonl"
 
 
-def read_entries(path: Path) -> list[dict]:
+def read_entries(path: Path, not_objects: list[int] | None = None) -> list[dict]:
+    """The JSON objects in a .jsonl file. A line that is valid JSON but not an object is
+    skipped (its line number goes to `not_objects`); an unreadable line becomes a `corrupt`
+    stand-in."""
     if not path.is_file():
         return []
     entries = []
     with path.open(encoding="utf-8") as fh:
-        for raw in fh:
+        for number, raw in enumerate(fh, start=1):
             line = raw.strip()
             if not line:
                 continue
             try:
-                entries.append(json.loads(line))
+                row = json.loads(line)
             except json.JSONDecodeError:
                 entries.append({"name": "<unreadable line>", "tags": ["corrupt"]})
+                continue
+            if isinstance(row, dict):
+                entries.append(row)
+            elif not_objects is not None:
+                not_objects.append(number)
     return entries
 
 
@@ -115,9 +128,17 @@ def tag_values(entry: dict, prefix: str) -> list[str]:
 
 
 def reads_holdout(entry: dict) -> bool:
+    """A run that read the holdout marks it one of four ways: a `holdout` tag, a `stage:final`
+    tag (stage 4 is the holdout read), a `holdout_start` param (the funnel's own argument), or
+    an `end`/`holdout_end` param past the search window (2020-12-31)."""
     params = entry.get("params") or {}
     end = str(params.get("end") or params.get("holdout_end") or "")
-    return "holdout" in (entry.get("tags") or []) or end[:10] > SEARCH_END
+    return (
+        "holdout" in (entry.get("tags") or [])
+        or "final" in tag_values(entry, "stage")
+        or params.get("holdout_start") is not None
+        or end[:10] > SEARCH_END
+    )
 
 
 def git(repo: Path, *args: str) -> str | None:
@@ -188,7 +209,7 @@ def build_state(
         None,
     )
     return {
-        "ledger": str(path),
+        "ledger": path.name,
         "ledger_exists": path.is_file(),
         "mtime": path.stat().st_mtime if path.is_file() else None,
         "branch": git(repo, "rev-parse", "--abbrev-ref", "HEAD"),
@@ -297,7 +318,7 @@ def build_line(pdir: Path, entries: list[dict], stations: list[dict], now: float
             }
         )
     jobs.sort(key=lambda j: j["started"])
-    return {"stations": stations, "jobs": jobs, "progress_dir": str(pdir)}
+    return {"stations": stations, "jobs": jobs, "progress_dir": pdir.name}
 
 
 def fonts_css() -> str:
@@ -322,7 +343,8 @@ def render(state: dict | None) -> str:
         if SCENE.is_file()
         else "<p>lab_scene.svg missing: run build_scene.py</p>"
     )
-    embedded = "null" if state is None else json.dumps(state).replace("</", "<\\/")
+    # every "<" as \u003c: no "</script>" and no "<!--" can open or close anything in the page
+    embedded = "null" if state is None else json.dumps(state).replace("<", "\\u003c")
     return (
         page.replace("/*FONTS*/", fonts_css())
         .replace("<!--SCENE-->", scene)
@@ -348,9 +370,21 @@ def reject_counts(entries: list[dict], stations: list[dict], now: float, hours: 
     return out
 
 
-def serve(path: Path, repo: Path, port: int, pdir: Path, reject_hours: float) -> None:
+def host_allowed(header: str | None) -> bool:
+    """Only the loopback names: another Host is a DNS-rebinding page reading the ledger."""
+    host = (header or "").strip().lower()
+    host = host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+    return host in ("127.0.0.1", "localhost")
+
+
+def make_server(
+    path: Path, repo: Path, port: int, pdir: Path, reject_hours: float
+) -> ThreadingHTTPServer:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802 (http.server API)
+            if not host_allowed(self.headers.get("Host")):
+                self.send_error(403, "Host not allowed")
+                return
             if self.path.split("?")[0] == "/state.json":
                 body, kind = (
                     json.dumps(build_state(path, repo, pdir, reject_hours)).encode(),
@@ -371,7 +405,11 @@ def serve(path: Path, repo: Path, port: int, pdir: Path, reject_hours: float) ->
         def log_message(self, *args):
             pass
 
-    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    return ThreadingHTTPServer(("127.0.0.1", port), Handler)
+
+
+def serve(path: Path, repo: Path, port: int, pdir: Path, reject_hours: float) -> None:
+    server = make_server(path, repo, port, pdir, reject_hours)
     print(f"pipeline view: http://127.0.0.1:{port}  (ledger {path}; Ctrl-C to stop)", flush=True)
     try:
         server.serve_forever()

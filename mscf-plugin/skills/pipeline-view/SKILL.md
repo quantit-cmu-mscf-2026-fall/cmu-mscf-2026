@@ -63,9 +63,11 @@ python "${CLAUDE_PLUGIN_ROOT}/skills/pipeline-view/scripts/pipeline_run.py" --na
 Station ids come from `stations.json`. Once the ledger has an entry with the run's name and a
 `stage:` tag, the run moves to that gate; `verdict:fail` drops it into the basket. Use the same
 name in `track`/`--name` and `log_run`. Progress files live in `$MSCF_PROGRESS_DIR` (default
-`~/.cache/mscf-pipeline/progress`), outside the repository, and hold name, station, progress,
-user and timestamps only: no conversation content, data or results are recorded, and nothing
-is synced. If the directory cannot be written, tracking switches itself
+`~/.cache/mscf-pipeline/progress`), outside the repository. They hold the run name, id, pid,
+user, timestamps, status and exit code, and per event the station, progress and a short note
+(the exception class name on a crash, the script's file name under the wrapper, or the text you
+pass to `run.stage(...)`): no exception messages, command arguments, conversation content, data
+or results are recorded, and nothing is synced. If the directory cannot be written, tracking switches itself
 off and the experiment carries on.
 
 ## Live (Claude Code on the user's machine)
@@ -105,4 +107,7 @@ both (`tests/test_mscf_plugin_viewer.py` checks they match and that every id the
 
 Lead with what needs action: more than one holdout read, crashed or held runs, a station with a
 long waiting queue, untagged runs, hygiene gaps. Then the trial count, since it feeds every
-correction.
+correction. If the Trials tile says `error`, the ledger has an unreadable line: tell the user and
+give them `python -m capstone.runlog stats`. A run counts as a holdout read when it carries a
+`holdout` tag, a `stage:final` tag, a `holdout_start` param, or an `end`/`holdout_end` after
+2020-12-31.
