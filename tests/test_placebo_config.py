@@ -67,6 +67,7 @@ def _digest_without_placebo_fields(config):
         if content[name] == default:
             del content[name]
     del content["concurrency"], content["resources"]
+    assert content.pop("deepen_max_children_per_family") is None  # unset: not in the digest
     text = json.dumps(content, sort_keys=True, default=str, separators=(",", ":"))
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 

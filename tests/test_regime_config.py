@@ -30,6 +30,7 @@ def _digest_before_the_field(config) -> str:
         if content[name] == default:
             del content[name]
     content.pop("concurrency"), content.pop("resources")
+    assert content.pop("deepen_max_children_per_family") is None  # unset: not in the digest
     text = json.dumps(content, sort_keys=True, default=str, separators=(",", ":"))
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
