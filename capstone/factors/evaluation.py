@@ -145,6 +145,16 @@ def build_panel(
     `sd.available_from` date (annual rule) and held until the next year's.
     The daily fields are the same with or without them.
     """
+    return panel_from_rows(derived_rows(daily), data_version, fundamentals=fundamentals)
+
+
+def derived_rows(daily: pd.DataFrame) -> pd.DataFrame:
+    """`daily` plus the fields the panel is built from, resolved on the real rows.
+
+    Returns, quoted spread, universe flag and split-adjusted prices/volume/shares
+    use each stock's own history, so they are computed here, on real identities.
+    A placebo permutes these rows afterwards and must not rerun these rules.
+    """
     _check_dates(pd.Index(daily["date"]))
     rows = daily.assign(
         returns=sd.daily_returns(daily),
@@ -164,6 +174,14 @@ def build_panel(
     rows["volume"] = rows["dlyvol"] * share_factor
     rows["shares"] = rows["shrout"] * share_factor
     rows["cap"] = rows["dlycap"]
+    return rows
+
+
+def panel_from_rows(
+    rows: pd.DataFrame, data_version: str = "", *, fundamentals: pd.DataFrame | None = None
+) -> Panel:
+    """The panel from `derived_rows` output (or a placebo permutation of it)."""
+    _check_dates(pd.Index(rows["date"]))
 
     def wide(column: str) -> pd.DataFrame:
         return rows.pivot(index="date", columns="permno", values=column).sort_index()
@@ -194,6 +212,21 @@ def _market_return(returns: pd.DataFrame, cap: pd.DataFrame, universe: pd.DataFr
     total = weight.where(held).sum(axis=1)
     out = (weight * returns).where(held).sum(axis=1) / total.where(total > 0)
     return out.rename("mkt_return")
+
+
+def build_placebo_panel(daily: pd.DataFrame, seed: int, data_version: str = "") -> Panel:
+    """A null panel: the derived rows with each date's stocks permuted (`pipeline.placebo`).
+
+    Fields are resolved on the real rows first, then whole rows are reassigned to
+    other stocks' ids each date, so no factor can predict the next day's return.
+    Needs `CAPSTONE_LEDGER_DIR` at the placebo ledger (`placebo.check_ledger`).
+    """
+    from capstone.pipeline import placebo
+
+    placebo.check_ledger()
+    method = placebo.METHODS[0]
+    rows = placebo.placebo_rows(derived_rows(daily), method, seed)
+    return panel_from_rows(rows, placebo.placebo_version(method, seed, data_version))
 
 
 def load_panel(
