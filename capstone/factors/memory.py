@@ -389,6 +389,7 @@ def record_event(
     child_id: str | None = None,
     hypothesis_id: str | None = None,
     motif_realized: str | None = None,
+    mismatch: bool = False,
     quality: float | None = None,
     baseline: float | None = None,
 ) -> dict:
@@ -420,6 +421,7 @@ def record_event(
         "context": context,
         "motif_intended": motif_intended,
         "motif_realized": motif_realized,
+        "mismatch": int(mismatch),
         "status": status,
         "quality": quality,
         "baseline": baseline,
@@ -444,7 +446,13 @@ def memory_events(con: sqlite3.Connection, run_id: str | None = None) -> list[di
 
 
 def event_motif(event: dict) -> str:
-    """The motif an event counts under: the realized one, else (no child tree) the intended one."""
+    """The motif an event counts under: the realized one, else (no child tree) the intended one.
+
+    A mismatch (the child's edit was not the motif chosen) counts under the intended
+    motif: a failure of the choice, no credit to the motif the edit happened to be.
+    """
+    if event.get("mismatch"):
+        return event["motif_intended"]
     return event["motif_realized"] or event["motif_intended"]
 
 

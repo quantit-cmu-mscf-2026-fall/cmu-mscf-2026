@@ -903,10 +903,10 @@ class Deepener:
                 hypothesis_id=hypothesis["id"],
                 context=parent.context,
                 motif_intended=motif,
-                # A mismatch is recorded with no realized motif, so the memory counts
-                # the failure under the chosen motif (`event_motif` falls back to it)
-                # instead of crediting the motif the edit happened to be.
-                motif_realized=None if reason == MOTIF_MISMATCH else realized,
+                # The real realized motif is kept for the audit; `mismatch` makes the
+                # memory count the failure under the chosen motif, not the realized one.
+                motif_realized=realized,
+                mismatch=reason == MOTIF_MISMATCH,
                 status=status,
                 quality=q,
                 baseline=baseline,

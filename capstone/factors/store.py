@@ -145,6 +145,7 @@ CREATE TABLE IF NOT EXISTS memory_events (
   context TEXT NOT NULL,
   motif_intended TEXT NOT NULL,
   motif_realized TEXT,
+  mismatch INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL,
   quality REAL,
   baseline REAL,
@@ -199,6 +200,9 @@ def connect(path: str | Path | None = None, *, readonly: bool = False) -> sqlite
     columns = {row[1] for row in con.execute("PRAGMA table_info(hypotheses)")}
     if "kind" not in columns:  # a store created before hypotheses had a kind
         con.execute("ALTER TABLE hypotheses ADD COLUMN kind TEXT NOT NULL DEFAULT 'market'")
+    events = {row[1] for row in con.execute("PRAGMA table_info(memory_events)")}
+    if "mismatch" not in events:  # a store created before the motif check
+        con.execute("ALTER TABLE memory_events ADD COLUMN mismatch INTEGER NOT NULL DEFAULT 0")
     columns = {row[1] for row in con.execute("PRAGMA table_info(proposals)")}
     for name, kind in ALIGNMENT_COLUMNS:  # a store created before the alignment check
         if name not in columns:

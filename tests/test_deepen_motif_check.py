@@ -10,8 +10,9 @@ from __future__ import annotations
 
 from test_deepen import SEEDS, FakeScorer, ScriptedEditor, con, deepener, ledger  # noqa: F401
 
+from capstone.factors import store
 from capstone.factors.deepen import MOTIF_MISMATCH
-from capstone.factors.memory import edit_motif, memory_events
+from capstone.factors.memory import edit_motif, memory_events, reduce_events
 from capstone.factors.tree import parse
 
 PARENT = SEEDS[0]  # ts_mean(returns, 21)
@@ -47,6 +48,7 @@ def test_a_mismatched_edit_is_rejected_unscored_and_charged_to_the_chosen_motif(
     assert rows[0]["reason"].startswith(MOTIF_MISMATCH)
     (event,) = memory_events(con, "test")
     assert event["status"] == "rejected" and event["motif_intended"] == "rank_switch"
+    assert event["motif_realized"] == "temporal_shift" and event["mismatch"] == 1
     chosen = d.memory.stats(event["context"], "rank_switch")
     assert (chosen.attempts, chosen.failures) == (1, 1)  # a failure of the chosen motif
     assert d.memory.stats(event["context"], "temporal_shift").attempts == 0  # no credit
@@ -76,3 +78,26 @@ def test_the_family_cap_still_counts_a_mismatched_draft(con, ledger):  # noqa: F
     d.step()
     assert d.children_by_family[d.family(view.id)] == 2
     assert d.children_left(view.id) == 3
+
+
+def test_the_batch_reduction_agrees_and_a_matching_event_is_unflagged(con, ledger):  # noqa: F811
+    d = _round(con, ScriptedEditor([SHIFT, RANK]), "rank_switch")
+    d.step()
+    events = memory_events(con, "test")
+    assert [e["mismatch"] for e in events] == [1, 0]
+    stats = reduce_events(events)
+    context = events[0]["context"]
+    assert stats[(context, "rank_switch")].attempts == 2
+    assert (context, "temporal_shift") not in stats
+
+
+def test_a_store_made_before_the_flag_is_migrated(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path)
+    old.executescript(store.SCHEMA.replace("  mismatch INTEGER NOT NULL DEFAULT 0,\n", ""))
+    old.close()
+    migrated = store.connect(path)
+    assert "mismatch" in {r[1] for r in migrated.execute("PRAGMA table_info(memory_events)")}
+    migrated.close()
