@@ -11,6 +11,10 @@ writes `task.xml`, `autopilot.cron` and `schedule.json` to `--out` (default
 imports the task or the cron line. The task runs `deploy/autopilot/run-tick.ps1`, which
 logs to `<run>/autopilot/ops/tick.log`. A bad `time` or `task_name` is one line on
 stderr, exit 2.
+
+The rendered entries call `python -m capstone.pipeline.autopilot tick`, which does not
+exist yet (the CLI has only `preflight` and `init`): until it lands every scheduled run
+exits 2 in argparse.
 """
 
 from __future__ import annotations

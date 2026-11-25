@@ -6,6 +6,9 @@
 # Puts the checkout first on PYTHONPATH with UTF-8 on, appends the tick's output to -Log and
 # exits with the tick's code (0 ok, 2 blocked/stopped). The tick itself writes
 # <run>\ALERT.json / .md on a STOP and <run>\autopilot\ops\status.json.
+#
+# Until the `tick` command lands in `python -m capstone.pipeline.autopilot` (today only
+# `preflight` and `init` exist), the run exits 2 in argparse.
 param(
     [Parameter(Mandatory = $true)][string]$Checkout,
     [Parameter(Mandatory = $true)][string]$Python,
@@ -21,7 +24,8 @@ if ($logDir -and -not (Test-Path $logDir)) { New-Item -ItemType Directory -Force
 $stamp = (Get-Date).ToString("s")
 Add-Content -Path $Log -Encoding utf8 -Value "[$stamp] tick --config $Config"
 $ErrorActionPreference = "Continue"
-& $Python -m capstone.pipeline.autopilot tick --config $Config *>> $Log
+# Merge stderr and write every line as UTF-8: a plain redirect appends UTF-16 under Windows PowerShell 5.1.
+& $Python -m capstone.pipeline.autopilot tick --config $Config 2>&1 | ForEach-Object { "$_" } | Add-Content -Path $Log -Encoding utf8
 $code = $LASTEXITCODE
 Add-Content -Path $Log -Encoding utf8 -Value "[$((Get-Date).ToString('s'))] exit $code"
 exit $code

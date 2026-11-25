@@ -57,10 +57,27 @@ def test_schedule_renders_task_xml_and_cron_from_the_config(tmp_path):
     assert str((tmp_path / "autopilot.toml").resolve()) in arguments
     assert doc["command"][0] == "powershell.exe" and doc["time"] == "06:05"
     cron = (out / "autopilot.cron").read_text(encoding="utf-8").splitlines()[-1]
-    assert cron.startswith("5 6 * * * cd ")
+    assert cron.startswith("5 6 * * * mkdir -p ") and " && cd " in cron
     assert "-m capstone.pipeline.autopilot tick --config" in cron
     assert cron.endswith("# sched toy") and "tick.log" in cron
     assert json.loads((out / "schedule.json").read_text("utf-8"))["task_name"] == "sched toy"
+
+
+def test_the_cron_line_creates_the_log_folder_before_it_redirects(tmp_path):
+    sh = shutil.which("sh")
+    if sh is None:
+        pytest.skip("no POSIX shell")
+    config = make_config(tmp_path)
+    # `true` stands in for the interpreter: the line only has to get as far as running it
+    schedule.render(config, python="true", checkout=tmp_path, out=tmp_path / "rendered")
+    out = tmp_path / "rendered"
+    line = (out / "autopilot.cron").read_text(encoding="utf-8").splitlines()[-1]
+    command = line.split(" * * * ", 1)[1].split(" # ", 1)[0]
+    log = common.ops_dir(config.run_root) / "tick.log"
+    assert not log.parent.exists()
+    done = subprocess.run([sh, "-c", command], capture_output=True, text=True, timeout=60)
+    assert done.returncode == 0, done.stderr
+    assert log.is_file()
 
 
 def test_rendering_registers_nothing_and_writes_only_under_out(tmp_path):
@@ -104,6 +121,8 @@ def test_the_tick_script_runs_the_tick_and_parses():
     text = script.read_text(encoding="utf-8")
     assert "-m capstone.pipeline.autopilot tick --config $Config" in text
     assert "exit $code" in text
+    assert "*>>" not in text  # appends UTF-16 under Windows PowerShell 5.1
+    assert "Add-Content -Path $Log -Encoding utf8" in text.split("autopilot tick", 1)[1]
     powershell = shutil.which("powershell.exe") or shutil.which("pwsh")
     if powershell is None:
         pytest.skip("no PowerShell to parse the script")
