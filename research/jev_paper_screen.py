@@ -307,8 +307,12 @@ def run(
     post=http_post,
     sleep=time.sleep,
     params: dict | None = None,
+    log: bool = True,
 ) -> list[dict]:
-    """Ask Jev about every paper not yet cached; one row per paper, in sample order."""
+    """Ask Jev about every paper not yet cached; one row per paper, in sample order.
+
+    `log=False` is for a caller that has already logged the whole run to the ledger.
+    """
     out.mkdir(parents=True, exist_ok=True)
     design = design_hash(questions)
     path = out / "cache.jsonl"
@@ -318,19 +322,20 @@ def run(
         raise SystemExit(
             f"refusing to start: {len(pending)} Jev calls needed, --max-calls {max_calls}"
         )
-    runlog.log_run(
-        name="jev-paper-screen",
-        tags=["methodology", "jev"],
-        params={
-            "model": MODEL,
-            "n_papers": len(papers),
-            "pending_calls": len(pending),
-            "max_calls": max_calls,
-            "design": design,
-            **(params or {}),
-        },
-        notes="Jev vs Haiku on paperlog relevance and tags; Haiku is the reference, not truth.",
-    )
+    if log:
+        runlog.log_run(
+            name="jev-paper-screen",
+            tags=["methodology", "jev"],
+            params={
+                "model": MODEL,
+                "n_papers": len(papers),
+                "pending_calls": len(pending),
+                "max_calls": max_calls,
+                "design": design,
+                **(params or {}),
+            },
+            notes="Jev vs Haiku on paperlog relevance and tags; Haiku is the reference, not truth.",
+        )
     headers = {
         "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
