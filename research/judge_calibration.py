@@ -35,13 +35,10 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
-import os
 import random
 import re
 import sys
 import time
-import urllib.error
-import urllib.request
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -54,11 +51,11 @@ from capstone.analysis.outputs import Stat, Statement, output_dir, write_outputs
 from capstone.factors import alignment, tree
 from capstone.factors.hypotheses import _FIELDS
 from capstone.factors.llm import FactorConfig, grammar_help, load_config, make_client
+from capstone.jev import JEV_URL, http_post, jev_key, post_with_retry
 
 REPO = Path(__file__).resolve().parents[1]
 CHECKS = alignment.CHECKS
 KINDS = ("original", "direction", "horizon", "variables", "mismatch")
-JEV_URL = "https://api.typesafe.ai/v1/systemone"
 THRESHOLDS = tuple(round(0.1 * i, 1) for i in range(1, 10))
 DEFAULT_THRESHOLD = 0.5
 
@@ -378,14 +375,6 @@ def parse_jev(response: dict) -> dict:
     return {check: float(p) for check, p in probs.items()}
 
 
-def http_post(url: str, headers: dict, body: dict, timeout: float = 120.0) -> dict:
-    request = urllib.request.Request(
-        url, data=json.dumps(body).encode(), headers=headers, method="POST"
-    )
-    with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
-        return json.loads(response.read().decode())
-
-
 class JevBackend:
     paid = False
 
@@ -406,35 +395,12 @@ class JevBackend:
             "state": _state(item, rationale) + "\n\nGrammar notes\n" + self.grammar,
             "questions": self.questions,
         }
-        for attempt in range(self.retries + 1):
-            try:
-                response = self.post(JEV_URL, self.headers, body)
-                break
-            except urllib.error.HTTPError as exc:
-                if (
-                    exc.code not in (429, 500, 502, 503, 504, 529) or attempt == self.retries
-                ):  # 529: overloaded
-                    raise
-                self.sleep(2.0**attempt)
+        response = post_with_retry(self.post, self.headers, body, self.sleep, self.retries, JEV_URL)
         try:
             probs = parse_jev(response)
         except JevError as exc:
             return Answer(error=str(exc), usage={"calls": 1})
         return Answer(probs=probs, usage={"calls": 1})
-
-
-def jev_key(environ=None) -> str:
-    """TYPESAFE_API_KEY from the environment, else the Windows user environment."""
-    env = os.environ if environ is None else environ
-    if env.get("TYPESAFE_API_KEY"):
-        return env["TYPESAFE_API_KEY"]
-    try:  # pragma: no cover - Windows only
-        import winreg
-
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as handle:
-            return winreg.QueryValueEx(handle, "TYPESAFE_API_KEY")[0]
-    except (ImportError, OSError):
-        raise SystemExit("TYPESAFE_API_KEY is not set") from None
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,26 @@
+# DRAFT tag definitions for the Jev paper-tagging trial (research/jev_paper_screen.py).
+# Written by the builder for TEAM REVIEW: they are NOT the definitions the Haiku
+# screen was given (it saw only the tag names), so disagreement between the two
+# is partly disagreement about what a tag means. The keys must equal `taxonomy`
+# in research/paperlog/config.yaml; each value is one yes/no question about the
+# paper's title and abstract, one condition per question.
+
+[tags]
+hypothesis_generation = "Is the paper about generating testable economic or trading hypotheses, by people or by LLMs?"
+alpha_factor_mining = "Is the paper about searching for or mining alpha factors or trading signals?"
+agent_architecture = "Is the paper about the design of LLM agent systems, such as tools, memory, planning or multi-agent setups?"
+research_automation = "Is the paper about automating scientific or financial research workflows?"
+reproducibility_and_provenance = "Is the paper about reproducibility, provenance or audit trails of research results?"
+multiple_testing = "Is the paper about multiple-testing corrections or false discovery control?"
+backtest_overfitting = "Is the paper about overfitting in backtests or the probability of backtest overfitting?"
+sharpe_inference = "Is the paper about statistical inference on Sharpe ratios, such as deflated or haircut Sharpe?"
+cross_validation = "Is the paper about cross-validation methods for time series or financial data?"
+leakage_and_lookahead = "Is the paper about data leakage or look-ahead bias?"
+data_and_universe = "Is the paper about financial datasets, data quality or how the stock universe is chosen?"
+transaction_costs = "Is the paper about transaction costs, trading frictions or capacity?"
+portfolio_construction = "Is the paper about building portfolios from signals, such as weighting or risk control?"
+evaluation_benchmark = "Does the paper introduce or use a benchmark for evaluating models or strategies?"
+survey = "Is the paper a survey or literature review?"
+return_anomaly = "Does the paper document a specific stock-return anomaly or predictable return pattern?"
+factor_models = "Is the paper about asset-pricing factor models, such as Fama-French or latent factors?"
+finance_ml = "Does the paper apply machine learning to financial prediction?"
