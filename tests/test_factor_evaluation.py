@@ -71,10 +71,12 @@ def test_a_split_moves_no_adjusted_price_or_share_count():
     rows.loc[split, "shrout"] /= 2
     rows.loc[split, ["dlycumfacpr", "dlycumfacshr"]] = 2.0
     panel = build_panel(rows)
-    close, shares = panel.fields["close"][10000], panel.fields["shares"][10000]
-    implied = close.pct_change().iloc[1:].to_numpy()
+    # The fields are nominal (point in time); a tree sees them on one basis.
+    close = ev.factor_signal(parse("close / shift(close, 1)"), panel)[10000]
+    shares = ev.factor_signal(parse("shares / shift(shares, 1)"), panel)[10000]
+    implied = close.iloc[1:].to_numpy() - 1
     np.testing.assert_allclose(implied, panel.fields["returns"][10000].iloc[1:], rtol=1e-12)
-    assert shares.nunique() == 1
+    np.testing.assert_allclose(shares.iloc[1:], 1.0, rtol=1e-12)
 
 
 def test_stocks_outside_the_universe_are_never_held():
@@ -125,7 +127,7 @@ def test_costs_match_the_backtest_when_every_spread_is_the_same():
     rows = fake_rows(spread=0.002)
     panel = build_panel(rows)
     result = factor_returns(parse("ts_mean(returns, 5)"), panel)
-    signal = ev.evaluate(parse("ts_mean(returns, 5)"), panel.fields)
+    signal = ev.factor_signal(parse("ts_mean(returns, 5)"), panel)
     net, turnover = backtest_components(
         signal, panel.fields["returns"], cost_bps=10.0, demean=True, gross=1.0
     )  # half of a 20 bps spread is 10 bps per unit traded
@@ -192,14 +194,14 @@ def test_every_variant_is_a_logged_trial_and_a_column(tmp_path, monkeypatch):
     monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
     panel = build_panel(fake_rows(n_stocks=12, n_days=80), data_version="v-test")
     trees = {"f1": parse("volume"), "f2": parse("ts_mean(returns, 5)"), "f3": parse("open")}
-    original = ev.evaluate
+    original = ev.evaluate_pit
 
-    def failing(tree, fields, **options):
+    def failing(tree, fields, factors, **options):
         if tree == trees["f3"]:
             raise ValueError("cannot compute")
-        return original(tree, fields, **options)
+        return original(tree, fields, factors, **options)
 
-    monkeypatch.setattr(ev, "evaluate", failing)
+    monkeypatch.setattr(ev, "evaluate_pit", failing)
     specs = ev.grid(holds=[1, 5], neutral=["none", "sector"])
     matrix, summary = evaluate_factors(trees, panel, specs=specs)
     entries = [json.loads(line) for line in (tmp_path / "runs.jsonl").read_text().splitlines()]
@@ -233,10 +235,10 @@ def test_a_tag_is_on_a_factor_that_cannot_be_computed_too(tmp_path, monkeypatch)
     monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path))
     panel = build_panel(fake_rows(n_stocks=6, n_days=40))
 
-    def failing(tree, fields, **options):
+    def failing(tree, fields, factors, **options):
         raise ValueError("cannot compute")
 
-    monkeypatch.setattr(ev, "evaluate", failing)
+    monkeypatch.setattr(ev, "evaluate_pit", failing)
     evaluate_factors({"f1": parse("volume")}, panel, tags=["e2e-run:x"])
     entries = [json.loads(line) for line in (tmp_path / "runs.jsonl").read_text().splitlines()]
     assert [e["tags"] for e in entries] == [["evaluation", "e2e-run:x"]]

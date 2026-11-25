@@ -11,8 +11,9 @@ registered gate config and its hash, the trial count, and the SHA-256 of both
 frames. `read_manifest` refuses unknown keys and a gate config that does not match
 its hash; `read_frames` refuses a frame whose bytes changed.
 
-Stage 3 hook: the gate does not measure stage 3 yet, so `factors_digest` is None and
-`stage3` says "unmeasured". The PR that connects the spanning test fills both.
+Stage 3 hook: the gate can measure stage 3, but it is not registered for this run
+(`factors_digest=None`, no `alpha3`) until `alpha3` is calibrated, so `stage3` says
+"unmeasured". Connecting `gate_config` to the factor frame fills both.
 """
 
 from __future__ import annotations
@@ -58,7 +59,7 @@ class RunManifest:
     gate_config: dict  # `GateConfig.to_dict()`, as registered
     gate_config_hash: str
     factors_digest: str | None
-    stage3: str  # STAGE3_UNMEASURED until the gate measures it
+    stage3: str  # STAGE3_UNMEASURED while stage 3 is not registered
     thresholds_source: str  # "config" or "code-defaults" (`E2EConfig.thresholds_source`)
     n_boot: int
     trial_count: int  # ledger trials in the gate's scope after the search

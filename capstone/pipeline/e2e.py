@@ -22,7 +22,8 @@ The panel is the caller's: this module reads no market data.
 
 `gate_config` builds the gate registration for a finished search (the draws sized
 for its families, the trial scope of its run and data tags). Stage 3 is not
-measured by the gate yet, so it registers `factors_digest=None`.
+registered for this run (`factors_digest=None`, no `alpha3`) until `alpha3` is
+calibrated.
 """
 
 from __future__ import annotations
@@ -127,8 +128,8 @@ def gate_config(
 ) -> gate.GateConfig:
     """The run's gate registration: `sized_n_boot` draws, the trial scope of every run
     on this data and search period (this one included, so a rerun under a new run id
-    keeps the earlier runs' trials in the charge). Stage 3 is unmeasured by the gate
-    (`factors_digest=None`)."""
+    keeps the earlier runs' trials in the charge). Stage 3 is not registered for
+    this run (`factors_digest=None`, no `alpha3`) until `alpha3` is calibrated."""
     check_thresholds(config, allow_default_thresholds=allow_default_thresholds)
     return gate.GateConfig(
         search_end=config.search_end,
