@@ -19,6 +19,11 @@ Every deepen score and every variant carries the run's tag (`e2e-run:<run_id>`)
 and the data tag, so the trial count of a later gate registration is exactly this
 search's. All model calls go through one counter (`pipeline.budget`).
 The panel is the caller's: this module reads no market data.
+
+`gate_config` builds the gate registration for a finished search (the draws sized
+for its families, the trial scope of its run and data tags). Stage 3 is not
+registered for this run (`factors_digest=None`, no `alpha3`) until `alpha3` is
+calibrated.
 """
 
 from __future__ import annotations
@@ -29,6 +34,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from capstone import gate
 from capstone.factors import store, tree
 from capstone.factors.deepen import (
     LEDGER_TAGS,
@@ -47,8 +53,25 @@ from capstone.factors.sources import FileSource
 from capstone.pipeline import panel_pool
 from capstone.pipeline.budget import BudgetedClient
 from capstone.pipeline.config import E2EConfig
+from capstone.scorecard import TrialScope
 
-__all__ = ["Search", "generator_name", "search"]
+__all__ = [
+    "N_BOOT_STEP",
+    "Search",
+    "ThresholdsNotRegistered",
+    "check_thresholds",
+    "gate_config",
+    "generator_name",
+    "report_path",
+    "search",
+    "sized_n_boot",
+]
+
+N_BOOT_STEP = 500  # n_boot + 1 is rounded up to a multiple of this (`sized_n_boot`)
+
+
+class ThresholdsNotRegistered(ValueError):
+    """A real-data run whose thresholds are the bare code defaults."""
 
 
 @dataclass(frozen=True, eq=False)
@@ -68,6 +91,62 @@ def generator_name(config: E2EConfig) -> str:
     """What produced the candidates, registered with the gate's thresholds."""
     name = f"{config.generator}/{config.factors.model}/{config.factors.prompt_version}"
     return f"{name}/agent-deepen" if config.deepen_selector == "agent" else name
+
+
+def sized_n_boot(configured: int, n_families: int, q: float = 0.05) -> int:
+    """The gate's bootstrap draws: at least `configured` and `gate.required_n_boot`
+    for the families produced, with n_boot + 1 rounded up to a multiple of
+    `N_BOOT_STEP` (499, 999, ..., 3999 for 200 families, 4499 for 201)."""
+    need = max(int(configured), gate.required_n_boot(n_families, q)) + 1
+    return -(-need // N_BOOT_STEP) * N_BOOT_STEP - 1
+
+
+def check_thresholds(config: E2EConfig, *, allow_default_thresholds: bool = False) -> None:
+    """Refuse a real-data run whose thresholds are the bare code defaults.
+
+    `funnel.Thresholds()` is a starting point from synthetic runs, not a registered
+    set, and the repository holds no registered-thresholds file to fill an empty
+    `[gate.thresholds]` from. So a non-synthetic config must state its thresholds
+    (`config.thresholds_source == "config"`), unless the caller explicitly allows the
+    defaults. Call it before any model call."""
+    if config.synthetic or config.thresholds_source != "code-defaults":
+        return
+    if not allow_default_thresholds:
+        raise ThresholdsNotRegistered(
+            f"{config.run_id}: [gate.thresholds] is empty on real data ({config.data_label}), "
+            "so the gate would register the code defaults. State the registered thresholds "
+            "in the config, or pass allow_default_thresholds=True to run on the defaults"
+        )
+
+
+def gate_config(
+    config: E2EConfig,
+    data_version: str,
+    n_families: int,
+    *,
+    allow_default_thresholds: bool = False,
+) -> gate.GateConfig:
+    """The run's gate registration: `sized_n_boot` draws, the trial scope of every run
+    on this data and search period (this one included, so a rerun under a new run id
+    keeps the earlier runs' trials in the charge). Stage 3 is not registered for
+    this run (`factors_digest=None`, no `alpha3`) until `alpha3` is calibrated."""
+    check_thresholds(config, allow_default_thresholds=allow_default_thresholds)
+    return gate.GateConfig(
+        search_end=config.search_end,
+        holdout_start=config.holdout_start,
+        holdout_end=config.holdout_end,
+        data_version=data_version,
+        generator=generator_name(config),
+        thresholds=config.thresholds,
+        n_boot=sized_n_boot(config.n_boot, n_families, config.thresholds.q1),
+        seed=config.seed,
+        trial_scope=TrialScope(include_tags=(config.run_tag, config.data_tag)),
+        factors_digest=None,
+    )
+
+
+def report_path(workdir: Path, registered: gate.GateConfig) -> Path:
+    return Path(workdir) / "reports" / f"gate-{registered.config_hash[:12]}.json"
 
 
 def _stored_in_order(con) -> list[str]:

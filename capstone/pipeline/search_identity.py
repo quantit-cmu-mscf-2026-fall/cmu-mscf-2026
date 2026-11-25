@@ -20,7 +20,11 @@ from capstone.pipeline.config import E2EConfig
 _OPTIONAL_FIELDS = ("deepen_on_budget", "paper_mode", "placebo", "placebo_seed")
 _OPTIONAL_FIELDS += ("regime_operators",)  # the market-regime operators
 _OPTIONAL_FIELDS += ("deepen_max_children_per_family",)  # the per-family deepen cap
-_RUNTIME_FIELDS = ("concurrency", "resources")  # never change a result: never in the digest
+_RUNTIME_FIELDS = (
+    "concurrency",
+    "resources",
+    "thresholds_source",
+)  # never change a result: never in the digest
 _DEFAULTS = {f.name: f.default for f in fields(E2EConfig) if f.name in _OPTIONAL_FIELDS}
 
 __all__ = ["config_digest"]
