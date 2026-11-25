@@ -1,0 +1,12 @@
+# TEMPLATE - NOT A UNIVERSE. This placeholder lists no stocks and claims no
+# membership: it is not the post-2025 S&P 500 or any other index. Consumers
+# refuse it while its version starts with TEMPLATE.
+#
+# To fill it (a reviewed PR, like the strategy registry): set
+# `version = <label>` (e.g. sp500-2026-10-07), keep the header, and add one
+# row per stock: its CRSP permno, its usual ticker, and the venue's spelling
+# of that ticker (a share class takes a space: BRK.B is "BRK B").
+# Row format (a placeholder, not data):
+# <permno>,BRK.B,BRK B
+version = TEMPLATE-not-a-universe
+permno,symbol,venue_symbol

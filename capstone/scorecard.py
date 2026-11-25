@@ -14,8 +14,10 @@ Row (index `family`), in `SCORECARD_COLUMNS` order:
   `q1`; stage 2 `s2_stat` = one-sided HAC p of `best`, against `alpha2`
   (1.0 = no gate); stage 3 (spanning) `s3_stat` against `s3_threshold`,
   with `s3_alpha` (annualised intercept) and `s3_t` (its HAC t) when
-  `s3_measured` is True; until the spanning test exists `s3_measured` is
-  False, those four numbers are NaN and `s3_pass` repeats stage 2; stage 4
+  `s3_measured` is True (`s3_stat` is the BH-adjusted spanning p across the
+  families tested, against `alpha3`); a family stage 3 did not test, or a gate
+  with no registered factor frame, has `s3_measured` False, those four numbers
+  NaN, and `s3_pass` repeats stage 2 (False where stage 2 failed); stage 4
   `s4_stat` = BH-adjusted holdout p across the stage-3 survivors against
   `q4` (or the deflated Sharpe against `d4`), NaN for families that never
   reached it;

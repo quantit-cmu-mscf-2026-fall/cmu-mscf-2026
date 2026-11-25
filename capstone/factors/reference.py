@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 from capstone.factors.evaluation import Panel
+from capstone.factors.point_in_time import consistent_fields
 
 
 def sessions(calendar, as_of=None) -> pd.DatetimeIndex:
@@ -32,6 +33,8 @@ def field(panel: Panel, name: str, as_of) -> pd.DataFrame:
     if name not in panel.fields:
         raise ValueError(f"required feature input {name!r} is unavailable")
     frame = panel.fields[name]
+    if panel.split_factors is not None:  # nominal levels: one basis, to compare over time
+        frame = consistent_fields({name: frame}, panel.split_factors)[name]
     if frame.index.has_duplicates or frame.columns.has_duplicates:
         raise ValueError(f"duplicate dates or instruments in {name}")
     if not frame.index.is_monotonic_increasing:

@@ -31,10 +31,10 @@ def test_the_scorer_gives_the_screen_z_and_the_variants_net_returns(tmp_path, mo
 
 
 def test_the_scorer_returns_none_for_a_factor_it_cannot_compute(monkeypatch):
-    def failing(tree, fields, **options):
+    def failing(tree, fields, factors, **options):
         raise ValueError("cannot compute")
 
-    monkeypatch.setattr(ev, "evaluate", failing)
+    monkeypatch.setattr(ev, "evaluate_pit", failing)
     scorer = EvaluationScorer(build_panel(fake_rows(n_stocks=9, n_days=40)), ev.TradingSpec())
     assert scorer(parse("volume")) is None
 

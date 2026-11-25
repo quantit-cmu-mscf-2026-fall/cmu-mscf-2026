@@ -10,7 +10,8 @@ ranked by net Sharpe.
 `summarize_workdir` rebuilds the summary from the files a finished search left (manifest,
 factor store, saved summary frame, usage) and the ledger: no model, no data. It reads
 the summary frame through `manifest.read_frames`, so an edited frame is refused.
-Stage 3 is reported as the manifest has it ("unmeasured" until the gate measures it).
+Stage 3 is reported as the manifest has it ("unmeasured": it is not registered for this
+run, with no `factors_digest` or `alpha3`, until `alpha3` is calibrated).
 """
 
 from __future__ import annotations
@@ -38,6 +39,7 @@ __all__ = [
 USAGE_FILE = "usage.jsonl"
 RUN_SUMMARY_FILE = "run_summary.json"
 TOP_VARIANTS = 10
+PVALUE_NOTE = "pvalue_screen is unadjusted; the gate adjusts for trial_count"
 _VARIANT_COLUMNS = (
     "factor_id",
     "hypothesis_id",
@@ -49,6 +51,7 @@ _VARIANT_COLUMNS = (
     "mean_turnover",
     "pvalue_screen",
 )
+_UNADJUSTED = {"pvalue_screen": "pvalue_screen_unadjusted"}  # the top table's column label
 
 
 def _papers(con: sqlite3.Connection, seeds: tuple[str, ...]) -> list[dict]:
@@ -97,14 +100,16 @@ def _decisions(con: sqlite3.Connection) -> list[dict]:
 
 def _variants(summary: pd.DataFrame) -> dict:
     if summary.empty:
-        return {"count": 0, "positive_net": 0, "top": []}
+        return {"count": 0, "positive_net": 0, "top": [], "note": PVALUE_NOTE}
     ranked = summary.sort_values("sharpe_net", ascending=False, kind="stable")
     keep = [c for c in _VARIANT_COLUMNS if c in summary.columns]
     top = ranked.head(TOP_VARIANTS)[keep].reset_index()
+    top = top.rename(columns=_UNADJUSTED)
     return {
         "count": int(len(summary)),
         "positive_net": int((summary["sharpe_net"] > 0).sum()),
         "top": json.loads(top.to_json(orient="records")),
+        "note": PVALUE_NOTE,
     }
 
 
