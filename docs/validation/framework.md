@@ -76,7 +76,7 @@ Known weaknesses are measured ones, from the PRs cited.
 | PBO / CSCV (`pbo`, #35) | Overfitting in the *selection* of the best | batch | Measures the search, not one candidate | 0.5 is the no-skill baseline; a single set ranges 0.08–0.89 (100 no-skill sets, 1000 × 50, `n_blocks=10`) | Batch diagnostic | 2 |
 | Average correlation, implied independent trials (#29) | Overcounting correlated trials | batch | Explains why a correction is strict | Must not replace the ledger count in a decision | Batch diagnostic | all |
 | Search-adjusted FDR estimate (below) | Hidden specification search | batch | Uses what we can see: the whole search | Depends on the search being fully logged | Batch diagnostic | 1 |
-| Spanning alpha (`spanning.factor_alpha`, #362) | Known factor in disguise; copy of a held signal | candidate | The novelty test | Against FF5 + momentum only; spanning over signals already held (QUANTIT-50) is not built. Not connected to `run_gate` yet | **Gate** | 3 |
+| Spanning alpha (`spanning.factor_alpha`, #362) | Known factor in disguise; copy of a held signal | candidate | The novelty test | Against FF5 + momentum only; spanning over signals already held (QUANTIT-50) is not built. Connected to `run_gate` only when a config registers a factor frame | **Gate** | 3 |
 | Deflated Sharpe (#29) | Best of N trials being luck | candidate | Uses the ledger count and the spread of trial Sharpes | Answers "is the best of N real?", not "is each survivor real?". As the stage-4 gate it lost to BH across survivors in every calibration run, and charging the searched count cut power to 0.08 | Graded score | 4 |
 | Haircut Sharpe (`haircut_sharpe`, #65) | Same | candidate | Readable as "the Sharpe after the search"; follows the authors' code | Same question as the deflated Sharpe | Graded score | 4 |
 | Reality Check, Romano–Wolf, SPA (planned) | Best of many correlated candidates | set | Keeps correlation by resampling | Not built yet; same question as the deflated Sharpe | Alternative stage-4 gate | 4 |
@@ -227,11 +227,21 @@ already implies it.
    the correlations, and the thresholds belong to a generator, not to the
    project.
 
-Stage 3 is not simulated yet (`run_funnel` passes everything there), and
-`run_gate` refuses a config that registers a factor frame until
-`spanning.factor_alpha` is connected; until then it runs on its own and is
-reported beside the scorecard. α₃ is registered only once it is simulated,
-and a real stage-3 gate will lower power, and possibly the FDR, below what the
+Stage 3 is not simulated yet (`run_funnel` passes everything there), but
+`run_gate` measures it when the config registers a factor frame
+(`factors_digest`) and `thresholds.alpha3`: each stage-2 survivor's chosen
+variant (search period) is tested with `spanning.factor_alpha` as an excess
+return (the gate's matrix is dollar-neutral long-short, so no `RF` is
+subtracted), the one-sided alpha p-values are BH-adjusted across the families
+tested, and a family passes at adjusted p <= α₃. Each p is first adjusted for
+the family's k variants (`search_adjusted_pvalue`, with the variants' residual
+correlation as rho). That is not stage 1's correction repeated: stage 1 tests
+mean return, stage 3 the chosen variant's alpha, and variants of one idea share
+their factor exposure, so choosing the best Sharpe also chooses a high alpha
+estimate and the raw p over-rejects (about 31% at a nominal 10% in null
+families). A config that registers neither passes stage 2's survivors through, as
+before (`s3_measured` False). α₃ is registered only once it is simulated, and
+a real stage-3 gate will lower power, and possibly the FDR, below what the
 funnel alone shows.
 
 **Baseline first (decided, Q5):** until the funnel is calibrated and shown to
@@ -285,7 +295,7 @@ is a count: 0, 1 or 2 real families, at an annual Sharpe of 0.5, 1.0 or 1.5.
 | Decision rule (Q5) | **Baseline: BH at q = 0.05** on the bootstrap family p-values |
 | Funnel, reported alongside | stage 1 BH at **q₁ = 0.10** on bootstrap family p-values; stage 2 no gate; stage 4 BH across survivors at **q₄ = 0.50** |
 | Stage 1's p-value | `stage1 = "bootstrap"`, 1,999 draws |
-| α₃ | not registered: stage 3 isn't connected to the gate, so the config has no `factors_digest` |
+| α₃ | not registered: the config has no `factors_digest`, so the gate passes stage 3 through (an unsimulated α₃ is not registered) |
 | Stage 4 coverage | a survivor needs a return on at least **half** of the holdout's business days (`min_holdout_coverage = 0.5`), or it fails stage 4 untested, staying in the family at p = 1 |
 | Registered config | `scripts/gate_crsp_v1.json`: the `GateConfig` above, hash `5f590f13f63e94f33fbdf960089c1fc01881a6fedf2437d8afbc3a0c396af7da` (`8bda49ec…` before `decision_rule` was added to the hashed config; `5e89d78a…` before the coverage field) |
 

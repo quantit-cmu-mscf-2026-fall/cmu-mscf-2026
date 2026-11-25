@@ -25,8 +25,8 @@ description.
   changed config (`GateNotRegistered`) and a config whose holdout was already
   looked at (`HoldoutAlreadyOpened`); needs a named `authorizer`, recorded in
   the `gate-holdout-look` ledger entry written before the holdout provider is
-  called. Stages 1-3 get the search period only; stage 3 is not measured yet
-  (`s3_measured` False). Tests: `tests/test_gate_run.py`.
+  called. Stages 1-3 get the search period only; stage 3 is measured only when the
+  config registers a factor frame and `alpha3` (`s3_measured`). Tests: `tests/test_gate_run.py`.
 - **Holdout inputs** (QUANTIT-34): the provider's answer is checked on
   arrival (exactly the requested variants, registered holdout dates only,
   finite); a survivor with fewer holdout returns than the registered minimum
@@ -46,7 +46,14 @@ description.
   equal. The rule used is in the look entry and the header (`decision_rule`).
   The rule is a hashed field of the config: changing it or its q changes the hash.
   Tests: `tests/test_gate_decision_rule.py`.
-- Not yet: the stage-3 spanning test and the power header.
+- **Stage 3** (spanning alpha): with `factors_digest` and `thresholds.alpha3`
+  registered, `run_gate(..., factors=frame)` refuses a frame whose digest
+  (`gate.factors_frame_digest`) differs, or that lacks a search date, before
+  stage 1 and any look; tests each stage-2 survivor's chosen variant as an
+  excess return; BH-adjusts the one-sided alpha p across the families tested
+  (each p first adjusted for the family's k, since choosing the best Sharpe also chooses a high alpha); `s3_stat` is that adjusted p against `alpha3`.
+  Tests: `tests/test_gate_stage3.py`.
+- Not yet: the power header.
 
 ## 2. Contract
 - Input: a performance matrix (dates x variants, `docs/validation.md`) and a
@@ -59,12 +66,13 @@ description.
   variant with no hypothesis label.
 - `screen` never reads `ho_*`. Stage 1 refuses a missing family p-value
   (BH would drop it); stage 4 refuses a live candidate with no holdout
-  statistics. Stage 3 passes through (spanning test not built yet).
+  statistics. Stage 3 passes through unless the config registers a factor frame.
 - `run_gate` takes no default authorizer and ships no holdout provider: the
   caller supplies both. A blank authorizer, a failed input check, too few
   ledger trials or a failed stage 1-3 raise before the look, so none of them
   spends it; once the look is logged the config cannot be run again.
-- A config registered with `factors_digest` is refused until stage 3 exists.
+- A config with only one of `factors_digest` and `alpha3`, or a frame that
+  does not match the digest, is refused.
 - Real data cannot search the holdout: unless `data_version` is "synthetic",
   `GateConfig` refuses a `search_end` on or after `gate.HOLDOUT_OPENS`
   (2021-01-01, where `docs/validation.md` starts the holdout), when it is
