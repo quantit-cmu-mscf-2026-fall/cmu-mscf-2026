@@ -99,3 +99,61 @@ def test_crsp_v1_expressions_classify(capsys):
     assert len(df) == len(summary)
     with capsys.disabled():
         print("\narchetype counts:", df["archetype"].value_counts().to_dict())
+
+
+def archetypes(text: str) -> list[tuple[str, int]]:
+    return [(t["archetype"], t["sign"]) for t in c(text)["terms"]]
+
+
+def test_composite_reversal_plus_liquidity():
+    out = c(
+        "(-(rank(shift(delta(log(close), 987), 273))) "
+        "- rank(ts_mean(((volume * close) / cap), 252)))"
+    )
+    assert archetypes_of(out) == ["liquidity", "reversal"]
+    assert out["archetype"] == "combination"
+    assert out["n_terms"] == 2
+    assert out["interaction"] is False
+
+
+def archetypes_of(out: dict) -> list[str]:
+    return out["archetypes"]
+
+
+def test_risk_adjusted_momentum_is_not_volatility():
+    out = c("rank((((close / shift(close, 126)) - 1.0) / ts_std(returns, 126)))")
+    assert out["archetype"] == "momentum"
+    assert [t["risk_adjusted"] for t in out["terms"]] == [True]
+    assert c("rank(ts_std(returns, 126))")["archetype"] == "volatility"
+
+
+def test_interaction_reversal_by_size():
+    out = c(
+        "((rank(-(shift(ts_sum(returns, 735), 21))) * rank(-(log(close)))) * rank(-(log(cap))))"
+    )
+    assert out["interaction"] is True
+    assert out["archetype"] == "combination"
+    assert "reversal" in out["archetypes"]
+    assert "size" in out["archetypes"]
+    assert out["n_terms"] == 3
+
+
+def test_sign_flips():
+    assert archetypes("0.5 - rank(ts_sum(returns, 5))") == [("reversal", -1)]
+    assert archetypes("rank(ts_sum(returns, 5)) - 0.5") == [("other", 1)]
+    assert archetypes("rank(ts_sum(returns, 100)) - 0.5") == [("momentum", 1)]
+    assert archetypes("1.0 - rank(ts_sum(returns, 100))") == [("other", -1)]
+    assert archetypes("ts_sum(returns, 100) - ts_sum(returns, 5)") == [
+        ("momentum", 1),
+        ("reversal", -1),
+    ]
+    assert archetypes("-(-3 * ts_sum(returns, 100))") == [("momentum", 1)]
+    assert archetypes("rank(-(ts_sum(returns, 5)))") == [("reversal", -1)]
+    assert archetypes("shift(-(ts_sum(returns, 5)), 1)") == [("reversal", -1)]
+
+
+def test_sign_guard_changes_label():
+    # With the sign carried through `-`, the right-hand term is a reversal; without
+    # it the same expression would read as two momentum terms.
+    out = c("ts_sum(returns, 100) - ts_sum(returns, 5)")
+    assert out["archetypes"] == ["momentum", "reversal"]

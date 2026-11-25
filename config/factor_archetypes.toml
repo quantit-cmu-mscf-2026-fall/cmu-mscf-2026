@@ -1,12 +1,14 @@
 # DRAFT archetype rules for capstone/factors/classify.py, pending team review
 # (decision D1). Do not treat the labels as final.
 #
+# A factor is first split into terms (classify.py); the rules apply to each term.
 # Rules are tried in order; the first whose conditions all hold names the factor's
 # archetype. A factor matching none is "other". Every condition is optional:
 #   primary_groups  the factor's primary field group is one of these
 #   groups_all      the factor reads every one of these field groups
 #   funcs_any       the factor uses at least one of these functions
 #   horizon_bins    its horizon_bin (0: <=5, 1: 6-21, 2: 22-63, 3: 64-252, 4: >252) is one of these
+#   has_window      true / false: the term reads a window (effective lookback above 0)
 #   negated         true / false: the sign of the whole expression (see classify.py)
 
 [[rule]]
@@ -34,10 +36,12 @@ funcs_any = ["ts_std", "ts_cov"]
 archetype = "reversal"
 primary_groups = ["returns", "price"]
 horizon_bins = [0, 1, 4]
+has_window = true
 negated = true
 
 [[rule]]
 archetype = "momentum"
 primary_groups = ["returns", "price"]
 horizon_bins = [2, 3, 4]
+has_window = true
 negated = false

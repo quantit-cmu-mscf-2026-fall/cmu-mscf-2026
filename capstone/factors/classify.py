@@ -15,7 +15,8 @@ sampled. Design choices:
   shift, ratio, regime).
 - negated: the sign of the whole expression, from negations and negative constant
   factors met at the root, looking through rank/scale/zscore/winsorize.
-- archetype: first matching rule in `config/factor_archetypes.toml` (DRAFT).
+- terms and archetype: see `_terms`; each term is matched against the rules in
+  `config/factor_archetypes.toml` (DRAFT), first match wins.
 """
 
 from __future__ import annotations
@@ -49,6 +50,7 @@ from capstone.factors.tree import (
     node_count,
     param_count,
     parse,
+    unparse,
     uses_regime,
     walk,
     zoo_similarity,
@@ -56,9 +58,25 @@ from capstone.factors.tree import (
 from capstone.factors.zoo import default_zoo
 
 ARCHETYPES_PATH = Path(__file__).resolve().parents[2] / "config" / "factor_archetypes.toml"
-GROUP_PRIORITY = ("fundamental", "size", "volume", "returns", "price", "market")
-_RULE_KEYS = {"archetype", "primary_groups", "groups_all", "funcs_any", "horizon_bins", "negated"}
-_SIGN_TRANSPARENT = frozenset({"rank", "scale", "zscore", "winsorize"})
+GROUP_PRIORITY = ("fundamental", "volume", "size", "returns", "price", "market")
+_RULE_KEYS = {
+    "archetype",
+    "primary_groups",
+    "groups_all",
+    "funcs_any",
+    "horizon_bins",
+    "negated",
+    "has_window",
+}
+# Wrappers that keep the order of values, so the decomposition looks through them and
+# the term is the expression inside (log is taken as monotone increasing).
+_SIGN_TRANSPARENT = frozenset(
+    {"rank", "scale", "zscore", "winsorize", "log", "volscale", "bear_gate"}
+)
+# Linear operators with a window: `_negated` reads through them for a term's sign
+# (`shift(-x, 5)` is the negation of `shift(x, 5)`), but they stay inside the term.
+_SIGN_LINEAR = frozenset({"shift", "delta", "ts_mean", "ts_sum", "ema", "decay_linear"})
+_VOLATILITY_FUNCS = frozenset({"ts_std", "ts_cov"})
 
 
 def load_archetype_rules(path: str | Path = ARCHETYPES_PATH) -> list[dict]:
@@ -114,7 +132,7 @@ def _negated(node: Node) -> bool:
     while True:
         if isinstance(node, Unary):
             flip, node = not flip, node.operand
-        elif isinstance(node, Call) and node.func in _SIGN_TRANSPARENT:
+        elif isinstance(node, Call) and node.func in _SIGN_TRANSPARENT | _SIGN_LINEAR:
             node = node.arg
         elif isinstance(node, BinOp) and node.op in "*/":
             if isinstance(node.right, Const):
@@ -156,16 +174,104 @@ def _matches(rule: dict, info: dict) -> bool:
         return False
     if "horizon_bins" in rule and info["horizon_bin"] not in rule["horizon_bins"]:
         return False
+    if "has_window" in rule and (info["effective_lookback"] > 0) != rule["has_window"]:
+        return False
     return not ("negated" in rule and info["negated"] != rule["negated"])
 
 
+def _has_volatility(node: Node) -> bool:
+    return any(isinstance(n, Call) and n.func in _VOLATILITY_FUNCS for n in walk(node))
+
+
+def _const_value(node: Node) -> float | None:
+    """The value of a constant, however its sign is written (`-3` parses as a negation)."""
+    if isinstance(node, Const):
+        return node.value
+    if isinstance(node, Unary) and (inner := _const_value(node.operand)) is not None:
+        return -inner
+    return None
+
+
+def _terms(node: Node, sign: int, risk: bool, out: list) -> bool:
+    """Split `node` into (term, sign, risk_adjusted) entries appended to `out`.
+
+    Looks through, carrying the sign: `+`; `-` (the right side flips); unary
+    negation; multiplication or division by a constant (a negative one flips); `*`
+    between two non-constants (an interaction: each factor is a term); the wrappers
+    in `_SIGN_TRANSPARENT`; `signed_power` with a positive exponent. A constant is
+    not a term, so `rank(x) - 0.5` is `rank(x)` and `0.5 - rank(x)` is its negation.
+    A ratio whose denominator contains ts_std or ts_cov is risk adjusted: its
+    numerator is split and flagged. Any other ratio and any other call is one term
+    (ts_mean and the like are not looked through). Returns whether a multiplicative
+    split happened.
+    """
+    if _const_value(node) is not None:
+        return False
+    if isinstance(node, Unary):
+        return _terms(node.operand, -sign, risk, out)
+    if isinstance(node, BinOp):
+        if node.op in "+-":
+            right = -sign if node.op == "-" else sign
+            left_split = _terms(node.left, sign, risk, out)
+            return _terms(node.right, right, risk, out) or left_split
+        if node.op == "*":
+            for const, other in ((node.left, node.right), (node.right, node.left)):
+                if (value := _const_value(const)) is not None:
+                    return _terms(other, sign * (-1 if value < 0 else 1), risk, out)
+            _terms(node.left, sign, risk, out)
+            _terms(node.right, sign, risk, out)
+            return True
+        if (value := _const_value(node.right)) is not None:
+            return _terms(node.left, sign * (-1 if value < 0 else 1), risk, out)
+        if _has_volatility(node.right):
+            return _terms(node.left, sign, True, out)
+    elif isinstance(node, Call) and (
+        node.func in _SIGN_TRANSPARENT
+        or (node.func == "signed_power" and isinstance(node.arg2, Const) and node.arg2.value > 0)
+    ):
+        return _terms(node.arg, sign, risk, out)
+    out.append((node, sign, risk))
+    return False
+
+
+def _describe(node: Node, sign: int, rules) -> dict:
+    """Field group, horizon, sign and archetype of one term."""
+    lookback = _path_sum(node, None)
+    negated = sign * (-1 if _negated(node) else 1) < 0
+    info = {
+        "field_groups": sorted({FIELD_GROUPS[f] for f in features_used(node)}),
+        "primary_field_group": _primary_group(node),
+        "effective_lookback": lookback,
+        "horizon_bin": parameter_bin(lookback),
+        "negated": negated,
+        "funcs": sorted(funcs_used(node)),
+    }
+    archetype = next((r["archetype"] for r in rules if _matches(r, info)), "other")
+    return {
+        "expr": unparse(node),
+        "sign": -1 if negated else 1,
+        "primary_field_group": info["primary_field_group"],
+        "horizon_bin": info["horizon_bin"],
+        "archetype": archetype,
+    }
+
+
 def classify(node: Node, rules: list[dict] | None = None) -> dict:
-    """Describe one factor tree with plain JSON-able values."""
+    """Describe one factor tree with plain JSON-able values.
+
+    The factor is split into terms (`_terms`); each is classified by the rules, and
+    `archetype` is their one distinct archetype, or "combination" if they differ.
+    """
+    rules = rules if rules is not None else _default_rules()
     fields = sorted(features_used(node))
     windows = sorted(n.window for n in walk(node) if isinstance(n, Call) and n.window)
     lookback = _path_sum(node, None)
     shared, share, nearest = zoo_similarity(node, _zoo())
-    out = {
+    raw: list = []
+    interaction = _terms(node, 1, False, raw)
+    terms = [{**_describe(t, s, rules), "risk_adjusted": r} for t, s, r in raw]
+    distinct = sorted({t["archetype"] for t in terms})
+    return {
         "fields": fields,
         "field_groups": sorted({FIELD_GROUPS[f] for f in fields}),
         "primary_field_group": _primary_group(node),
@@ -182,14 +288,12 @@ def classify(node: Node, rules: list[dict] | None = None) -> dict:
         "nearest_zoo": nearest,
         "zoo_shared": shared,
         "zoo_share": share,
+        "terms": terms,
+        "archetypes": distinct,
+        "n_terms": len(terms),
+        "interaction": interaction,
+        "archetype": distinct[0] if len(distinct) == 1 else "combination",
     }
-    info = {**out, "funcs": sorted(funcs_used(node))}
-    out["archetype"] = "other"
-    for rule in rules if rules is not None else _default_rules():
-        if _matches(rule, info):
-            out["archetype"] = rule["archetype"]
-            break
-    return out
 
 
 def classify_expressions(exprs: Mapping[str, str]) -> pd.DataFrame:
