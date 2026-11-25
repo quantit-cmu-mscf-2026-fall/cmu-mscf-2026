@@ -135,6 +135,11 @@ class E2EConfig:
     # `[resources]` caps on the evaluation pool (`pipeline.panel_pool`), with
     # `CAPSTONE_MAX_WORKERS`. Runtime only, never in the digest.
     resources: Resources = Resources()
+    # Where `thresholds` came from: "config" (the file's [gate.thresholds]) or
+    # "code-defaults" (the file left them empty: `funnel.Thresholds()`, a starting point,
+    # not registered values). Runtime only, never in the digest; a real-data run on
+    # "code-defaults" is refused at registration (`e2e.check_thresholds`).
+    thresholds_source: str = "config"
 
     def __post_init__(self) -> None:
         if not isinstance(self.regime_operators, bool):
@@ -170,6 +175,10 @@ class E2EConfig:
             seed = self.placebo_seed
             if seed is None or isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
                 raise ValueError("a placebo search needs placebo_seed, a non-negative integer")
+
+    @property
+    def synthetic(self) -> bool:
+        return self.data_label.startswith("synthetic")
 
     @property
     def run_tag(self) -> str:
@@ -236,7 +245,9 @@ def load_config(path: str | Path | None = None) -> E2EConfig:
     run, deepen, ev = values["run"], values["deepen"], values["evaluation"]
     gate_values, trading = values["gate"], values["trading"]
     papers = REPO / run["papers"] if "papers" in run else path
+    explicit = gate_values.get("thresholds", {})
     return E2EConfig(
+        thresholds_source="config" if explicit else "code-defaults",
         run_id=run["run_id"],
         seed=int(run.get("seed", 0)),
         data_label=run["data_label"],

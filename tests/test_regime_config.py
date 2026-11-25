@@ -29,7 +29,7 @@ def _digest_before_the_field(config) -> str:
     for name, default in (*optional, ("placebo", None), ("placebo_seed", None)):
         if content[name] == default:
             del content[name]
-    content.pop("concurrency"), content.pop("resources")
+    content.pop("concurrency"), content.pop("resources"), content.pop("thresholds_source")
     assert content.pop("deepen_max_children_per_family") is None  # unset: not in the digest
     text = json.dumps(content, sort_keys=True, default=str, separators=(",", ":"))
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
