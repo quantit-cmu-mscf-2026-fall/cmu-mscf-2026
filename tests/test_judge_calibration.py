@@ -413,3 +413,11 @@ def test_main_writes_sourced_statements(tmp_path):
     text = (path / "STATEMENTS.md").read_text()
     assert "stats.json: claude_fake.false_pass.direction" in text and "label noise" in text
     assert (path / "data" / "sweep.csv").exists()
+
+
+def test_labels_saved_from_excel_with_a_byte_order_mark_are_read(tmp_path):
+    path = tmp_path / "labels.csv"
+    text = "proposal_id,label,variables,direction,horizon\n7,1,1,,0\n"
+    path.write_text(text, encoding="utf-8-sig")
+    labels = jc.load_labels(path)
+    assert labels == {7: {"label": True, "variables": True, "horizon": False}}

@@ -172,7 +172,8 @@ def _valid(node: tree.Node) -> str | None:
 def load_labels(path: Path) -> dict[int, dict]:
     """Hand labels for originals: proposal_id, `label` (1 aligned, 0 not), per-check 1/0."""
     out: dict[int, dict] = {}
-    with open(path, newline="", encoding="utf-8") as handle:
+    # utf-8-sig: a sheet saved from Excel starts with a byte-order mark.
+    with open(path, newline="", encoding="utf-8-sig") as handle:
         import csv
 
         for row in csv.DictReader(handle):
