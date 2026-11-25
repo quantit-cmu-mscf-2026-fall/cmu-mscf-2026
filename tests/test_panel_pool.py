@@ -37,6 +37,16 @@ EXPRESSIONS = ["volume / shares", "-ts_sum(returns, 5)", "rank(volume) - rank(ts
 VOLATILE = ("ts_utc", "git_sha", "session_id", "user")
 
 
+@pytest.fixture(autouse=True)
+def ledger(tmp_path, monkeypatch):
+    """`evaluate_factors` logs every variant: keep these tests' trials off the repo ledger."""
+    monkeypatch.setenv("CAPSTONE_LEDGER_DIR", str(tmp_path / "ledger"))
+
+
+def test_this_module_logs_to_a_temporary_ledger(tmp_path):
+    assert runlog.ledger_path().is_relative_to(tmp_path)
+
+
 def _panel(n_stocks=6):
     return build_panel(fake_rows(n_stocks=n_stocks, n_days=120), "fixture")
 
