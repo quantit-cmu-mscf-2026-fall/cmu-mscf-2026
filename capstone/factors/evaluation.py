@@ -7,11 +7,15 @@ validation stack), one column per `factor_id`.
 
 - **Panel** (`load_panel`, `build_panel`): the shared S&P 500 daily file
   (`capstone.shared_data`), mapped onto the factor grammar's fields, dates x
-  permno. Prices are divided by CRSP's cumulative price factor and shares and
-  volume multiplied by its share factor, so a split moves nothing. Returns
-  come from every row through `sd.daily_returns` (delistings included);
-  holdings only from `in_universe`. `mkt_return` is the universe's
-  value-weighted return, weighted by the previous day's cap. Optionally the
+  permno. Price, share and volume levels are point in time
+  (`capstone.factors.point_in_time`): the fields hold each date's nominal
+  levels, the panel carries CRSP's cumulative factors, and a factor's value on
+  date t is its tree on the panel re-anchored at t, so a split moves no ratio
+  over time and no later split reaches an earlier date, whatever date the
+  loaded window starts on. Returns come from every row through
+  `sd.daily_returns` (delistings included); holdings only from `in_universe`.
+  `mkt_return` is the universe's value-weighted return, weighted by the
+  previous day's cap. Optionally the
   annual accounting fields too (`capstone.factors.fundamentals`), each value
   visible only from its `sd.available_from` date.
 - **Holdout guard**: the discovery period ends `DISCOVERY_END`; nothing after
@@ -46,7 +50,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, get_args
 
 import numpy as np
@@ -57,7 +61,7 @@ from capstone.backtest import backtest_frame, sharpe_ratio, to_weights
 from capstone.evaluate import sharpe_test
 from capstone.factors import store
 from capstone.factors.fundamentals import fundamental_fields, load_fundamentals
-from capstone.factors.interpret import evaluate
+from capstone.factors.point_in_time import SplitFactors, evaluate_pit
 from capstone.factors.tree import Node, unparse
 from capstone.runlog import log_run
 
@@ -106,6 +110,9 @@ class Panel:
     data_version: str = ""
     calendar: pd.DatetimeIndex | None = None
     availability: dict[str, pd.Series] | None = None
+    # CRSP's cumulative factors behind the nominal level fields (`point_in_time`).
+    # None: the levels are already on one basis (synthetic panels), evaluated as is.
+    split_factors: SplitFactors | None = field(default=None, repr=False, compare=False)
 
 
 def panel_period(panel: Panel) -> list[str]:
@@ -128,12 +135,6 @@ def require_discovery(panel: Panel) -> None:
     _check_dates(pd.Index(panel.universe.index))
 
 
-def _rebased(factor: pd.Series, permno: pd.Series) -> pd.Series:
-    """`factor` over its stock's first valid value: 1 on day one, and no later split in it."""
-    valid = factor.where(factor > 0)
-    return valid / valid.groupby(permno).transform("first")
-
-
 def build_panel(
     daily: pd.DataFrame, data_version: str = "", *, fundamentals: pd.DataFrame | None = None
 ) -> Panel:
@@ -151,18 +152,19 @@ def build_panel(
         spread=sd.quoted_spread(daily),
         universe=daily["in_universe"].astype("float64").fillna(0).astype(bool),
     )
-    # CRSP anchors the cumulative factors at the file's last date, so a raw factor carries
-    # every split after the row, holdout years included. Rebased to each stock's first
-    # loaded row, a row uses only splits on or before its own date.
-    rows = rows.sort_values("date", kind="stable")
-    price_factor = _rebased(rows["dlycumfacpr"], rows["permno"])
-    share_factor = _rebased(rows["dlycumfacshr"], rows["permno"])
-    rows["open"] = rows["dlyopen"] / price_factor
-    rows["high"] = rows["dlyhigh"] / price_factor
-    rows["low"] = rows["dlylow"] / price_factor
-    rows["close"] = rows["dlyprc"].abs() / price_factor
-    rows["volume"] = rows["dlyvol"] * share_factor
-    rows["shares"] = rows["shrout"] * share_factor
+    # Nominal levels, as known on their own date. CRSP anchors its cumulative factors at
+    # the file's last date, so dividing by them would put every later split (holdout years
+    # included) in each level; the factors ride on the panel instead. Where a factor is
+    # missing the level is too. See `point_in_time`.
+    rows["price_factor"] = rows["dlycumfacpr"].where(rows["dlycumfacpr"] > 0)
+    rows["share_factor"] = rows["dlycumfacshr"].where(rows["dlycumfacshr"] > 0)
+    has_price, has_shares = rows["price_factor"].notna(), rows["share_factor"].notna()
+    rows["open"] = rows["dlyopen"].where(has_price)
+    rows["high"] = rows["dlyhigh"].where(has_price)
+    rows["low"] = rows["dlylow"].where(has_price)
+    rows["close"] = rows["dlyprc"].abs().where(has_price)
+    rows["volume"] = rows["dlyvol"].where(has_shares)
+    rows["shares"] = rows["shrout"].where(has_shares)
     rows["cap"] = rows["dlycap"]
 
     def wide(column: str) -> pd.DataFrame:
@@ -179,7 +181,10 @@ def build_panel(
         fields.update(fundamental_fields(fundamentals, close.index, close.columns))
     half_spread = wide("spread") / 2
     sic = wide("siccd") if "siccd" in rows else None
-    return Panel(fields, universe, half_spread, sic, data_version)
+    factors = SplitFactors(
+        wide("price_factor").astype("float64"), wide("share_factor").astype("float64")
+    )
+    return Panel(fields, universe, half_spread, sic, data_version, split_factors=factors)
 
 
 def _market_return(returns: pd.DataFrame, cap: pd.DataFrame, universe: pd.DataFrame) -> pd.Series:
@@ -299,9 +304,15 @@ def sector_groups(panel: Panel) -> pd.Series:
 
 
 def factor_signal(tree: Node, panel: Panel) -> pd.DataFrame:
-    """The factor's value on the stocks that may be held that day, NaN elsewhere."""
-    values = evaluate(
-        tree, panel.fields, strict_domains=True, cross_sectional_universe=panel.universe
+    """The factor's value on the stocks that may be held that day, NaN elsewhere,
+    point in time: on each date, the tree on the panel re-anchored at that date
+    (`point_in_time.evaluate_pit`)."""
+    values = evaluate_pit(
+        tree,
+        panel.fields,
+        panel.split_factors,
+        strict_domains=True,
+        cross_sectional_universe=panel.universe,
     )
     return values.where(panel.universe)
 
