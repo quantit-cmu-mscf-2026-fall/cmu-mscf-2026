@@ -73,9 +73,31 @@ _RULE_KEYS = {
 _SIGN_TRANSPARENT = frozenset(
     {"rank", "scale", "zscore", "winsorize", "log", "volscale", "bear_gate"}
 )
-# Linear operators with a window: `_negated` reads through them for a term's sign
-# (`shift(-x, 5)` is the negation of `shift(x, 5)`), but they stay inside the term.
-_SIGN_LINEAR = frozenset({"shift", "delta", "ts_mean", "ts_sum", "ema", "decay_linear"})
+# Operators `_negated` reads through for a term's sign: odd and non-decreasing in the
+# first argument, so f(-x) is the mirror of f(x) and an inner negation flips the signal.
+# They stay inside the term (their windows count toward its lookback).
+#   linear: shift, delta, ts_mean, ts_sum, ema, decay_linear (delta(-x) = -delta(x));
+#   monotone: ts_rank (rank of today's value in its window), ts_min and ts_max (of a
+#     negated series they are the max/min of the original, still increasing in it), sign.
+# Deliberately excluded:
+#   abs, ts_std, ts_cov, ts_corr: not monotone (even, or a dispersion/dependence measure);
+#   ts_argmax, ts_argmin: a position in the window, which swaps under negation;
+#   ts_product: the sign of a product depends on the parity of the window, not the series.
+# `signed_power` with a positive exponent is handled separately (it has an exponent).
+_SIGN_LINEAR = frozenset(
+    {
+        "shift",
+        "delta",
+        "ts_mean",
+        "ts_sum",
+        "ema",
+        "decay_linear",
+        "ts_rank",
+        "ts_min",
+        "ts_max",
+        "sign",
+    }
+)
 _VOLATILITY_FUNCS = frozenset({"ts_std", "ts_cov"})
 
 
@@ -127,21 +149,30 @@ def _path_sum(node: Node, funcs: frozenset[str] | None) -> int:
     return own + max((_path_sum(k, funcs) for k in _children(node)), default=0)
 
 
+def _positive_power(node: Call) -> bool:
+    return node.func == "signed_power" and isinstance(node.arg2, Const) and node.arg2.value > 0
+
+
 def _negated(node: Node) -> bool:
     flip = False
     while True:
         if isinstance(node, Unary):
             flip, node = not flip, node.operand
-        elif isinstance(node, Call) and node.func in _SIGN_TRANSPARENT | _SIGN_LINEAR:
+        elif isinstance(node, Call) and (
+            node.func in _SIGN_TRANSPARENT | _SIGN_LINEAR
+            or (
+                node.func == "signed_power" and isinstance(node.arg2, Const) and node.arg2.value > 0
+            )
+        ):
             node = node.arg
         elif isinstance(node, BinOp) and node.op in "*/":
-            if isinstance(node.right, Const):
-                const, other = node.right, node.left
-            elif node.op == "*" and isinstance(node.left, Const):
-                const, other = node.left, node.right
+            if (value := _const_value(node.right)) is not None:
+                other = node.left
+            elif node.op == "*" and (value := _const_value(node.left)) is not None:
+                other = node.right
             else:
                 return flip
-            flip ^= const.value < 0
+            flip ^= value < 0
             node = other
         else:
             return flip
@@ -225,10 +256,7 @@ def _terms(node: Node, sign: int, risk: bool, out: list) -> bool:
             return _terms(node.left, sign * (-1 if value < 0 else 1), risk, out)
         if _has_volatility(node.right):
             return _terms(node.left, sign, True, out)
-    elif isinstance(node, Call) and (
-        node.func in _SIGN_TRANSPARENT
-        or (node.func == "signed_power" and isinstance(node.arg2, Const) and node.arg2.value > 0)
-    ):
+    elif isinstance(node, Call) and (node.func in _SIGN_TRANSPARENT or _positive_power(node)):
         return _terms(node.arg, sign, risk, out)
     out.append((node, sign, risk))
     return False

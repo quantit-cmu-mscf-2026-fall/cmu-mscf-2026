@@ -157,3 +157,14 @@ def test_sign_guard_changes_label():
     # it the same expression would read as two momentum terms.
     out = c("ts_sum(returns, 100) - ts_sum(returns, 5)")
     assert out["archetypes"] == ["momentum", "reversal"]
+
+
+def test_inner_negation_read_through_monotone_operators():
+    assert archetypes("ts_rank(-(ts_sum(returns, 100)), 252)") == [("reversal", -1)]
+    assert archetypes("ts_rank(ts_sum(returns, 100), 252)") == [("momentum", 1)]
+    assert archetypes("ts_max(-(ts_sum(returns, 2)), 3)") == [("reversal", -1)]
+    assert archetypes("signed_power(-(ts_sum(returns, 5)), 2.0)") == [("reversal", -1)]
+    assert archetypes("-3 * ts_rank(-(ts_sum(returns, 100)), 21)") == [("momentum", 1)]
+    # not monotone: a negation inside abs or ts_std does not flip the signal
+    assert c("abs(-(ts_sum(returns, 100)))")["terms"][0]["sign"] == 1
+    assert c("ts_std(-(returns), 60)")["terms"][0]["sign"] == 1
