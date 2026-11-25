@@ -13,3 +13,5 @@ min_days_block = 120
 min_days_year = 120
 min_years_slope = 8
 alpha = 0.05
+# min_days_split: fewest returns on each side of a paper's date for the publication split.
+min_days_split = 252

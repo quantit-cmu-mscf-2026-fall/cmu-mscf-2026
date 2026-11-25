@@ -107,3 +107,13 @@ def test_best_variant_selection_and_publication_table():
     assert list(tables["publication"].index) == ["A"]
     assert {s.source for s in statements} <= set(stats)
     assert set(tables) >= {"blocks", "annual", "slopes", "publication"}
+
+
+def test_a_paper_published_before_the_data_is_not_tested():
+    idx = pd.bdate_range("1990-01-01", "1999-12-31")
+    r = pd.Series(np.random.default_rng(0).normal(0, 0.01, len(idx)), index=idx)
+    before = decay.publication_split(r, pd.Timestamp("1985-07-01"))
+    assert not before["tested"] and np.isnan(before["sharpe_pre"]) and np.isnan(before["p"])
+    sliver = decay.publication_split(r, idx[42])  # 42 days before the date
+    assert not sliver["tested"]
+    assert decay.publication_split(r, pd.Timestamp("1995-01-02"))["tested"]

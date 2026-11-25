@@ -43,6 +43,7 @@ DEFAULTS = {
     "min_days_year": 120,
     "min_years_slope": 8,
     "alpha": 0.05,
+    "min_days_split": 252,
 }
 
 
@@ -120,15 +121,21 @@ def decay_slope(annual: pd.Series, min_years: int = 8) -> dict:
     }
 
 
-def publication_split(r: pd.Series, date: pd.Timestamp) -> dict:
-    """Sharpe before and on/after `date` and a Welch t-test on the daily means."""
+def publication_split(r: pd.Series, date: pd.Timestamp, min_days: int = 252) -> dict:
+    """Sharpe before and on/after `date` and a Welch t-test on the daily means.
+
+    `tested` is False (and the Sharpes and test missing) unless both sides have at
+    least `min_days` returns: a paper published before the data starts has no "before".
+    """
     r = r.dropna()
     pre, post = r[r.index < date], r[r.index >= date]
-    out = {"n_pre": len(pre), "n_post": len(post), "sharpe_pre": sharpe(pre, 20)}
-    out["sharpe_post"] = sharpe(post, 20)
+    tested = len(pre) >= min_days and len(post) >= min_days
+    out = {"n_pre": len(pre), "n_post": len(post), "tested": tested}
+    out["sharpe_pre"] = sharpe(pre, min_days) if tested else float("nan")
+    out["sharpe_post"] = sharpe(post, min_days) if tested else float("nan")
     out["diff"] = out["sharpe_post"] - out["sharpe_pre"]
     out["t"], out["p"] = float("nan"), float("nan")
-    if len(pre) >= 20 and len(post) >= 20:
+    if tested:
         t, p = sps.ttest_ind(post, pre, equal_var=False)
         out["t"], out["p"] = float(t), float(p)
     return out
@@ -154,7 +161,7 @@ def compute(
         slopes[fam] = {"variant": var, **decay_slope(annual[fam], cfg["min_years_slope"])}
         if published and fam in published:
             pub[fam] = {"variant": var, "date": published[fam]} | publication_split(
-                r, pd.Timestamp(published[fam])
+                r, pd.Timestamp(published[fam]), cfg["min_days_split"]
             )
     slope_df = pd.DataFrame(slopes).T.rename_axis("family")
     for c in slope_df.columns.drop("variant"):
@@ -167,7 +174,7 @@ def compute(
     tables["annual"].columns = tables["annual"].columns.astype(str)
     if pub:
         p = pd.DataFrame(pub).T.rename_axis("family")
-        for c in p.columns.drop(["variant", "date"]):
+        for c in p.columns.drop(["variant", "date", "tested"]):
             p[c] = p[c].astype(float)
         tables["publication"] = p
     if mkt_return is not None:
@@ -259,20 +266,44 @@ def compute(
         )
     if "publication" in tables:
         p = tables["publication"]
+        t = p[p["tested"].astype(bool)]
         stats["publication_median_diff"] = Stat(
-            float(p["diff"].median()),
-            "median across published families of Sharpe after minus before the date",
+            float(t["diff"].median()) if len(t) else float("nan"),
+            "median, over families with at least min_days_split returns on each side of "
+            "their paper's date, of net Sharpe after minus before",
+            ("matrix", "published"),
+        )
+        stats["publication_tested"] = Stat(
+            {
+                "tested": len(t),
+                "untested": int(len(p) - len(t)),
+                "higher_after": int((t["diff"] > 0).sum()),
+            },
+            "families with a publication date: tested (enough returns on both sides) or not "
+            "(e.g. a paper published before the data starts), and how many tested ones did "
+            "better after publication",
             ("matrix", "published"),
         )
         statements.append(
             Statement(
-                f"Across {len(p)} families with a publication date, median Sharpe after minus "
-                f"before is {stats['publication_median_diff'].value:+.2f}.",
-                "publication_median_diff",
-                "Welch t-test on daily returns per family; the post-publication window ends "
-                "2020 and is short; uncorrected across families.",
+                f"{len(t)} of {len(p)} dated families have enough returns before and after "
+                f"their paper's publication to compare; the rest were published before or "
+                "too near the start of the data.",
+                "publication_tested",
             )
         )
+        if len(t):
+            statements.append(
+                Statement(
+                    f"Across those {len(t)}, median net Sharpe after minus before publication is "
+                    f"{stats['publication_median_diff'].value:+.2f}; "
+                    f"{stats['publication_tested'].value['higher_after']} did better after.",
+                    "publication_median_diff",
+                    "Net of costs: spreads were much wider in the 1990s, so falling costs alone "
+                    "raise later net Sharpe and can mask post-publication decay. Welch t-test on "
+                    "daily returns; uncorrected across families; in-sample best variant.",
+                )
+            )
     else:
         stats["publication_split"] = Stat(
             "skipped", "no published-date table was supplied", ("published",)
