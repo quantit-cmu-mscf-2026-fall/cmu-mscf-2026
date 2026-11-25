@@ -115,14 +115,6 @@ class TestRegistrationRequired:
         result = gate_once(null_market)
         assert result.header.trial_count == null_market.returns.shape[1]
 
-    def test_a_registered_factor_frame_is_refused_until_stage_3_exists(self, ledger, null_market):
-        log_trials(null_market.returns.shape[1])
-        config = config_for(null_market, factors_digest="0" * 64)
-        register(config)
-        with pytest.raises(ValueError, match="stage-3"):
-            run(config, null_market)
-        assert looks(config.config_hash) == []
-
 
 class TestAuthorizer:
     @pytest.mark.parametrize("bad", [None, "", "   ", 7, ["gate-owner"]])

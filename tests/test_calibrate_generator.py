@@ -188,7 +188,7 @@ def test_the_registered_crsp_v1_config_is_the_one_the_doc_registers(tmp_path, mo
     config = gate.GateConfig.from_dict(registered["gate_config"])
     t = config.thresholds
     assert (t.stage1, t.q1, t.alpha2, t.final, t.q4) == ("bootstrap", 0.10, 1.0, "bh", 0.50)
-    assert config.factors_digest is None  # stage 3 isn't built; the gate refuses a digest
+    assert config.factors_digest is None  # crsp-v1 registers no stage 3: the gate passes it through
     assert registered["gate_config"]["decision_rule"] | {"on": None} == {
         "rule": "baseline",
         "method": "bh",

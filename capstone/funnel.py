@@ -146,6 +146,10 @@ class Thresholds:
     q4_incubate is set with "incubate" and only then, q4 < q4_incubate < 1, and
     needs final="bh" (it is a level on BH's adjusted p). Both stay out of
     `thresholds_dict` while at their defaults.
+
+    alpha3: the BH level of stage 3 (the spanning alpha test) across the
+    families that reach it; None (the default) means stage 3 is not measured.
+    The gate reads it only with a registered factor frame.
     """
 
     q1: float = 0.10
@@ -157,6 +161,7 @@ class Thresholds:
     final_trials: FinalTrials = "survivors"
     promote: Promote = "accept"
     q4_incubate: float | None = None
+    alpha3: float | None = None
 
     def __post_init__(self) -> None:
         if self.stage1 not in STAGE1_METHODS:
@@ -178,6 +183,13 @@ class Thresholds:
                 raise ValueError(f"{name} must be in (0, 1)")
         if not 0.0 < self.alpha2 <= 1.0:
             raise ValueError("alpha2 must be in (0, 1]; 1.0 means no stage-2 gate")
+        if self.alpha3 is not None:
+            a3 = self.alpha3
+            if isinstance(a3, bool | np.bool_) or not isinstance(a3, numbers.Real):
+                raise TypeError(f"alpha3 must be a real number or None, not {type(a3).__name__}")
+            if not 0.0 < a3 < 1.0:
+                raise ValueError("alpha3 must be in (0, 1)")
+            object.__setattr__(self, "alpha3", float(a3))
         _check_promotion(self)
 
 
@@ -508,8 +520,9 @@ def screen(
     """Stages 1-3 of `run_funnel`: per-hypothesis pass flags, no holdout needed.
 
     `stage1` overrides `th.stage1` (for sweeps over the method). Stage 3
-    (spanning) passes stage 2's survivors through until the spanning test
-    exists; the calibration reports it as not measured. The gate runs this on
+    (spanning) passes stage 2's survivors through here; the calibration reports
+    it as not measured, and `gate.run_gate` replaces it with the spanning test
+    when the config registers a factor frame. The gate runs this on
     search-period statistics alone and opens the holdout only afterwards, for
     the stage-3 survivors (`holdout_statistics`).
     """
