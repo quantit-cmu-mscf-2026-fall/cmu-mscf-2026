@@ -304,3 +304,39 @@ def test_unsourced_statement_is_refused_by_write_outputs(tmp_path):
 
     with pytest.raises(ValueError, match="not in stats"):
         write_outputs(tmp_path / "x", title="t", stats={}, statements=[Statement("s", "nope")])
+
+
+def test_export_round_trips_every_paper_including_unscreened(tmp_path):
+    db = _db(tmp_path, per_level=2)
+    export = tmp_path / "papers.jsonl.gz"
+    jps.main(["--db", str(db), "--export", str(export), "--out", str(tmp_path / "o")])
+    papers = jps.load_papers_jsonl(export)
+    from_db = jps.load_papers(db, screened_only=False)
+    assert {p["key"] for p in papers} == {p["key"] for p in from_db}
+    assert "f1" in {p["key"] for p in papers}  # an unscreened paper is exported too
+    adopted = next(p for p in papers if p["key"] == "adopt1")
+    assert adopted["haiku_tags"] == ["survey"] and adopted["relevance"] == 5
+
+
+def test_tag_all_from_an_export_tags_only_the_chosen_statuses(tmp_path, ledger):
+    db = _db(tmp_path, per_level=2)
+    export = tmp_path / "papers.jsonl.gz"
+    jps.export_papers(db, export)
+    out = tmp_path / "all"
+    calls: list = []
+    path = jps.main(
+        ["--papers", str(export), "--all", "--status", "filtered,adopted", "--out", str(out)],
+        post=_varied_post(calls),
+        sleep=lambda s: None,
+    )
+    tagged = pd.read_csv(path)
+    assert path == out / "tagged.csv" and len(calls) == 2
+    assert set(tagged.key) == {"f1", "adopt1"}
+    assert "jev_tags" in tagged and "jev_relevance" in tagged
+    assert len(ledger.read_text().splitlines()) == 1
+    jps.main(  # cached: a rerun pays nothing
+        ["--papers", str(export), "--all", "--status", "filtered,adopted", "--out", str(out)],
+        post=_varied_post(calls),
+        sleep=lambda s: None,
+    )
+    assert len(calls) == 2

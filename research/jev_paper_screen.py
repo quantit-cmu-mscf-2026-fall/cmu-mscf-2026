@@ -23,6 +23,7 @@ The run is logged once to the ledger before any call; no Claude call is made.
 from __future__ import annotations
 
 import argparse
+import gzip
 import hashlib
 import json
 import math
@@ -211,14 +212,14 @@ def parse_response(response: dict, tags: list[str], top: int = 5) -> dict:
 # Data and sample
 
 
-def load_papers(db: Path) -> list[dict]:
-    """Read-only rows of papers that have a Haiku relevance score."""
+def load_papers(db: Path, *, screened_only: bool = True) -> list[dict]:
+    """Read-only rows of papers; by default only those with a Haiku relevance score."""
     con = sqlite3.connect(f"{Path(db).resolve().as_uri()}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
+    where = " WHERE relevance IS NOT NULL" if screened_only else ""
     try:
         rows = con.execute(
-            "SELECT key, title, abstract, published, status, relevance, tags FROM papers "
-            "WHERE relevance IS NOT NULL"
+            "SELECT key, title, abstract, published, status, relevance, tags FROM papers" + where
         ).fetchall()
     finally:
         con.close()
@@ -228,6 +229,45 @@ def load_papers(db: Path) -> list[dict]:
         paper["haiku_tags"] = json.loads(paper.pop("tags") or "[]")
         papers.append(paper)
     return papers
+
+
+EXPORT_FIELDS = ("key", "title", "abstract", "published", "status", "relevance", "tags")
+
+
+def export_papers(db: Path, path: Path) -> int:
+    """Write every paper's EXPORT_FIELDS as gzipped JSON lines (for a machine without the db)."""
+    papers = load_papers(db, screened_only=False)
+    with gzip.open(path, "wt", encoding="utf-8") as handle:
+        for p in sorted(papers, key=lambda p: p["key"]):
+            row = {k: p.get(k) for k in EXPORT_FIELDS if k != "tags"}
+            line = json.dumps(row | {"tags": p["haiku_tags"]}, ensure_ascii=False)
+            handle.write(line + "\n")
+    return len(papers)
+
+
+def load_papers_jsonl(path: Path) -> list[dict]:
+    """Papers from an `export_papers` file (.jsonl or .jsonl.gz)."""
+    opener = gzip.open if str(path).endswith(".gz") else open
+    papers = []
+    with opener(path, "rt", encoding="utf-8") as handle:
+        for line in handle:
+            if line.strip():
+                row = json.loads(line)
+                row["haiku_tags"] = list(row.pop("tags", None) or [])
+                papers.append(row)
+    return papers
+
+
+def tag_all(
+    rows: list[dict], papers: list[dict], tags: list[str], threshold: float
+) -> pd.DataFrame:
+    """Jev's relevance and tag probabilities per paper, with tags at `threshold`."""
+    df = results_frame(papers, rows, tags)
+    probs = df[[f"p_{t}" for t in tags]]
+    df["jev_tags"] = [
+        ";".join(t for t in tags if row[f"p_{t}"] >= threshold) for _, row in probs.iterrows()
+    ]
+    return df.drop(columns=["abstract"])
 
 
 def sample_papers(papers: list[dict], n_per_level: int, seed: int) -> list[dict]:
@@ -712,17 +752,45 @@ def report(
 
 def main(argv: list[str] | None = None, post=http_post, sleep=time.sleep) -> Path:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--db", type=Path, required=True, help="paperlog papers.db (opened read-only)")
+    src = ap.add_mutually_exclusive_group(required=True)
+    src.add_argument("--db", type=Path, help="paperlog papers.db (opened read-only)")
+    src.add_argument("--papers", type=Path, help="an export_papers file (.jsonl or .jsonl.gz)")
+    ap.add_argument("--export", type=Path, help="with --db: write the papers export here and stop")
+    ap.add_argument("--all", action="store_true", help="tag every paper (no Haiku comparison)")
+    ap.add_argument("--status", help="with --all: comma-separated statuses to tag (default all)")
+    ap.add_argument("--threshold", type=float, default=0.5, help="with --all: tag cut-off")
     ap.add_argument("--n-per-level", type=int, default=25)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--max-calls", type=int, default=200)
     ap.add_argument("--out", type=Path, required=True)
     a = ap.parse_args(argv)
+    if a.export:
+        if not a.db:
+            ap.error("--export needs --db")
+        n = export_papers(a.db, a.export)
+        print(f"wrote {n} papers to {a.export}")
+        return a.export
     cfg = load_config()
     tags = list(cfg["taxonomy"])
     questions = build_questions(cfg, load_definitions(tags))
-    papers = sample_papers(load_papers(a.db), a.n_per_level, a.seed)
-    params = {"n_per_level": a.n_per_level, "seed": a.seed, "db": a.db.name}
+    source = a.db or a.papers
+    if a.all:
+        papers = load_papers(a.db, screened_only=False) if a.db else load_papers_jsonl(a.papers)
+        if a.status:
+            keep = {s.strip() for s in a.status.split(",")}
+            papers = [p for p in papers if p.get("status") in keep]
+        papers = sorted(papers, key=lambda p: p["key"])
+        params = {"mode": "all", "status": a.status, "source": source.name}
+        rows = run(papers, questions, tags, a.out, jev_key(), a.max_calls, post, sleep, params)
+        out = a.out / "tagged.csv"
+        tag_all(rows, papers, tags, a.threshold).to_csv(out, index=False)
+        print(f"tagged {len(rows)} of {len(papers)} papers; wrote {out}")
+        return out
+    papers = load_papers(a.db) if a.db else load_papers_jsonl(a.papers)
+    papers = sample_papers(
+        [p for p in papers if p.get("relevance") is not None], a.n_per_level, a.seed
+    )
+    params = {"n_per_level": a.n_per_level, "seed": a.seed, "db": source.name}
     rows = run(papers, questions, tags, a.out, jev_key(), a.max_calls, post, sleep, params)
     path = report(
         papers, rows, tags, a.out, params | {"max_calls": a.max_calls}, len(papers) - len(rows)
