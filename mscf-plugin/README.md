@@ -25,6 +25,7 @@ is no `python3`; with neither on `PATH` it denies the call.
 | Skill | `null-calibration` | Null and power tests every new validation method ships with |
 | Skill | `research-pr` | Branch, checks, PR template with seeds and trial count, review and merge |
 | Skill | `paper-round` | Weekly paper one-pager, smallest experiment, report back |
+| Skill | `pipeline-view` | The live pipeline lab over the run ledger (local page or one-file snapshot), and how an experiment reports its progress (`mscf_progress.track`, `pipeline_run.py`) |
 | Skill | `paperlog` | Search the team's paper log (a read-only copy of the shared `papers.db`), add a paper, run the weekly collection on request |
 | Command | `qp-check` | The pre-PR acceptance check: offline tests, ruff, and the trial count from `runlog stats` |
 | Agent | `ship-checker` | Read-only pre-push check of a branch against the PR rules (title, size, template, failing-without-change test, safety scan) |

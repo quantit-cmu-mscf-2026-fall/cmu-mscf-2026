@@ -1,0 +1,582 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pipeline lab · cmu-mscf-2026</title>
+<style>
+/*FONTS*/
+  .viz-root {
+    color-scheme: light;
+    --surface-0: #f4f3f0; --surface-1: #fcfcfb;
+    --text-primary: #0b0b0b; --text-secondary: #52514e; --text-muted: #7a7974;
+    --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,0.10);
+    --series-1: #2a78d6; --series-1-soft: rgba(42,120,214,0.14);
+    --good: #0ca30c; --warning: #fab219; --critical: #d03b3b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) .viz-root {
+      color-scheme: dark;
+      --surface-0: #111110; --surface-1: #1a1a19;
+      --text-primary: #f0efec; --text-secondary: #c3c2b7; --text-muted: #8f8e88;
+      --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
+      --series-1: #3987e5; --series-1-soft: rgba(57,135,229,0.20);
+    }
+  }
+  :root[data-theme="dark"] .viz-root {
+    color-scheme: dark;
+    --surface-0: #111110; --surface-1: #1a1a19;
+    --text-primary: #f0efec; --text-secondary: #c3c2b7; --text-muted: #8f8e88;
+    --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
+    --series-1: #3987e5; --series-1-soft: rgba(57,135,229,0.20);
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; }
+  .viz-root { background: var(--surface-0); color: var(--text-primary); min-height: 100vh;
+    font: 14px/1.45 "Overpass", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; padding: 20px; }
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; margin-bottom: 16px; }
+  h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  .meta { color: var(--text-secondary); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .live { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--good); }
+  .dot.stale { background: var(--axis); }
+  .grid { display: grid; gap: 12px; grid-template-columns: repeat(12, 1fr); }
+  .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; min-width: 0; }
+  .card h2 { font-size: 13px; font-weight: 600; margin: 0 0 10px; color: var(--text-secondary); }
+  .tile { grid-column: span 3; }
+  .tile .v { font-size: 28px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .tile .s { color: var(--text-muted); font-size: 12px; }
+  .wide { grid-column: span 7; } .narrow { grid-column: span 5; } .full { grid-column: span 12; }
+  @media (max-width: 900px) { .tile { grid-column: span 6; } .wide, .narrow { grid-column: span 12; } }
+  svg text { fill: var(--text-secondary); font-size: 11px; }
+  .status { display: inline-flex; gap: 6px; align-items: center; font-size: 12px; font-weight: 600; }
+  .status .i { width: 16px; height: 16px; border-radius: 50%; color: #fff; font-size: 11px; display: grid; place-items: center; }
+  .ok .i { background: var(--good); } .warn .i { background: var(--warning); color: #0b0b0b; } .bad .i { background: var(--critical); }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+  th { text-align: left; color: var(--text-muted); font-weight: 500; border-bottom: 1px solid var(--grid); padding: 4px 8px 6px 0; }
+  td { border-bottom: 1px solid var(--grid); padding: 5px 8px 5px 0; white-space: nowrap; }
+  td.m { white-space: normal; color: var(--text-secondary); }
+  .scroll { overflow-x: auto; }
+  #tip { position: fixed; pointer-events: none; background: var(--surface-1); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 8px; font-size: 12px; box-shadow: 0 4px 14px rgba(0,0,0,.12); display: none; z-index: 9; }
+  .empty { color: var(--text-muted); font-size: 13px; padding: 12px 0; }
+  ul.flags { margin: 0; padding-left: 18px; color: var(--text-secondary); font-size: 12px; }
+
+  /* tabs */
+  .tabs { display: inline-flex; gap: 2px; background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; padding: 2px; }
+  .tabs button { border: 0; background: transparent; color: var(--text-secondary); font: inherit; font-size: 13px; padding: 5px 12px; border-radius: 6px; cursor: pointer; }
+  .tabs button[aria-selected="true"] { background: var(--surface-0); color: var(--text-primary); font-weight: 600; }
+  section[hidden] { display: none; }
+  /* production line: the science room */
+  .lab-card { padding: 0; overflow: hidden; }
+  #labhost svg { display: block; width: 100%; height: auto; }
+  #labhost svg text { font-family: "Overpass", ui-sans-serif, system-ui, sans-serif; }
+  #labhost .lcd { font-family: "Plex Mono", ui-monospace, monospace; font-size: 11px; fill: #9be3b4; }
+  #labhost .pnum { font-weight: 800; font-size: 12px; fill: #f2c14e; }
+  #labhost .pname { font-weight: 800; font-size: 12.5px; fill: #f1f4f3; }
+  #labhost .micro { font-size: 9px; font-weight: 800; fill: #5f6e70; } #labhost .micro.w { fill: #fff; }
+  #labhost .blabel { font-size: 11px; font-weight: 800; fill: #5f6e70; }
+  #labhost .arch { font-size: 11px; font-weight: 800; fill: #1f2a2c; }
+  #labhost .board { font-size: 15px; font-weight: 600; fill: #2f6f73; }
+  #labhost .board.s { font-size: 12px; fill: #5f6e70; } #labhost .board.warn { fill: #b4542f; font-weight: 800; }
+  #labhost .boardbig { font-size: 58px; font-weight: 800; fill: #1f2a2c; font-variant-numeric: tabular-nums; }
+  #labhost .tname { font-weight: 800; font-size: 10.5px; fill: #1f2a2c; paint-order: stroke; stroke: #dde6e3; stroke-width: 3px; }
+  #labhost .crowd { font-weight: 800; font-size: 11px; fill: #fff; }
+  #labhost .tube { cursor: default; }
+  #labhost .tube.gone { transition: opacity .8s; opacity: 0; }
+  /* instrument animations run only while a run is at that instrument */
+  .inst .a-vapor, .inst .a-bub, .inst .a-heat, .inst .a-beam, .inst .a-light { opacity: 0; }
+  .inst.active .a-write { stroke-dasharray: 100; animation: write 2.4s ease-in-out infinite; }
+  .inst.active .a-pen { animation: pen 2.4s ease-in-out infinite; }
+  .inst.active .a-vapor { animation: vapor 2.2s ease-out infinite; animation-delay: var(--d); }
+  .inst.active .a-rack { animation: rack 1.8s ease-in-out infinite; animation-delay: var(--d); }
+  .inst.active .a-stir { animation: stir .45s linear infinite; }
+  .inst.active .a-swirl { animation: swirl 1.6s linear infinite; }
+  .inst.active .a-bub { animation: bub 1.8s ease-in infinite; animation-delay: var(--d); }
+  .inst.active .a-heat { animation: heat 1.6s ease-out infinite; animation-delay: var(--d); }
+  .inst.active .a-well { animation: well 1.44s steps(1) infinite; animation-delay: var(--d); }
+  .inst.active .a-feed { animation: feed 1.6s ease-in-out infinite; }
+  .inst.active .a-beam { animation: beam 1.2s ease-in-out infinite alternate; }
+  .inst.active .a-rotor { animation: rotor .5s linear infinite; }
+  .inst.active .a-shake { animation: shake .12s linear infinite; }
+  .inst.active .a-fog { animation: fog 4s linear infinite; }
+  .inst.active .a-light { animation: light 2s ease-in-out infinite; }
+  .inst.active .a-cell { animation: cell 2.4s ease-in-out infinite; animation-delay: var(--d); }
+  .inst.active .a-knob { animation: knob 3s ease-in-out infinite; }
+  .inst.active .a-glove { animation: glove 1.4s ease-in-out infinite; }
+  .inst.active .a-glove.r { animation-delay: .7s; }
+  .inst.active .a-warm { animation: warm 3s ease-in-out infinite; }
+  .track-flow { opacity: .8; }
+  .lab-busy .track-flow.lower { animation: flowR 1s linear infinite; }
+  .lab-busy .track-flow.upper { animation: flowR 1s linear infinite; }
+  @keyframes write { 0% { stroke-dashoffset: 100; } 70%, 100% { stroke-dashoffset: 0; } }
+  @keyframes pen { 0% { transform: translate(-30px, 14px); } 70% { transform: translate(6px, -8px); } 100% { transform: translate(6px, -8px); } }
+  @keyframes vapor { 0% { opacity: 0; transform: translateY(6px); } 30% { opacity: .8; } 100% { opacity: 0; transform: translateY(-14px); } }
+  @keyframes rack { 0%, 100% { fill: #cfc6b4; } 50% { fill: #a98a62; } }
+  @keyframes stir { from { transform: scaleX(1); } 50% { transform: scaleX(.15); } to { transform: scaleX(1); } }
+  @keyframes swirl { to { transform: rotate(360deg); } }
+  @keyframes bub { 0% { opacity: 0; transform: translateY(0); } 25% { opacity: .9; } 100% { opacity: 0; transform: translateY(-30px); } }
+  @keyframes heat { 0% { opacity: 0; transform: translateY(6px); } 40% { opacity: .9; } 100% { opacity: 0; transform: translateY(-10px); } }
+  @keyframes well { 0% { fill: #e9a36b; } 50% { fill: #9fd3e0; } }
+  @keyframes feed { 0% { transform: translateY(0); } 60% { transform: translateY(10px); } 100% { transform: translateY(0); } }
+  @keyframes beam { from { opacity: .2; transform: rotate(-12deg); } to { opacity: .95; transform: rotate(12deg); } }
+  @keyframes rotor { to { stroke-dashoffset: -22; } }
+  @keyframes shake { 0% { transform: translateX(0); } 50% { transform: translateX(.8px); } 100% { transform: translateX(0); } }
+  @keyframes fog { from { transform: translateX(0); } to { transform: translateX(60px); } }
+  @keyframes light { 0%, 100% { opacity: .15; } 50% { opacity: .85; } }
+  @keyframes cell { 0%, 100% { opacity: .25; } 50% { opacity: .9; } }
+  @keyframes knob { 0%, 100% { transform: rotate(0); } 50% { transform: rotate(120deg); } }
+  @keyframes glove { 0%, 100% { transform: rotate(0); } 50% { transform: rotate(18deg); } }
+  @keyframes warm { 0%, 100% { opacity: .1; } 50% { opacity: .38; } }
+  @keyframes flowR { to { stroke-dashoffset: -20; } }
+  @media (prefers-reduced-motion: reduce) { #labhost * { animation: none !important; transition: none !important; } }
+  .bar { height: 6px; border-radius: 3px; background: var(--grid); width: 90px; overflow: hidden; display: inline-block; vertical-align: middle; }
+  .bar i { display: block; height: 100%; background: var(--series-1); border-radius: 3px; }
+  code { font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="viz-root">
+  <header>
+    <h1>Pipeline lab</h1>
+    <div class="tabs" role="tablist">
+      <button role="tab" id="tab-line-btn" aria-selected="true" data-tab="line">Lab</button>
+      <button role="tab" id="tab-ledger-btn" aria-selected="false" data-tab="ledger">Ledger</button>
+    </div>
+    <span class="meta" id="meta"></span>
+    <span class="live" id="live"><span class="dot"></span><span id="livetext">live</span></span>
+  </header>
+  <section id="tab-line" role="tabpanel">
+    <div class="grid">
+      <div class="card full lab-card"><div id="labhost"><!--SCENE--></div></div>
+      <div class="card full"><h2>Experiments in the lab</h2><div class="scroll" id="jobs"></div></div>
+    </div>
+  </section>
+  <section id="tab-ledger" role="tabpanel" hidden>
+  <div class="grid">
+    <div class="card tile"><h2>Trials in ledger</h2><div class="v" id="t-trials">–</div><div class="s" id="t-trials-s">the n every correction uses</div></div>
+    <div class="card tile"><h2>Experiments</h2><div class="v" id="t-names">–</div><div class="s" id="t-names-s"></div></div>
+    <div class="card tile"><h2>Holdout reads</h2><div class="v" id="t-holdout">–</div><div class="s" id="t-holdout-s"></div></div>
+    <div class="card tile"><h2>Ledger hygiene</h2><div class="v" id="t-hyg">–</div><div class="s" id="t-hyg-s"></div></div>
+
+    <div class="card wide"><h2>Validation funnel · runs per stage (passed in label)</h2><div id="funnel"></div></div>
+    <div class="card narrow"><h2>Trials over time</h2><div id="timeline"></div></div>
+
+    <div class="card narrow"><h2>Runs by experiment (top 10)</h2><div id="names"></div></div>
+    <div class="card wide"><h2>Checks</h2><div id="checks"></div></div>
+
+    <div class="card full"><h2>Most recent runs</h2><div class="scroll" id="recent"></div></div>
+  </div>
+    </section>
+  <div id="tip"></div>
+</div>
+<script>
+const SNAPSHOT = /*__STATE__*/null;
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const fmt = (n) => Number(n).toLocaleString();
+const tip = $("tip");
+function showTip(e, html) { tip.innerHTML = html; tip.style.display = "block";
+  tip.style.left = Math.min(e.clientX + 12, innerWidth - tip.offsetWidth - 8) + "px"; tip.style.top = (e.clientY + 12) + "px"; }
+function hideTip() { tip.style.display = "none"; }
+function bindTips(root) {
+  root.querySelectorAll("[data-tip]").forEach(el => {
+    el.addEventListener("mousemove", e => showTip(e, el.dataset.tip));
+    el.addEventListener("mouseleave", hideTip);
+  });
+}
+
+function hbars(el, rows, label, value, note) {
+  if (!rows.length || rows.every(r => value(r) === 0)) { el.innerHTML = '<div class="empty">No runs yet.</div>'; return; }
+  const W = Math.max(el.clientWidth, 280), rowH = 26, labW = 110, valW = 90, H = rows.length * rowH + 4;
+  const max = Math.max(...rows.map(value), 1), bw = W - labW - valW;
+  let s = `<svg width="100%" viewBox="0 0 ${W} ${H}" role="img">`;
+  s += `<line x1="${labW}" x2="${labW}" y1="0" y2="${H}" stroke="var(--axis)" stroke-width="1"/>`;
+  rows.forEach((r, i) => {
+    const y = i * rowH + 4, w = Math.max(value(r) / max * bw, value(r) ? 3 : 0);
+    const t = `<b>${esc(label(r))}</b><br>${fmt(value(r))} runs${note ? "<br>" + esc(note(r)) : ""}`;
+    s += `<text x="${labW - 8}" y="${y + 13}" text-anchor="end">${esc(label(r))}</text>`;
+    s += `<rect x="${labW}" y="${y}" width="${w}" height="18" rx="4" fill="var(--series-1)"/>`;
+    s += `<text x="${labW + w + 6}" y="${y + 13}" style="fill:var(--text-primary)">${fmt(value(r))}${note && note(r) ? " · " + esc(note(r)) : ""}</text>`;
+    s += `<rect x="0" y="${y - 3}" width="${W}" height="${rowH}" fill="transparent" data-tip="${esc(t)}"/>`;
+  });
+  el.innerHTML = s + "</svg>"; bindTips(el);
+}
+
+function timeline(el, pts) {
+  if (!pts.length) { el.innerHTML = '<div class="empty">No runs yet.</div>'; return; }
+  const W = Math.max(el.clientWidth, 280), H = 170, L = 40, R = 10, T = 8, B = 22;
+  const xs = pts.map(p => Date.parse(p.ts)), x0 = Math.min(...xs), x1 = Math.max(...xs, x0 + 1);
+  const ymax = pts[pts.length - 1].n;
+  const X = t => L + (t - x0) / (x1 - x0) * (W - L - R), Y = n => H - B - n / ymax * (H - T - B);
+  let d = `M${X(xs[0])},${Y(0)}`;
+  pts.forEach((p, i) => { d += `H${X(xs[i])}V${Y(p.n)}`; });
+  let s = `<svg width="100%" viewBox="0 0 ${W} ${H}" role="img">`;
+  [0, .5, 1].forEach(f => { const n = Math.round(ymax * f), y = Y(n);
+    s += `<line x1="${L}" x2="${W - R}" y1="${y}" y2="${y}" stroke="var(--grid)"/><text x="${L - 6}" y="${y + 4}" text-anchor="end">${fmt(n)}</text>`; });
+  s += `<line x1="${L}" x2="${W - R}" y1="${H - B}" y2="${H - B}" stroke="var(--axis)"/>`;
+  const day = t => new Date(t).toLocaleDateString(undefined, {month: "short", day: "numeric"});
+  s += `<text x="${L}" y="${H - 6}">${day(x0)}</text><text x="${W - R}" y="${H - 6}" text-anchor="end">${day(x1)}</text>`;
+  s += `<path d="${d}" fill="none" stroke="var(--series-1)" stroke-width="2"/>`;
+  s += `<line id="xh" y1="${T}" y2="${H - B}" stroke="var(--axis)" visibility="hidden"/>`;
+  s += `<circle id="xd" r="4" fill="var(--series-1)" stroke="var(--surface-1)" stroke-width="2" visibility="hidden"/>`;
+  s += `<rect x="${L}" y="0" width="${W - L - R}" height="${H}" fill="transparent" id="xhit"/></svg>`;
+  el.innerHTML = s;
+  const svg = el.querySelector("svg"), hit = el.querySelector("#xhit"), xh = el.querySelector("#xh"), xd = el.querySelector("#xd");
+  hit.addEventListener("mousemove", e => {
+    const r = svg.getBoundingClientRect(), t = x0 + ((e.clientX - r.left) * W / r.width - L) / (W - L - R) * (x1 - x0);
+    let i = 0; while (i < xs.length - 1 && xs[i + 1] <= t) i++;
+    const px = X(xs[i]);
+    xh.setAttribute("x1", px); xh.setAttribute("x2", px); xh.setAttribute("visibility", "visible");
+    xd.setAttribute("cx", px); xd.setAttribute("cy", Y(pts[i].n)); xd.setAttribute("visibility", "visible");
+    showTip(e, `<b>${fmt(pts[i].n)} trials</b><br>${esc(new Date(xs[i]).toLocaleString())}`);
+  });
+  hit.addEventListener("mouseleave", () => { xh.setAttribute("visibility", "hidden"); xd.setAttribute("visibility", "hidden"); hideTip(); });
+}
+
+function status(kind, text) {
+  const icon = {ok: "✓", warn: "!", bad: "✕"}[kind];
+  return `<span class="status ${kind}"><span class="i">${icon}</span>${esc(text)}</span>`;
+}
+
+function render(st) {
+  $("meta").textContent = [st.branch && `${st.branch}@${st.sha}`, st.data_version && `data ${st.data_version}`, st.ledger].filter(Boolean).join(" · ");
+  $("t-trials").textContent = st.ledger_error ? "error" : fmt(st.trials);
+  $("t-trials-s").textContent = st.ledger_error || "the n every correction uses";
+  $("t-names").textContent = fmt(st.names);
+  $("t-names-s").textContent = `${st.users} people · ${st.families} families`;
+  const h = st.holdout_reads.length;
+  $("t-holdout").textContent = h;
+  $("t-holdout-s").innerHTML = h === 0 ? status("ok", "sealed") : h === 1 ? status("ok", "read once (stage 4)") : status("bad", `read ${h} times`);
+  const hyg = Object.values(st.hygiene).reduce((a, b) => a + b, 0);
+  $("t-hyg").textContent = hyg;
+  $("t-hyg-s").innerHTML = hyg ? status("warn", "runs missing seed, data version or metrics") : status("ok", "every run complete");
+
+  hbars($("funnel"), st.stages, r => r.stage, r => r.runs, r => r.runs ? `${r.passed} passed` : "");
+  timeline($("timeline"), st.timeline);
+  hbars($("names"), st.top_names, r => r.name.length > 16 ? r.name.slice(0, 15) + "…" : r.name, r => r.runs);
+
+  const checks = [];
+  if (st.ledger_error) checks.push(status("bad", `Ledger problem: ${st.ledger_error}. The trial count is not shown until it is fixed (python -m capstone.runlog stats)`));
+  if (!st.ledger_exists) checks.push(status("warn", "No ledger file yet: nothing has been logged with runlog.log_run"));
+  checks.push(h > 1 ? status("bad", `Holdout read ${h} times: every read after the first is a new trial on 2021-2025`)
+    : status("ok", h ? "Holdout read once" : "Holdout untouched"));
+  const untagged = st.stages.find(s => s.stage === "untagged");
+  checks.push(untagged ? status("warn", `${untagged.runs} runs have no stage: tag them stage:<name> so the funnel is complete`) : status("ok", "Every run is tagged with a stage"));
+  Object.entries(st.hygiene).forEach(([k, v]) => checks.push(status("warn", `${v} runs with ${k}`)));
+  let extra = "";
+  if (h) extra = `<ul class="flags">${st.holdout_reads.slice(-5).map(r => `<li>${esc(r.ts)} · ${esc(r.user)} · ${esc(r.name)}</li>`).join("")}</ul>`;
+  $("checks").innerHTML = checks.map(c => `<div style="margin:4px 0">${c}</div>`).join("") + extra;
+
+  $("recent").innerHTML = st.recent.length ? `<table><thead><tr><th>When (UTC)</th><th>Who</th><th>Experiment</th><th>Stage</th><th>Verdict</th><th>Seed</th><th>Commit</th><th>Metrics</th></tr></thead><tbody>` +
+    st.recent.map(r => `<tr><td>${esc((r.ts || "").replace("T", " ").slice(0, 19))}</td><td>${esc(r.user)}</td><td>${esc(r.name)}</td><td>${esc(r.stage)}</td><td>${esc(r.verdict)}</td><td>${esc(r.seed ?? "–")}</td><td>${esc(r.sha)}</td><td class="m">${esc(Object.entries(r.metrics).map(([k, v]) => `${k}=${typeof v === "number" ? +v.toFixed(4) : v}`).join("  "))}</td></tr>`).join("") +
+    `</tbody></table>` : '<div class="empty">No runs yet.</div>';
+}
+
+
+/* ---------- production line: the science room ---------- */
+const NS = "http://www.w3.org/2000/svg";
+const LOWER_Y = 700, UPPER_Y = 420, XS = [250, 490, 730, 970, 1210], LIFT_X = 1479, ARCH = [20, 230];
+// one colour per station: each process turns the sample into the next colour
+const LIQ = ["#cfc6b4", "#a98a62", "#c9a14a", "#d07a3a", "#3f9c8f", "#2e86a8", "#5a7fd6", "#7a5fd0", "#a14fb5", "#e8b931"];
+const SLOTS = 3;                                  // tubes drawn in front of an instrument; the rest show as "+N"
+const REDUCE = matchMedia("(prefers-reduced-motion: reduce)").matches;
+const tubeEls = new Map();                        // run_id -> { g, stage, pos, status }
+let lastJobs = new Map();
+
+function svgEl(tag, attrs = {}, html) {
+  const e = document.createElementNS(NS, tag);
+  for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+  if (html !== undefined) e.innerHTML = html;
+  return e;
+}
+function centre(i) { return i < 5 ? [XS[i], LOWER_Y] : [XS[4 - (i - 5)], UPPER_Y]; }
+function slotPos(i, k) {  // tubes wait on the approach side: left of bench instruments, right of shelf instruments
+  const [cx, y] = centre(i), dir = i < 5 ? -1 : 1;
+  return [cx + dir * (82 + k * 30), y];
+}
+function basketPos(i, k) { const [cx, y] = centre(i); return [cx - 28 + k * 14, y + 92]; }
+
+function makeTube(job) {
+  const id = "c" + job.run_id.replace(/[^\w-]/g, "");
+  const g = svgEl("g", {class: "tube"});
+  g.innerHTML = `
+    <circle class="glow" cx="0" cy="-26" r="26" fill="#f2c14e" opacity="0"/>
+    <rect x="-13" y="-7" width="26" height="9" rx="3" fill="#39464a"/><rect x="-11" y="-5" width="22" height="2" fill="#56666b"/>
+    <clipPath id="${id}"><path d="M-5 -36 v26 a5 5 0 0 0 10 0 v-26z"/></clipPath>
+    <g clip-path="url(#${id})">
+      <rect class="liq" x="-6" y="-37" width="12" height="40"/>
+      <g class="react"><rect class="liq2" x="-6" y="-37" width="12" height="0"/></g>
+      <circle class="fizz f1" cx="-2" cy="-10" r="1.4" fill="#fff" opacity="0"/><circle class="fizz f2" cx="2.5" cy="-6" r="1.1" fill="#fff" opacity="0"/><circle class="fizz f3" cx="0" cy="-14" r="1" fill="#fff" opacity="0"/>
+      <g class="crystals"></g>
+    </g>
+    <path d="M-6 -50 v40 a6 6 0 0 0 12 0 v-40z" fill="#fff" fill-opacity=".35" stroke="#8b9a9e" stroke-width="1.2"/>
+    <g class="barcode" opacity="0"><rect x="-6.5" y="-46" width="13" height="9" fill="#fbfbf7" stroke="#c9cfcc" stroke-width=".6"/><path d="M-4 -43 v4 M-2.5 -43 v4 M-.5 -43 v4 M1.5 -43 v4 M3.5 -43 v4" stroke="#1f2a2c" stroke-width=".7"/></g>
+    <rect class="cap" x="-7" y="-54" width="14" height="5" rx="1.5" fill="#56666b"/>
+    <circle class="drop" cx="0" cy="-70" r="3" opacity="0"/>
+    <g class="badge" visibility="hidden"><circle cx="9" cy="-52" r="6"/><text x="9" y="-49" text-anchor="middle" font-size="8" font-weight="800" fill="#fff"></text></g>
+    <text class="tname" x="0" y="-62" text-anchor="middle"></text>`;
+  g.addEventListener("mousemove", e => showTip(e, g.dataset.tip || ""));
+  g.addEventListener("mouseleave", hideTip);
+  document.getElementById("tubes").append(g);
+  const t = {g, stage: -1, pos: null, status: null};
+  paintStage(t, job.index, false);
+  return t;
+}
+
+// the sample's look at a station: colour, barcode from the ledger on, crystals through the gates, seal, glow
+function decorate(t, stage) {
+  const g = t.g;
+  g.querySelector(".barcode").setAttribute("opacity", stage >= 4 ? 1 : 0);
+  g.querySelector(".cap").setAttribute("fill", stage >= 8 ? "#d4583f" : "#56666b");
+  g.querySelector(".glow").setAttribute("opacity", stage >= 9 ? .3 : 0);
+  const n = stage >= 7 ? 3 : stage >= 6 ? 2 : stage >= 5 ? 1 : 0;
+  g.querySelector(".crystals").innerHTML = Array.from({length: n}, (_, k) => `<path d="M${-3 + k * 3} -12 l1.6 -${5 + k * 2} l1.6 ${5 + k * 2}z" fill="#efeaff" opacity=".9"/>`).join("");
+}
+
+// the chemical change: a reagent drop falls in, the new colour diffuses down through the old one, it fizzes
+function paintStage(t, stage, animate) {
+  if (t.stage === stage) return;
+  const g = t.g, base = g.querySelector(".liq"), layer = g.querySelector(".liq2"), react = g.querySelector(".react");
+  const to = LIQ[Math.max(0, Math.min(9, stage))];
+  t.stage = stage;
+  if (!animate || REDUCE || base.getAttribute("fill") == null) {
+    base.setAttribute("fill", to); decorate(t, stage); return;
+  }
+  const drop = g.querySelector(".drop");
+  drop.setAttribute("fill", to);
+  drop.animate([{opacity: 0, transform: "translateY(-14px)"}, {opacity: 1, offset: .25}, {opacity: 1, transform: "translateY(24px)"}], {duration: 520, easing: "cubic-bezier(.5,0,.9,.6)"});
+  layer.setAttribute("fill", to);
+  react.setAttribute("filter", "url(#diffuse)");
+  const grow = layer.animate([{height: "0px"}, {height: "42px"}], {duration: 1300, delay: 450, easing: "cubic-bezier(.3,.6,.4,1)", fill: "forwards"});
+  g.querySelectorAll(".fizz").forEach((f, k) => f.animate([{opacity: 0, transform: "translateY(0)"}, {opacity: .95, offset: .3}, {opacity: 0, transform: "translateY(-22px)"}], {duration: 900, delay: 600 + k * 220, iterations: 2}));
+  g.querySelector(".glow").animate([{opacity: 0}, {opacity: .45}, {opacity: stage >= 9 ? .3 : 0}], {duration: 1400, delay: 500});
+  setTimeout(() => decorate(t, stage), 900);
+  grow.onfinish = () => { base.setAttribute("fill", to); react.removeAttribute("filter"); grow.cancel(); layer.setAttribute("height", 0); };
+}
+
+// moving a tube: along the track, through the lift between tiers, into a basket or into the archive
+function waypoints(from, to, fromIndex, toIndex) {
+  if (fromIndex < 5 && toIndex >= 5 && from[1] === LOWER_Y && to[1] === UPPER_Y) return [from, [LIFT_X, LOWER_Y], [LIFT_X, UPPER_Y], to];
+  return [from, to];
+}
+function moveTube(t, pts, opts = {}) {
+  const tr = ([x, y], r = 0) => `translate(${x}px, ${y}px) rotate(${r}deg)`;
+  const end = pts[pts.length - 1], rot = opts.rot || 0;
+  if (REDUCE || !t.pos || pts.length < 2) { t.g.style.transform = tr(end, rot); t.pos = end; opts.done && opts.done(); return; }
+  let total = 0; const seg = [0];
+  for (let k = 1; k < pts.length; k++) { total += Math.hypot(pts[k][0] - pts[k - 1][0], pts[k][1] - pts[k - 1][1]); seg.push(total); }
+  if (total < 1) { t.g.style.transform = tr(end, rot); t.pos = end; opts.done && opts.done(); return; }
+  const frames = pts.map((p, k) => ({transform: tr(p, k === pts.length - 1 ? rot : 0), offset: seg[k] / total}));
+  const usesLift = pts.some(p => p[0] === LIFT_X && p[1] === UPPER_Y);
+  const anim = t.g.animate(frames, {duration: Math.min(5200, 500 + total * 2.2), easing: opts.easing || "cubic-bezier(.45,.05,.3,1)", fill: "forwards"});
+  if (usesLift) {
+    const car = document.getElementById("lift-car"), a = seg[1] / total, b = seg[2] / total;
+    car.animate([{transform: "translateY(0)"}, {transform: "translateY(0)", offset: a}, {transform: `translateY(${UPPER_Y - LOWER_Y}px)`, offset: b}, {transform: `translateY(${UPPER_Y - LOWER_Y}px)`, offset: Math.min(1, b + .05)}, {transform: "translateY(0)"}], {duration: anim.effect.getTiming().duration * 1.15});
+  }
+  t.pos = end;
+  anim.onfinish = () => { t.g.style.transform = tr(end, rot); anim.cancel(); opts.done && opts.done(); };
+}
+
+function setBadge(t, mark, color) {
+  const b = t.g.querySelector(".badge");
+  b.setAttribute("visibility", mark ? "visible" : "hidden");
+  if (mark) { b.querySelector("circle").setAttribute("fill", color); b.querySelector("text").textContent = mark; }
+}
+
+function lcdText(i, jobs) {
+  const front = jobs[0], p = front && front.pct != null ? front.pct : 0, pct = Math.round(p * 100);
+  if (!front) return {0: "", 1: "-80", 2: "", 3: "idle", 4: "", 5: "0 rpm", 6: "", 9: "37°"}[i] ?? "";
+  return {0: `${pct}%`, 1: "-80", 2: `${pct}%`, 3: `pass ${Math.max(1, Math.round(p * 40))}/40`, 4: `#${(current?.trials || 0) + 1}`,
+          5: `${Math.round(800 + p * 3200)} rpm`, 6: `${Math.max(1, Math.ceil(p * 6))}`, 9: "37°"}[i] ?? "";
+}
+
+function renderLab(st) {
+  const L = st.line || {stations: [], jobs: []};
+  const host = $("labhost");
+  if (!host.querySelector("#lab")) return;
+  const jobs = L.jobs, byStation = Array.from({length: 10}, () => []);
+  jobs.filter(j => j.status === "running").forEach(j => byStation[j.index].push(j));
+  // working runs take the places in front of the instrument; runs waiting for a resource queue behind them
+  byStation.forEach(list => list.sort((a, b) => (a.waiting - b.waiting) || a.started - b.started));
+  const seen = new Set();
+
+  // instruments: animate while busy, show progress, light the plate lamp, crowd badge when more than SLOTS
+  byStation.forEach((list, i) => {
+    const inst = document.getElementById(`inst-${i}`), working = list.filter(j => !j.waiting), waiting = list.length - working.length;
+    inst.classList.toggle("active", working.length > 0);
+    document.getElementById(`lamp-${i}`).setAttribute("fill", working.length ? "#f2c14e" : waiting ? "#e08a3c" : "#9aa5a8");
+    const lcd = document.getElementById(`lcd-${i}`);
+    if (lcd) lcd.textContent = lcdText(i, working);
+    let queue = document.getElementById(`queue-${i}`);
+    if (waiting) {
+      const [qx, qy] = slotPos(i, 1);
+      if (!queue) { queue = svgEl("g", {id: `queue-${i}`}); document.getElementById("tubes").append(queue); }
+      queue.innerHTML = `<rect x="${qx - 34}" y="${qy + 10}" width="68" height="17" rx="8.5" fill="#fbe3c8" stroke="#e08a3c"/><text x="${qx}" y="${qy + 22}" text-anchor="middle" font-size="10.5" font-weight="800" fill="#9a4f12">${waiting} waiting</text>`;
+    } else if (queue) queue.remove();
+    let crowd = document.getElementById(`crowd-${i}`);
+    if (list.length > SLOTS) {
+      const [x, y0] = slotPos(i, 1), y = y0 - 76;  // above the tube names
+      if (!crowd) { crowd = svgEl("g", {id: `crowd-${i}`}); document.getElementById("tubes").append(crowd); }
+      crowd.innerHTML = `<rect x="${x - 22}" y="${y - 40}" width="44" height="20" rx="10" fill="#1f2a2c"/><text class="crowd" x="${x}" y="${y - 26}" text-anchor="middle">+${list.length - SLOTS}</text>`;
+      crowd.dataset.tip = `<b>${list.length} running at ${esc(L.stations[i]?.label || "")}</b><br>${list.slice(SLOTS, SLOTS + 8).map(j => esc(j.name)).join("<br>")}${list.length > SLOTS + 8 ? "<br>…" : ""}`;
+      if (!crowd.dataset.bound) { crowd.addEventListener("mousemove", e => showTip(e, crowd.dataset.tip)); crowd.addEventListener("mouseleave", hideTip); crowd.dataset.bound = 1; }
+    } else if (crowd) crowd.remove();
+  });
+  $("labhost").querySelector("#lab").classList.toggle("lab-busy", jobs.some(j => j.status === "running"));
+
+  // tubes on the track
+  byStation.forEach((list, i) => list.forEach((j, k) => {
+    seen.add(j.run_id);
+    let t = tubeEls.get(j.run_id);
+    const fresh = !t;
+    if (!t) { t = makeTube(j); tubeEls.set(j.run_id, t); }
+    const visible = k < SLOTS, target = slotPos(i, Math.min(k, SLOTS - 1));
+    t.g.style.opacity = visible ? (j.waiting ? .55 : 1) : 0;
+    const prev = lastJobs.get(j.run_id), moved = prev && prev.index !== j.index;
+    if (fresh) { t.g.style.transform = `translate(${target[0]}px, ${target[1]}px)`; t.pos = target; paintStage(t, j.index, false); }
+    else if (moved) { const from = t.pos; moveTube(t, waypoints(from, target, prev.index, j.index), {done: () => paintStage(t, j.index, true)}); }
+    else if (!t.pos || t.pos[0] !== target[0] || t.pos[1] !== target[1]) moveTube(t, [t.pos, target]);
+    setBadge(t, null);
+    t.g.querySelector(".tname").textContent = visible ? (j.name.length > 14 ? j.name.slice(0, 13) + "…" : j.name) : "";
+    t.g.querySelector(".tname").setAttribute("y", k % 2 ? -76 : -62);
+    t.g.dataset.tip = `<b>${esc(j.name)}</b><br>${j.waiting ? "waiting at " : ""}${j.index + 1}. ${esc(L.stations[j.index]?.label || "")}${j.pct != null ? ` · ${Math.round(j.pct * 100)}%` : ""}${j.note ? `<br>${esc(j.note)}` : ""}<br>${esc(j.user || "")} · ${dur(j.elapsed)}`;
+    t.status = "running";
+  }));
+
+  // finished, rejected, held and crashed runs
+  const baskets = Array.from({length: 10}, () => []);
+  jobs.filter(j => j.status !== "running").forEach(j => {
+    seen.add(j.run_id);
+    let t = tubeEls.get(j.run_id);
+    if (!t) { t = makeTube(j); tubeEls.set(j.run_id, t); const p = slotPos(j.index, 0); t.g.style.transform = `translate(${p[0]}px, ${p[1]}px)`; t.pos = p; }
+    if (["rejected", "stalled", "failed"].includes(j.status)) baskets[j.index].push({j, t});
+    else if (j.status === "passed" && j.index === 9) {
+      if (t.status !== "shipped") {
+        t.status = "shipped"; setBadge(t, "✓", "#2f9e6e"); t.g.querySelector(".tname").textContent = "";
+        const [ax, ay] = ARCH;
+        moveTube(t, [t.pos, [150, UPPER_Y], [ax + 48, UPPER_Y - 40]], {done: () => t.g.classList.add("gone")});
+      }
+    } else if (t.status !== "done") {  // finished its run at this station: a tick, then it is collected
+      t.status = "done"; setBadge(t, "✓", "#2f9e6e");
+      setTimeout(() => t.g.classList.add("gone"), 4000);
+    }
+  });
+  baskets.forEach((list, i) => {
+    list.sort((a, b) => b.j.started - a.j.started);
+    const rej = (st.rejects || {})[L.stations[i]?.id] || {window: 0, total: 0, hours: 24};
+    const held = list.filter(x => x.j.status === "stalled").length, crashed = list.filter(x => x.j.status === "failed").length;
+    const rejectedNow = list.filter(x => x.j.status === "rejected").length;
+    const rejected = Math.max(rej.window, rejectedNow);
+    const parts = [rejected && `${rejected} rejected (${rej.hours}h)`, held && `${held} on hold`, crashed && `${crashed} crashed`].filter(Boolean);
+    document.getElementById(`basket-${i}`).setAttribute("visibility", parts.length ? "visible" : "hidden");
+    const label = document.getElementById(`basket-label-${i}`);
+    label.textContent = parts.join(" · ");
+    label.setAttribute("fill", crashed || rejected ? "#c2492f" : "#5f6e70");
+    list.forEach(({j, t}, k) => {
+      const shown = k < 5, tilt = [-22, 14, -8, 20, -16][k % 5];
+      const target = basketPos(i, Math.min(k, 4));
+      t.g.querySelector(".tname").textContent = "";
+      const mark = j.status === "rejected" ? ["✕", "#d4583f"] : j.status === "failed" ? ["✕", "#d4583f"] : ["‖", "#97a1a5"];
+      setBadge(t, mark[0], mark[1]);
+      t.g.querySelector(".liq").setAttribute("fill", j.status === "stalled" ? "#b9c0c2" : "#a7a49a");  // the sample clouds over
+      t.g.style.opacity = shown ? (j.status === "stalled" ? .7 : 1) : 0;
+      t.g.dataset.tip = `<b>${esc(j.name)}</b><br>${esc(STATUS[j.status]?.label || j.status)} at ${j.index + 1}. ${esc(L.stations[j.index]?.label || "")}${j.note ? `<br>${esc(j.note)}` : ""}`;
+      if (t.status !== j.status) {
+        t.status = j.status;
+        const [x, y] = t.pos || slotPos(i, 0);
+        moveTube(t, [[x, y], [x, y - 24], target], {rot: tilt, easing: "cubic-bezier(.5,0,.7,1)", done: () => { t.g.style.transform = `translate(${target[0]}px, ${target[1]}px) scale(.7) rotate(${tilt}deg)`; }});
+      } else if (!REDUCE) t.g.style.transform = `translate(${target[0]}px, ${target[1]}px) scale(.7) rotate(${tilt}deg)`;
+    });
+  });
+
+  // runs that left the window
+  tubeEls.forEach((t, id) => { if (!seen.has(id)) { t.g.classList.add("gone"); setTimeout(() => t.g.remove(), 900); tubeEls.delete(id); } });
+  lastJobs = new Map(jobs.map(j => [j.run_id, j]));
+
+  // the room's own read-outs
+  document.getElementById("wb-trials").textContent = fmt(st.trials || 0);
+  document.getElementById("wb-sub").textContent = `${st.users || 0} people · ${st.families || 0} families${st.data_version ? " · data " + st.data_version : ""}`;
+  const busiest = byStation.map((l, i) => [l.length, i]).sort((a, b) => b[0] - a[0])[0];
+  const waitingAt = (i) => byStation[i].filter(j => j.waiting).length;
+  document.getElementById("wb-busy").textContent = busiest && busiest[0] > SLOTS
+    ? `busiest: ${L.stations[busiest[1]].label} · ${busiest[0] - waitingAt(busiest[1])} running${waitingAt(busiest[1]) ? `, ${waitingAt(busiest[1])} waiting` : ""}` : "";
+  const reads = (st.holdout_reads || []).length;
+  document.getElementById("seal-8").textContent = `opened ${reads}×`;
+  document.getElementById("seal-bg").setAttribute("fill", reads > 1 ? "#d4583f" : "#2f6f73");
+  const shipped = st.shipped_total || 0;
+  document.getElementById("archive-n").textContent = `shipped ${shipped}`;
+  const slots = document.getElementById("archive-slots");
+  slots.innerHTML = Array.from({length: Math.min(shipped, 6)}, (_, k) => {
+    const x = ARCH[0] + 24 + (k % 3) * 24, y = ARCH[1] + 56 + Math.floor(k / 3) * 50;
+    return `<g transform="translate(${x} ${y}) scale(.6)"><circle cx="0" cy="-26" r="26" fill="#f2c14e" opacity=".28"/><rect x="-13" y="-7" width="26" height="9" rx="3" fill="#39464a"/><path d="M-6 -50 v40 a6 6 0 0 0 12 0 v-40z" fill="#fff" fill-opacity=".4" stroke="#8b9a9e"/><path d="M-5 -40 v30 a5 5 0 0 0 10 0 v-30z" fill="#e8b931"/><rect x="-7" y="-55" width="14" height="6" rx="2" fill="#d4583f"/></g>`;
+  }).join("");
+  const now = new Date();
+  document.getElementById("clock-h").setAttribute("transform", `rotate(${(now.getHours() % 12) * 30 + now.getMinutes() / 2})`);
+  document.getElementById("clock-m").setAttribute("transform", `rotate(${now.getMinutes() * 6})`);
+}
+
+function dur(sec) {
+  sec = Math.round(sec || 0);
+  if (sec < 60) return `${sec}s`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m ${sec % 60}s`;
+  return `${Math.floor(sec / 3600)}h ${Math.floor(sec % 3600 / 60)}m`;
+}
+
+const STATUS = {
+  running: {label: "running"}, done: {label: "finished"}, passed: {label: "passed"},
+  rejected: {label: "rejected"}, failed: {label: "crashed"}, stalled: {label: "on hold (no heartbeat)"},
+};
+
+function renderLine(st) {
+  const L = st.line || {stations: [], jobs: []};
+  renderLab(st);
+  const jobs = L.jobs;
+  const rows = [...jobs].sort((a, b) => (a.status === "running" ? 0 : 1) - (b.status === "running" ? 0 : 1) || a.index - b.index || b.started - a.started);
+  $("jobs").innerHTML = rows.length ? `<table><thead><tr><th>Status</th><th>Experiment</th><th>Station</th><th>Progress</th><th>Elapsed</th><th>Who</th><th>Note</th></tr></thead><tbody>` +
+    rows.slice(0, 200).map(j => { const S = STATUS[j.status] || STATUS.running, kind = {running: "ok", done: "ok", passed: "ok", stalled: "warn"}[j.status] || "bad";
+      const pct = ["running", "stalled", "failed"].includes(j.status) ? (j.pct ?? null) : 1;
+      return `<tr><td>${j.status === "running" ? (j.waiting ? status("warn", "waiting") : `<span class="status"><span class="i" style="background:var(--series-1)">▸</span>running</span>`) : status(kind, S.label)}</td><td>${esc(j.name)}</td><td>${j.index + 1}. ${esc(L.stations[j.index]?.label || "")}</td>` +
+        `<td>${pct == null ? '<span class="meta">–</span>' : `<span class="bar"><i style="width:${Math.round(pct * 100)}%"></i></span> <span class="meta">${Math.round(pct * 100)}%</span>`}</td>` +
+        `<td>${dur(j.elapsed)}</td><td>${esc(j.user)}</td><td class="m">${esc(j.note)}</td></tr>`; }).join("") + "</tbody></table>" + (rows.length > 200 ? `<div class="meta">and ${rows.length - 200} more</div>` : "")
+    : `<div class="empty">Nothing in the lab. Start a tracked run:<br><code>python pipeline_run.py --name momentum-15-1 -- python experiments/momentum.py</code><br>or wrap the script body in <code>with mscf_progress.track("momentum-15-1") as run:</code></div>`;
+}
+
+/* ---------- tabs, polling ---------- */
+function showTab(name) {
+  document.querySelectorAll(".tabs button").forEach(b => b.setAttribute("aria-selected", b.dataset.tab === name));
+  $("tab-line").hidden = name !== "line"; $("tab-ledger").hidden = name !== "ledger";
+  if (history.replaceState) history.replaceState(null, "", "#" + name);
+  if (current) { if (name === "ledger") { lastLedger = null; render(current); } else renderLine(current); }
+}
+document.querySelectorAll(".tabs button").forEach(b => b.addEventListener("click", () => showTab(b.dataset.tab)));
+
+let current = null, lastLedger = null;
+function update(st) {
+  current = st;
+  renderLine(st);
+  $("meta").textContent = [st.branch && `${st.branch}@${st.sha}`, st.data_version && `data ${st.data_version}`].filter(Boolean).join(" · ");
+  const key = `${st.trials}|${st.mtime}|${st.sha}`;
+  if (!$("tab-ledger").hidden && key !== lastLedger) { lastLedger = key; render(st); }
+}
+async function poll() {
+  try {
+    const res = await fetch("state.json", {cache: "no-store"});
+    update(await res.json());
+    $("live").querySelector(".dot").classList.remove("stale");
+    $("livetext").textContent = "live · " + new Date().toLocaleTimeString();
+  } catch (e) {
+    $("live").querySelector(".dot").classList.add("stale");
+    $("livetext").textContent = "server stopped";
+  }
+}
+const startTab = (location.hash || "#line").slice(1) === "ledger" ? "ledger" : "line";
+if (SNAPSHOT) {
+  current = SNAPSHOT; showTab(startTab); renderLine(SNAPSHOT); render(SNAPSHOT); showTab(startTab);
+  $("live").querySelector(".dot").classList.add("stale");
+  $("livetext").textContent = "snapshot";
+} else { showTab(startTab); poll(); setInterval(poll, 1500); }
+addEventListener("resize", () => { if (current && !$("tab-ledger").hidden) render(current); });
+</script>
+</body>
+</html>
