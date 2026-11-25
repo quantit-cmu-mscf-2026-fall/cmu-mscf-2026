@@ -7,6 +7,8 @@ A fake client factory and a stubbed run; never the network, a model or market da
 from __future__ import annotations
 
 import json
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -136,8 +138,6 @@ def test_a_run_gets_the_factory_client_and_prints_the_summary(monkeypatch, tmp_p
 
 
 def test_the_default_client_is_built_with_no_sdk_retries_and_prompt_caching(monkeypatch):
-    import anthropic
-
     built = {}
 
     class Fake:
@@ -145,7 +145,8 @@ def test_the_default_client_is_built_with_no_sdk_retries_and_prompt_caching(monk
             built.update(kwargs)
             self.max_retries = kwargs.get("max_retries", 2)
 
-    monkeypatch.setattr(anthropic, "Anthropic", Fake)
+    # CI installs without the `agents` extra, so `anthropic` may not exist: insert a fake
+    monkeypatch.setitem(sys.modules, "anthropic", types.SimpleNamespace(Anthropic=Fake))
     client = real_run._client()
     assert isinstance(client, real_run.PromptCaching)
     assert built == {"max_retries": 0} and client.max_retries == 0
