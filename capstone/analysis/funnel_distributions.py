@@ -10,6 +10,7 @@ without a `holdout_start`), so the holdout is never read.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,7 +19,7 @@ import numpy as np
 import pandas as pd
 from scipy import stats as sps
 
-from capstone import funnel, grading, intake, runlog
+from capstone import funnel, grading, intake, runlog, search_fdr
 from capstone.analysis.outputs import Stat, Statement
 from capstone.evaluate import average_correlation, bh_adjusted
 
@@ -26,6 +27,7 @@ QUANTILES = (0.0, 0.05, 0.25, 0.5, 0.75, 0.95, 1.0)
 DEFAULT_SEARCH_END = "2020-12-31"
 LEDGER_NAME = "funnel-distributions"
 NOMINAL = 0.05
+MIN_BLOCKS = 10  # search_fdr.bootstrap_family_pvalues' default min_blocks
 GRADED_COLUMNS = ["by", "holm", "lfdr", "sharpe", "psr", "min_trl_years", "haircut_sharpe"]
 
 
@@ -37,6 +39,7 @@ class Scored:
     families: pd.DataFrame  # per family
     pbo: float
     n_variants: int
+    dropped: tuple[str, ...] = ()  # too few returns for the family bootstrap
 
 
 def file_digest(path: Path) -> str:
@@ -55,7 +58,7 @@ def default_thresholds(q1: float = 0.1) -> funnel.Thresholds:
 def variant_table(summary: pd.DataFrame, classes: pd.DataFrame | None = None) -> pd.DataFrame:
     """Per-variant score columns from an evaluation summary, with class columns joined on factor."""
     out = pd.DataFrame(index=summary.index)
-    for c in ("sharpe_net", "pvalue_screen", "mean_turnover"):
+    for c in ("sharpe_net", "sharpe_gross", "pvalue_screen", "mean_turnover"):
         out[c] = summary[c] if c in summary else np.nan
     out["family"] = summary["hypothesis_id"]
     factor = pd.Series(summary.index.astype(str), index=summary.index).str.split("-").str[0]
@@ -83,6 +86,15 @@ def score_run(
     """
     th = thresholds or default_thresholds()
     fi = intake.from_evaluation(matrix, summary)
+    # The family bootstrap needs every column to span `MIN_BLOCKS` blocks (search_fdr's
+    # rule); a variant that rarely trades is dropped and counted, not allowed to crash.
+    rows = fi.returns.dropna(how="all")
+    need = max(3, MIN_BLOCKS * search_fdr.block_length_rule(len(rows)))
+    short = rows.notna().sum() < need
+    dropped = tuple(map(str, rows.columns[short]))
+    if short.any():
+        keep = rows.columns[~short]
+        fi = dataclasses.replace(fi, returns=fi.returns[keep], family=fi.family[keep])
     stats = funnel.family_statistics(
         fi.returns, fi.family, search_end=search_end, n_boot=n_boot, seed=seed, q=th.q1
     )["reuse"]
@@ -103,7 +115,7 @@ def score_run(
         }
     ).join(graded[GRADED_COLUMNS].add_prefix("graded_"))
     var = variant_table(summary.reindex(fi.returns.columns), classes)
-    return Scored(var, fam, grading.pbo(fi.returns), n_variants)
+    return Scored(var, fam, grading.pbo(fi.returns), n_variants, dropped)
 
 
 def quantile_table(variants: pd.DataFrame) -> pd.DataFrame:
@@ -133,6 +145,7 @@ def comparison_table(real: Scored, null: Scored) -> pd.DataFrame:
     rows = []
     for label, r, n in (
         ("variant_sharpe_net", real.variants["sharpe_net"], null.variants["sharpe_net"]),
+        ("variant_sharpe_gross", real.variants["sharpe_gross"], null.variants["sharpe_gross"]),
         ("family_p1_bootstrap", real.families["p1_bootstrap"], null.families["p1_bootstrap"]),
     ):
         ks = ks_statistic(r, n)
@@ -159,6 +172,12 @@ def _summary_stats(prefix: str, s: Scored, inputs: tuple[str, ...]) -> dict[str,
     return {
         f"{prefix}n_families": Stat(len(f), "number of hypothesis families scored", inputs),
         f"{prefix}n_variants": Stat(s.n_variants, "number of variants scored", inputs),
+        f"{prefix}dropped_variants": Stat(
+            list(s.dropped),
+            f"variants left out: fewer returns than the family bootstrap needs "
+            f"({MIN_BLOCKS} blocks)",
+            inputs,
+        ),
         f"{prefix}stage1_survivors": Stat(
             len(surv["stage1"]),
             "families passing stage 1: BH at q1 on the family-max bootstrap p-values",
@@ -238,6 +257,16 @@ def build_outputs(
             "sharpe_quantiles",
             "Net of costs, search period only.",
         ),
+        *(
+            [
+                Statement(
+                    f"{len(real.dropped)} variants were left out for too few returns.",
+                    "dropped_variants",
+                )
+            ]
+            if real.dropped
+            else []
+        ),
         Statement(
             f"Probability of backtest overfitting is {stats['pbo'].value:.2f}.",
             "pbo",
@@ -264,6 +293,14 @@ def build_outputs(
             "real minus null quantile of variants' net Sharpe, at 0, 5, 25, 50, 75, 95, 100%",
             both,
         )
+        gross = cmp.loc["variant_sharpe_gross", "gap"]
+        gross_gaps = {f"q{int(round(p * 100)):03d}": float(gross.loc[p]) for p in QUANTILES}
+        stats["gross_sharpe_quantile_gaps"] = Stat(
+            gross_gaps,
+            "real minus null quantile of variants' gross Sharpe (before costs), "
+            "at 0, 5, 25, 50, 75, 95, 100%",
+            both,
+        )
         stats["sharpe_ks"] = Stat(
             float(cmp.loc["variant_sharpe_net", "ks_statistic"].iloc[0]),
             "two-sample KS statistic between real and null variant Sharpe",
@@ -288,7 +325,21 @@ def build_outputs(
                 "sharpe_quantile_gaps",
                 "Only as comparable as the placebo's construction is to the real run.",
             ),
+            Statement(
+                f"Before costs, real variants' median Sharpe sits {gross_gaps['q050']:+.2f} "
+                f"from the null's, and the 95th percentile {gross_gaps['q095']:+.2f}.",
+                "gross_sharpe_quantile_gaps",
+                "A cross-section permutation trades far more than a real signal, so net "
+                "Sharpe overstates the gap; gross is the fairer comparison.",
+            ),
         ]
+        if null.dropped:
+            statements.append(
+                Statement(
+                    f"{len(null.dropped)} null variants were left out for too few returns.",
+                    "null_dropped_variants",
+                )
+            )
     return tables, stats, statements
 
 

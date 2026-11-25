@@ -143,3 +143,16 @@ def test_run_analysis_end_to_end(tmp_path):
     assert len(entries) == 1 and "synthetic" in entries[0]["tags"]
     assert entries[0]["params"]["n_boot"] == N_BOOT
     assert len(statements) >= 6
+
+
+def test_a_variant_too_short_for_the_bootstrap_is_dropped_and_counted():
+    returns, summary = frames(planted())
+    short = returns.columns[0]
+    returns = returns.copy()
+    returns.loc[returns.index[100:], short] = np.nan  # trades for 100 days only
+    scored = fd.score_run(returns, summary, n_boot=N_BOOT)
+    assert scored.dropped == (short,)
+    assert scored.n_variants == returns.shape[1] - 1
+    _, stats, statements = fd.build_outputs(scored, null=None, inputs=("m",))
+    assert stats["dropped_variants"].value == [short]
+    assert any(s.source == "dropped_variants" for s in statements)
