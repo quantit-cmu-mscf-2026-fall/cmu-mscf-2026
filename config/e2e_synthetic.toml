@@ -39,6 +39,8 @@ max_calls = 10  # deepen's own cap on its editor's and agent's calls
 # picks among the memory's candidates (vetoed edits withheld; a refused
 # choice falls back to the memory).
 selector = "memory"
+# Most children deepen proposes per family; unset is unlimited. Value undecided (team decision D4).
+# max_children_per_family = N
 # The one spec a deepen child is scored under, on the search period.
 hold = 1
 neutral = "none"

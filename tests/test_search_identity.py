@@ -31,7 +31,11 @@ def _digest_without_optional_fields(config):
         ("placebo", None),
         ("placebo_seed", None),
     )
-    for name, default in (*optional, ("regime_operators", False)):
+    for name, default in (
+        *optional,
+        ("regime_operators", False),
+        ("deepen_max_children_per_family", None),
+    ):
         if content[name] == default:
             del content[name]
     del content["concurrency"], content["resources"]

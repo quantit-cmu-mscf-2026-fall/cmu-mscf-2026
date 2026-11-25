@@ -26,7 +26,12 @@ def _digest_before_the_field(config) -> str:
     }
     del content["regime_operators"]
     optional = (("deepen_on_budget", "raise"), ("paper_mode", "sequential"))
-    for name, default in (*optional, ("placebo", None), ("placebo_seed", None)):
+    for name, default in (
+        *optional,
+        ("placebo", None),
+        ("placebo_seed", None),
+        ("deepen_max_children_per_family", None),
+    ):
         if content[name] == default:
             del content[name]
     content.pop("concurrency"), content.pop("resources")

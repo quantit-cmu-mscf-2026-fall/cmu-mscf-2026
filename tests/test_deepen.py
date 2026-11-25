@@ -54,6 +54,23 @@ class FakeScorer:
         return Scored(self.qualities.get(key, 0.15), values)
 
 
+_CHOSEN: list[str] = []  # the motif the last ScriptedEditor was asked for
+
+
+@pytest.fixture(autouse=True)
+def edits_match_the_motif(monkeypatch):
+    """The scripted edits ignore the motif they are asked for, so by default they count
+    as having realized it; the motif check itself is tested in test_deepen_motif_check
+    with the real `edit_motif`."""
+    from capstone.factors import deepen
+
+    _CHOSEN.clear()
+    real = deepen.edit_motif
+    monkeypatch.setattr(
+        deepen, "edit_motif", lambda parent, child: _CHOSEN[-1] if _CHOSEN else real(parent, child)
+    )
+
+
 class ScriptedEditor:
     """Returns the next scripted list of expressions, whatever it is asked."""
 
@@ -63,6 +80,7 @@ class ScriptedEditor:
 
     def drafts(self, parent, motif, n, lineage, vetoed):
         self.asked.append((parent, motif, n, list(lineage), list(vetoed)))
+        _CHOSEN.append(motif)
         out = []
         for expression in self.rounds.pop(0)[:n]:
             try:

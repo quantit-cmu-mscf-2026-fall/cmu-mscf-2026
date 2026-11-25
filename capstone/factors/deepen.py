@@ -285,6 +285,9 @@ class BudgetExhausted(RuntimeError):
     """The agreed number of model calls has been used."""
 
 
+MOTIF_MISMATCH = "motif_mismatch"  # a child's realized edit is not the motif chosen
+
+
 class FamiliesCapped(RuntimeError):
     """Every family in the pool has proposed `max_children_per_family` children."""
 
@@ -852,8 +855,21 @@ class Deepener:
                 **meta,
             )
             status, reason = "rejected", "the parent itself"
+        elif (realized := edit_motif(parent_tree, draft.tree)) != motif:
+            # The edit is not the one the round chose: no screening, no model call, no
+            # score. The memory is charged to the chosen motif (see `record_event` below).
+            store.reject(
+                self.con,
+                hypothesis["id"],
+                draft.expression,
+                MOTIF_MISMATCH,
+                node=draft.tree,
+                rationale=draft.rationale,
+                **lineage_meta,
+                **meta,
+            )
+            status, reason = "rejected", MOTIF_MISMATCH
         else:
-            realized = edit_motif(parent_tree, draft.tree)
             screened = _judge(
                 self.con,
                 draft.tree,
@@ -887,7 +903,10 @@ class Deepener:
                 hypothesis_id=hypothesis["id"],
                 context=parent.context,
                 motif_intended=motif,
-                motif_realized=realized,
+                # A mismatch is recorded with no realized motif, so the memory counts
+                # the failure under the chosen motif (`event_motif` falls back to it)
+                # instead of crediting the motif the edit happened to be.
+                motif_realized=None if reason == MOTIF_MISMATCH else realized,
                 status=status,
                 quality=q,
                 baseline=baseline,

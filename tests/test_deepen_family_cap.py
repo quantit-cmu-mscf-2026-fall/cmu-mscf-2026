@@ -19,7 +19,14 @@ from collections import Counter
 from dataclasses import replace
 
 import pytest
-from test_deepen import CONFIG, AgentClient, FakeScorer, ScriptedEditor, _decision
+from test_deepen import (  # noqa: F401 - the fixture is autouse here too
+    CONFIG,
+    AgentClient,
+    FakeScorer,
+    ScriptedEditor,
+    _decision,
+    edits_match_the_motif,
+)
 
 from capstone.factors import store
 from capstone.factors.deepen import DeepenAgent, Deepener, FamiliesCapped, decide_prompt

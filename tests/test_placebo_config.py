@@ -63,7 +63,11 @@ def _digest_without_placebo_fields(config):
     for name in ("placebo", "placebo_seed"):
         assert content.pop(name) is None
     optional = (("deepen_on_budget", "raise"), ("paper_mode", "sequential"))
-    for name, default in (*optional, ("regime_operators", False)):
+    for name, default in (
+        *optional,
+        ("regime_operators", False),
+        ("deepen_max_children_per_family", None),
+    ):
         if content[name] == default:
             del content[name]
     del content["concurrency"], content["resources"]

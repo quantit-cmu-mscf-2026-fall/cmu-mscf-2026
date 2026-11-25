@@ -45,6 +45,8 @@ selector = "agent"
 # The run's call budget used up during deepen: stop deepening and go on to
 # evaluation and registration with every child so far ("stop"), or raise.
 on_budget = "stop"
+# Most children deepen proposes per family; unset is unlimited. Value undecided (team decision D4).
+# max_children_per_family = N
 # Monthly, not sector-neutral.
 hold = 21
 neutral = "none"
