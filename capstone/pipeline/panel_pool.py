@@ -47,7 +47,11 @@ class EvaluationWorkerError(RuntimeError):
 def panel_mb(panel: Panel) -> float:
     """The panel's in-memory size (MB): its frames and series, deep."""
     size = 0
-    for frame in (*panel.fields.values(), panel.universe, panel.half_spread, panel.sic):
+    factors = panel.split_factors
+    frames = (*panel.fields.values(), panel.universe, panel.half_spread, panel.sic)
+    if factors is not None:
+        frames += (factors.price, factors.shares)
+    for frame in frames:
         if frame is None:
             continue
         usage = frame.memory_usage(deep=True)
