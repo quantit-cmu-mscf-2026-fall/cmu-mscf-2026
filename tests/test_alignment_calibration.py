@@ -81,6 +81,23 @@ def test_score_writes_one_row_per_parsed_proposal_and_leaves_the_store_alone(db,
     assert usage["alignment_calls"] == 2
 
 
+def test_a_malformed_judge_answer_becomes_an_error_row_and_report_skips_it(db, tmp_path):
+    bad = {"variables": "false", "direction": True, "horizon": True, "reason": "r"}
+    out = tmp_path / "sheet.csv"
+    cal.score(db, out, Judge(_verdict(), bad), CONFIG)
+    with open(out, newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    assert rows[0]["score"] == "1.0"
+    assert rows[1]["score"] == "" and rows[1]["judge_reason"].startswith("judge error:")
+    for row in rows:
+        row["label"] = "1"
+    with open(out, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=cal.COLUMNS)
+        writer.writeheader()
+        writer.writerows(rows)
+    assert cal.report(out)[1] == 1
+
+
 def test_score_needs_a_judge_model(db, tmp_path):
     with pytest.raises(SystemExit, match="alignment_model"):
         cal.score(db, tmp_path / "s.csv", Judge(), FactorConfig())

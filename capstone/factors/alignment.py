@@ -23,6 +23,11 @@ from capstone.factors.llm import FactorConfig, call_tool, grammar_help
 
 CHECKS = ("variables", "direction", "horizon")
 
+
+class JudgeAnswerError(ValueError):
+    """The judge's tool answer is not a boolean for every check."""
+
+
 SYSTEM = (
     "You check whether a cross-sectional equity factor formula implements the hypothesis "
     "it was written for. The formula is evaluated per stock per day; a higher value means "
@@ -79,7 +84,12 @@ def judge(
     finally:  # a failed call was still billed
         if usage is not None:  # kept apart from the proposer's tokens: another model's price
             usage.update({f"alignment_{name}": count for name, count in spent.items()})
-    checks = {check: bool(answer.get(check)) for check in CHECKS}
+    # A missing key must not read as "no" nor the string "false" as "yes".
+    bad = [check for check in CHECKS if not isinstance(answer.get(check), bool)]
+    if bad:
+        shown = ", ".join(f"{check}={answer.get(check)!r}" for check in bad)
+        raise JudgeAnswerError(f"judge answer needs a boolean for every check; got {shown}")
+    checks = {check: answer[check] for check in CHECKS}
     failed = [check for check, passed in checks.items() if not passed]
     reason = str(answer.get("reason", ""))
     if failed:

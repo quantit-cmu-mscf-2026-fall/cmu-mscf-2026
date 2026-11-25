@@ -323,6 +323,33 @@ def test_without_a_judge_model_no_alignment_call_is_made(con, hid):
     assert outcome.status == "stored" and len(client.calls) == 1
 
 
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"variables": "false", "direction": True, "horizon": True},
+        {"variables": 1, "direction": 0, "horizon": True},
+        {"variables": True, "direction": True},
+        {"variables": True, "direction": None, "horizon": True},
+    ],
+)
+def test_a_malformed_judge_answer_is_refused(bad):
+    from capstone.factors.alignment import JudgeAnswerError, judge
+
+    config = FactorConfig(model="m", alignment_model="j")
+    with pytest.raises(JudgeAnswerError):
+        judge(FakeClient({**bad, "reason": "r"}), config, {**HYPOTHESIS, "id": "h"}, "-returns")
+
+
+def test_a_malformed_judge_answer_is_a_recorded_rejection_not_a_stored_factor(con, hid):
+    config = FactorConfig(model="m", alignment_model="j", factors_per_hypothesis=1)
+    bad = {"variables": "false", "direction": True, "horizon": True, "reason": "r"}
+    (outcome,) = propose(con, hid, FakeClient(_factors("-ts_sum(returns, 5)"), bad), config)
+    assert outcome.status == "rejected" and "alignment judge failed" in outcome.reason
+    assert con.execute("SELECT COUNT(*) FROM factors").fetchone()[0] == 0
+    (row,) = con.execute("SELECT status FROM proposals").fetchall()
+    assert row["status"] == "rejected"
+
+
 class JudgeFails(FakeClient):
     """Answers the proposal, then raises `error` on the alignment judge's call."""
 

@@ -80,14 +80,20 @@ def score(db: Path, out: Path, client, config: FactorConfig) -> Counter:
     usage: Counter = Counter()
     rows = []
     for proposal in _proposals(db):
-        verdict = alignment.judge(
-            client,
-            config,
-            proposal,
-            proposal["expression"],
-            proposal["rationale"] or "",
-            usage,
-        )
+        try:
+            verdict = alignment.judge(
+                client,
+                config,
+                proposal,
+                proposal["expression"],
+                proposal["rationale"] or "",
+                usage,
+            )
+        except alignment.JudgeAnswerError as exc:  # keep the row; `report` skips it
+            rows.append(
+                {**proposal, "label": "", "label_note": "", "judge_reason": f"judge error: {exc}"}
+            )
+            continue
         rows.append(
             {
                 **proposal,
@@ -110,7 +116,11 @@ def score(db: Path, out: Path, client, config: FactorConfig) -> Counter:
 def report(sheet: Path) -> tuple[list[dict], int]:
     """Agreement between the judge and the hand labels at each threshold, and the label count."""
     with open(sheet, newline="", encoding="utf-8") as handle:
-        labelled = [row for row in csv.DictReader(handle) if row["label"].strip() in {"0", "1"}]
+        labelled = [
+            row
+            for row in csv.DictReader(handle)
+            if row["label"].strip() in {"0", "1"} and row["score"].strip()  # not a judge error
+        ]
 
     # Scores are a count of passed checks out of N_CHECKS; compare counts, not
     # the rounded decimals in the sheet.
