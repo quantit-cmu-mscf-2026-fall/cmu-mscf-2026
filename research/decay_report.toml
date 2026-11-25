@@ -1,0 +1,15 @@
+# Parameters for research/decay_report.py (alpha-decay diagnostics, report-only).
+#
+# block_years: calendar-block width for the block Sharpe table. Blocks start at
+#   the matrix's first calendar year; a last block shorter than this is partial
+#   and is labelled with the years it actually has (e.g. "2020").
+# min_days_block / min_days_year: fewer non-missing daily returns than this in a
+#   block / year and its Sharpe is left missing (a Sharpe on a few weeks is noise).
+# min_years_slope: fewest annual Sharpes a decay-slope regression will use.
+# alpha: two-sided level for "significantly negative slope" (uncorrected across
+#   families).
+block_years = 5
+min_days_block = 120
+min_days_year = 120
+min_years_slope = 8
+alpha = 0.05
