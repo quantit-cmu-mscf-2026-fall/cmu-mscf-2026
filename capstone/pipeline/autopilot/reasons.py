@@ -29,14 +29,13 @@ class ReasonSpec:
     """One declared reason: its operator class and what clears it."""
 
     klass: str
-    cleared_by: str | None = None  # None: the blocker glossary row of the same code
+    cleared_by: str | None = None
 
     def __post_init__(self):
         if self.klass not in CLASSES:
             raise ValueError(f"unknown blocker class {self.klass!r}")
 
 
-# Reasons the core itself raises; every stage may also return these.
 CORE = {
     "stage_not_implemented": ReasonSpec("Operator", "the stage's owner implements it"),
     "stage_crashed": ReasonSpec("Operator", "read `detail`; fix the cause; the next tick retries"),
@@ -56,7 +55,6 @@ CORE = {
     ),
     "autopilot_locked": ReasonSpec("Operator", "another tick owns the run; wait for it"),
     "ops_hook_failed": ReasonSpec("Operator", "read `detail`; fix the operations hook"),
-    # Spend guard and model-client guard (Context.model_client): STOPs
     "spend_guard_missing": ReasonSpec(
         "Spend", "the caller supplies a spend guard to `tick` before a spending stage runs"
     ),

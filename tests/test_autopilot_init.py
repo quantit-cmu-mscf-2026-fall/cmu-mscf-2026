@@ -266,3 +266,28 @@ def _stage_with_template():
         run=lambda ctx: StageResult(),
         schema={"template": Key("path")},
     )
+
+
+def test_a_config_that_is_not_utf8_is_one_config_row_and_exit_2(tmp_path, capsys):
+    bad = tmp_path / "b.toml"
+    bad.write_bytes(b'[autopilot]\nrun_root="r\xff"\npolicy_id="p"\n')
+    rows, config = preflight.run(bad)
+    assert config is None and [r.check for r in rows if r.check == "config"] == ["config"]
+    assert rows[0].code == "config_invalid" and rows[0].failed
+    assert cli.main(["preflight", "--config", str(bad)]) == 2
+    assert "Traceback" not in capsys.readouterr().err
+
+
+def _snapshot(folder):
+    return {
+        str(p.relative_to(folder)): p.read_bytes() if p.is_file() else None
+        for p in sorted(folder.rglob("*"))
+    }
+
+
+def test_preflight_run_is_read_only(tmp_path):
+    config = ready(tmp_path)
+    before = _snapshot(tmp_path)
+    for target in (config, tmp_path / "absent.toml"):
+        preflight.run(target)
+    assert _snapshot(tmp_path) == before

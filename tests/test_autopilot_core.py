@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import builtins
+import io
 import os
 import tomllib
 from pathlib import Path
@@ -348,3 +350,64 @@ def test_a_section_frozen_under_a_legacy_default_still_matches(tmp_path):
 def test_a_key_needs_a_known_kind():
     with pytest.raises(ValueError, match="unknown config kind"):
         Key("complex")
+
+
+def test_verify_events_names_a_line_that_is_not_an_object(tmp_path):
+    journal = Journal(tmp_path)
+    journal.event("a")
+    with (tmp_path / EVENTS).open("a", encoding="utf-8", newline="\n") as stream:
+        stream.write("[1, 2]\n")
+    with pytest.raises(JournalError, match="line 1 is not a JSON object"):
+        journal.verify_events()
+
+
+def test_event_log_only_ever_grows_by_appending(tmp_path, monkeypatch):
+    path, opened = tmp_path / EVENTS, []
+    real_open = io.open
+
+    def spy(file, mode="r", *args, **kwargs):
+        if Path(file) == path:
+            opened.append(mode)
+        return real_open(file, mode, *args, **kwargs)
+
+    monkeypatch.setattr(io, "open", spy)
+    monkeypatch.setattr(builtins, "open", spy)
+    journal = Journal(tmp_path)
+    before = b""
+    for kind in ("a", "b", "c"):
+        journal.event(kind)
+        after = path.read_bytes()
+        assert after.startswith(before) and len(after) > len(before)
+        before = after
+    writes = [mode for mode in opened if set(mode) & set("wax+")]
+    assert writes and all(mode.startswith("a") for mode in writes)  # never "w": no rewrite
+
+
+def test_config_refuses_out_of_range_ceilings_and_crash_limit():
+    raw = {
+        "autopilot": {"run_root": "r", "policy_id": "p", "max_crashes": 0},
+        "spend": {"run_ceiling": -1, "global_ceiling": -2},
+    }
+    with pytest.raises(cfg.ConfigError) as refused:
+        cfg.validate(raw, [])
+    assert str(refused.value).splitlines() == [
+        "[spend] run_ceiling must be >= 0 (0 = no calls)",
+        "[spend] global_ceiling must be >= 0 (0 = no calls)",
+        "[autopilot] max_crashes must be >= 1",
+    ]
+    ok = {"autopilot": {"run_root": "r", "policy_id": "p", "max_crashes": 1}}
+    assert cfg.validate(ok, []).core["max_crashes"] == 1
+
+
+def test_a_default_list_is_not_shared_between_configs():
+    raw = {"autopilot": {"run_root": "r", "policy_id": "p"}}
+    first = cfg.validate(raw, [])
+    first.sections["spend"]["accounting_roots"].append("leaked")
+    assert cfg.validate(raw, []).sections["spend"]["accounting_roots"] == []
+    assert cfg.SPEND["accounting_roots"].default == []
+
+
+def test_a_config_that_is_not_utf8_is_a_config_error(tmp_path):
+    (tmp_path / "bin.toml").write_bytes(b'[autopilot]\nrun_root="r\xff"\npolicy_id="p"\n')
+    with pytest.raises(cfg.ConfigError, match="bin.toml"):
+        cfg.load(tmp_path / "bin.toml", [])

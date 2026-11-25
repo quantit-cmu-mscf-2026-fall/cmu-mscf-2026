@@ -15,6 +15,7 @@ from capstone.calibration import (
     family_statistics,
     gate_report,
     gates_alone,
+    idle_days,
     make_family_set,
     run_baseline,
     run_funnel,
@@ -56,6 +57,77 @@ class TestMakeFamilySet:
     def test_rejects_bad_correlation(self):
         with pytest.raises(ValueError):
             make_family_set(5, 2, 0.0, 1.0, within_rho=0.0, **SMALL)
+
+
+class TestIdleDays:
+    def test_share_and_run_length_are_as_asked(self):
+        idle = idle_days(50_000, 20, 0.4, 21.0, seed=0)
+        assert idle.mean() == pytest.approx(0.4, abs=0.02)
+        column = np.r_[False, idle[:, 0], False].astype(int)
+        starts, ends = np.flatnonzero(np.diff(column) == 1), np.flatnonzero(np.diff(column) == -1)
+        assert (ends - starts).mean() == pytest.approx(21.0, rel=0.1)
+
+    def test_a_family_is_idle_together_and_keeps_its_active_returns(self):
+        active = make_family_set(6, 4, 0.5, 1.0, seed=3, **SMALL)
+        gappy = make_family_set(6, 4, 0.5, 1.0, seed=3, idle_share=0.3, **SMALL)
+        nan = gappy.returns.isna()
+        assert nan.to_numpy().mean() == pytest.approx(0.3, abs=0.08)
+        for f in gappy.family.unique():
+            assert nan[gappy.family.index[gappy.family == f]].nunique(axis=1).eq(1).all()
+        pd.testing.assert_frame_equal(gappy.returns, active.returns.where(~nan))
+
+    @pytest.mark.parametrize("share, run", [(-0.1, 21.0), (1.0, 21.0), (0.5, 0.5), (0.9, 1.0)])
+    def test_bad_settings_are_refused(self, share, run):
+        with pytest.raises(ValueError, match="idle"):
+            make_family_set(3, 2, 0.0, 0.0, seed=0, idle_share=share, idle_run=run, **SMALL)
+
+    def test_negative_control_holds_with_idle_days(self):
+        accepted = {"baseline": 0, "funnel": 0}
+        for seed in range(8):
+            _, stats = _stats(
+                0.0, 1.0, seed=seed, ar1=0.3, t_df=5, garch=(0.05, 0.9), idle_share=0.5
+            )
+            truth = stats["reuse"]["truth"]
+            accepted["baseline"] += score(run_baseline(stats["reuse"]), truth)["any_false"]
+            th = Thresholds(q1=0.2, alpha2=0.2, final="bh", q4=0.2)
+            accepted["funnel"] += score(run_funnel(stats["split"], th)["stage4"], truth)[
+                "any_false"
+            ]
+        assert accepted["funnel"] <= 1
+        assert accepted["baseline"] <= 3
+
+    def test_fewer_active_days_find_fewer_real_families(self):
+        power = {}
+        for share in (0.0, 0.6):
+            found = []
+            for seed in range(6):
+                stats = _stats(0.3, 1.5, seed=seed, idle_share=share)[1]["reuse"]
+                found.append(score(run_baseline(stats), stats["truth"])["power"])
+            power[share] = np.mean(found)
+        assert power[0.6] < power[0.0]
+
+
+class TestHoldoutCoverage:
+    def test_a_thinly_covered_survivor_fails_stage_4_and_the_rest_are_unchanged(self):
+        _, stats = _stats(0.3, 2.5, seed=0)
+        stats = stats["reuse"]
+        th = Thresholds(q1=0.2, final="bh", q4=0.5)
+        free = run_funnel(stats, th)
+        passer = free.index[free["stage4"]][0]
+        thin = stats.assign(ho_n_obs=stats["ho_n_obs"].where(stats.index != passer, 10.0))
+        guarded = run_funnel(thin, th, min_holdout_obs=100)
+        assert not guarded.loc[passer, "stage4"]
+        pd.testing.assert_frame_equal(guarded.drop(columns="stage4"), free.drop(columns="stage4"))
+        pd.testing.assert_frame_equal(run_funnel(stats, th, min_holdout_obs=100), free)
+
+    def test_a_survivor_at_exactly_the_guard_is_tested(self):
+        _, stats = _stats(0.3, 2.5, seed=0)
+        stats = stats["reuse"]
+        th = Thresholds(q1=0.2, final="bh", q4=0.5)
+        free = run_funnel(stats, th)
+        passer = free.index[free["stage4"]][0]
+        at = stats.assign(ho_n_obs=stats["ho_n_obs"].where(stats.index != passer, 100.0))
+        pd.testing.assert_frame_equal(run_funnel(at, th, min_holdout_obs=100), free)
 
 
 class TestVariantsPerFamily:

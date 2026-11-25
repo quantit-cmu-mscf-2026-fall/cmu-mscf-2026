@@ -7,7 +7,7 @@
   "plugins": [
     {
       "name": "mscf-pipeline",
-      "description": "Skills for the team's pipeline: shared data, the run ledger, validation, null calibration and the research PR workflow",
+      "description": "Skills, a ship-checker agent and a guard hook for the team's pipeline: shared data, the run ledger, validation, null calibration and the research PR workflow",
       "source": "./mscf-plugin"
     }
   ]

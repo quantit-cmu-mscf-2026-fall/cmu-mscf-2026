@@ -1,0 +1,29 @@
+{
+  "description": "mscf-pipeline guard: denies holdout dates in discovery commands, force pushes, printing secrets, committing working data and editing the ledger; warns on holdout dates in code; reports the ledger count after experiment scripts; optionally denies configured paths and non-no-reply pushes (see hooks/guard.py)",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|PowerShell|Edit|MultiEdit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if command -v python3 >/dev/null 2>&1; then exec python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/guard.py\"; elif command -v python >/dev/null 2>&1; then exec python \"${CLAUDE_PLUGIN_ROOT}/hooks/guard.py\"; else echo 'mscf-pipeline guard: neither python3 nor python is on PATH; denied' >&2; exit 2; fi",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if command -v python3 >/dev/null 2>&1; then exec python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/guard.py\"; elif command -v python >/dev/null 2>&1; then exec python \"${CLAUDE_PLUGIN_ROOT}/hooks/guard.py\"; else echo 'mscf-pipeline guard: neither python3 nor python is on PATH; denied' >&2; exit 2; fi",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

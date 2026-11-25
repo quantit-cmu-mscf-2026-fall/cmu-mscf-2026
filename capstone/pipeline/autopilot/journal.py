@@ -5,6 +5,11 @@ previous or the next state, never a torn one. Events are appended one fsynced li
 and chained: every event carries the sha256 of the line before it, so an edited or
 dropped line is detected by `verify_events`. A stage found `running` at the start of a
 tick was interrupted; the runner reruns it (stages are idempotent).
+
+Single writer: one process at a time may write a run root. Two writers break the hash
+chain, and a second `Journal` instance's `update` overwrites the first one's stage records.
+The runner must hold `LOCK` in the run root for the whole tick; the runner is not in this
+module, so nothing here takes it.
 """
 
 from __future__ import annotations
@@ -45,7 +50,6 @@ class Journal:
         else:
             self.doc = {"schema_version": SCHEMA_VERSION, "policy_id": None, "stages": {}}
 
-    # state -----------------------------------------------------------------
     def stage(self, name) -> dict:
         """One stage's record (a copy); a stage never run is `pending`."""
         blank = {"state": "pending", "attempts": 0, "crashes": 0, "artifacts": {}, "data": {}}
@@ -66,7 +70,6 @@ class Journal:
             os.fsync(stream.fileno())
         os.replace(temporary, path)
 
-    # events ----------------------------------------------------------------
     def _lines(self):
         """(complete event lines, raw text). A line cut by a kill is not an event."""
         path = self.root / EVENTS
@@ -102,6 +105,8 @@ class Journal:
         complete = self._lines()[0]
         for count, line in enumerate(complete):
             row = json.loads(line)
+            if not isinstance(row, dict):
+                raise JournalError(f"{self.root / EVENTS}: line {count} is not a JSON object")
             if row.get("seq") != count or row.get("prev") != previous:
                 raise JournalError(f"{self.root / EVENTS}: event {count} breaks the chain")
             previous = hashlib.sha256(line.encode()).hexdigest()

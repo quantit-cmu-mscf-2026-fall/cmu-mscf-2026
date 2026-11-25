@@ -1,0 +1,90 @@
+# The end-to-end driver on a synthetic market (capstone.pipeline.config).
+#
+# A synthetic CRSP-shaped market, 2000-2007, with its own search period and
+# holdout: every date is before the discovery period's end (2020-12-31), so
+# no code path here can reach the real holdout. The [[papers]] at the bottom
+# are the run's paper source (capstone.factors.sources.FileSource).
+# This is a CI/test configuration: its thresholds name the `rho` stage-1 test
+# for speed. The real-data configuration uses the bootstrap family maximum.
+
+[run]
+# The run's ledger tag is "e2e-run:<run_id>"; the gate counts exactly the
+# trials carrying it, and its registration is spent once per (config, data).
+run_id = "synthetic-v1"
+seed = 0
+# Data version recorded with every trial: this label plus a digest of the rows.
+data_label = "synthetic-crsp"
+# Every model call of the run (papers, deepen edits, the agent) goes through
+# the driver's counter, which raises before the call that would exceed this.
+# The team default is 300 (capstone.pipeline.config.DEFAULT_MAX_MODEL_CALLS);
+# this small synthetic run sets its own.
+max_model_calls = 40
+
+[periods]
+search_end = "2005-12-30"     # deepen, evaluation and gate stages 1-3
+holdout_start = "2006-01-02"  # gate stage 4 only
+holdout_end = "2007-12-31"
+
+[factors]
+# capstone.factors.llm.FactorConfig, on top of its defaults.
+model = "claude-opus-5"
+hypotheses_per_paper = 1
+factors_per_hypothesis = 3
+alignment_model = ""  # no alignment judge in the synthetic run
+
+[deepen]
+rounds = 2
+max_calls = 10  # deepen's own cap on its editor's and agent's calls
+# "memory": learned memory search picks parent and edit; "agent": the model
+# picks among the memory's candidates (vetoed edits withheld; a refused
+# choice falls back to the memory).
+selector = "memory"
+# The one spec a deepen child is scored under, on the search period.
+hold = 1
+neutral = "none"
+
+[evaluation]
+# Every (factor, spec) is a variant and a logged trial.
+holds = [1, 5]
+neutral = ["none", "sector"]
+
+[gate]
+generator = "factor-trees"  # the driver appends the model and prompt version
+n_boot = 499
+# Thresholds (capstone.funnel.Thresholds). `rho` is the CI/synthetic stage-1 test.
+[gate.thresholds]
+stage1 = "rho"
+
+# Stage 3's factor frame: "none" (passes through, unmeasured), "synthetic"
+# (seeded noise on the search dates) or "ff5_momentum" (Ken French, network).
+[stage3]
+factors = "none"
+seed = 0
+
+[trading]
+gross = 1.0
+min_trade = 0.0001
+
+[incubation]
+alpha = 0.05
+horizon = 252
+# The synthetic live continuation: block-bootstrapped search-period returns of
+# the accepted variant, re-centred on the gate's expected mean ("expected") or
+# on zero ("none", the edge gone).
+live_edge = "expected"
+block = 20
+# An incubate (incubation-only) family also runs the confirming e-process
+# (capstone.incubation.confirm): promoted once its live edge is shown at
+# confirm_alpha, retired if not within confirm_horizon observed periods.
+# Defaults: confirm_alpha = 0.05, confirm_horizon = 1260 (five years),
+# confirm_accepted = false (accepted families keep the decay-only monitor).
+
+[[papers]]
+key = "synthetic:volume"
+title = "Trading volume and next-day returns"
+abstract = "Stocks with high trading volume today earn higher returns tomorrow."
+
+[[papers]]
+key = "synthetic:reversal"
+title = "Short-term reversal in daily returns"
+abstract = "Stocks that fell over the past week rebound over the next day."

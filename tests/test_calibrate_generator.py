@@ -6,6 +6,7 @@ import importlib.util
 import json
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -38,6 +39,51 @@ def test_measure_recovers_a_known_structure():
     assert m["within_family_corr"] == pytest.approx(0.64, abs=0.04)
     assert m["across_family_corr"] == pytest.approx(0.10, abs=0.03)
     assert m["ar1"]["median"] == pytest.approx(0.2, abs=0.03)
+
+
+def test_measure_recovers_the_idle_share_and_run_length():
+    fs = make_family_set(
+        6, 4, 0.0, 0.0, idle_share=0.3, idle_run=10, n_search=20_000, n_holdout=2, seed=2
+    )
+    m = measure_generator.measure(fs.returns, fs.family)
+    assert m["idle_share"]["median"] == pytest.approx(0.3, abs=0.03)
+    assert m["idle_run"]["median"] == pytest.approx(10, rel=0.1)
+
+
+def test_days_before_a_variants_first_return_are_not_idle():
+    active = pd.Series(np.tile([0.01] * 20 + [np.nan] * 5, 100))
+    late = pd.concat([pd.Series(np.nan, index=range(2000)), active.set_axis(range(2000, 4500))])
+    returns = pd.DataFrame({"a-v": late, "b-v": late.shift(1)}).set_axis(
+        pd.bdate_range("1990-01-01", periods=4500)
+    )
+    m = measure_generator.measure(returns, pd.Series(["f", "f"], index=returns.columns))
+    assert m["idle_run"]["median"] == pytest.approx(5.0)
+    assert m["idle_share"]["median"] == pytest.approx(495 / 2495, abs=1e-4)
+
+
+@pytest.mark.parametrize(("last", "refused"), [("2020-12-31", False), ("2021-01-01", True)])
+def test_a_matrix_reaching_the_holdout_is_refused(last, refused):
+    returns = pd.DataFrame({"a-v": [0.01, 0.02]}, index=pd.to_datetime(["2020-12-30", last]))
+    if refused:
+        with pytest.raises(ValueError, match="past the search period"):
+            measure_generator.search_period_only(returns)
+    else:
+        assert measure_generator.search_period_only(returns) is returns
+
+
+def test_the_script_refuses_holdout_dates_before_logging(tmp_path, monkeypatch):
+    dates = pd.bdate_range("2020-12-01", "2021-01-29")
+    returns = pd.DataFrame({"a-v": 0.01, "b-v": -0.01}, index=dates).rename_axis("date")
+    returns.reset_index().to_parquet(tmp_path / "matrix.parquet")
+    family = pd.DataFrame({"hypothesis_id": ["f", "f"]}, index=returns.columns)
+    family.to_parquet(tmp_path / "summary.parquet")
+    logged = []
+    monkeypatch.setattr(measure_generator, "log_run", lambda *a, **k: logged.append(a))
+    argv = ["measure_generator.py", "--matrix", str(tmp_path / "matrix.parquet")]
+    monkeypatch.setattr("sys.argv", [*argv, "--summary", str(tmp_path / "summary.parquet")])
+    with pytest.raises(ValueError, match="past the search period"):
+        measure_generator.main()
+    assert logged == []
 
 
 def test_measure_reports_each_familys_correlation_apart_from_the_pooled_mean():
@@ -79,6 +125,42 @@ def test_one_seed_counts_true_and_false_discoveries():
     assert (rows["true"] + rows["false"] == rows["discoveries"]).all()
     assert (rows.loc[rows["n_real"] == 0, "true"] == 0).all()
     assert (rows["true"] <= rows["n_real"]).all()
+
+
+def test_the_coverage_guard_is_the_gates_on_the_simulated_holdout():
+    assert calibrate_generator._min_holdout_obs(PARAMS) is None
+    guarded = PARAMS | {"min_holdout_coverage": 0.5}
+    assert calibrate_generator._min_holdout_obs(guarded) == 126
+    for bad in (0.0, 1.5):
+        with pytest.raises(ValueError, match="min_holdout_coverage"):
+            calibrate_generator._min_holdout_obs(PARAMS | {"min_holdout_coverage": bad})
+
+
+def test_idle_days_reach_the_simulated_worlds():
+    side = calibrate_generator.null_side(
+        calibrate_generator._spec(PARAMS | {"idle_share": 0.4}), seed=0
+    )
+    assert side.fs.returns.isna().to_numpy().mean() == pytest.approx(0.4, abs=0.15)
+
+
+def test_one_seed_fails_thinly_covered_survivors_at_stage_4():
+    idle = PARAMS | {"idle_share": 0.3}
+    rows = {
+        guard: pd.DataFrame(
+            calibrate_generator.one_seed((idle | {"min_holdout_coverage": guard}, 0))
+        ).set_index(["n_real", "rule"])
+        for guard in (None, 1.0)
+    }
+    funnel = "funnel q1=0.1 q4=0.5"
+    assert rows[None].loc[(1, funnel), "true"] == 1
+    assert rows[1.0].loc[(1, funnel), "discoveries"] == 0
+    baseline = "baseline q=0.1"
+    pd.testing.assert_series_equal(rows[None].loc[(1, baseline)], rows[1.0].loc[(1, baseline)])
+
+
+def test_an_idle_setting_the_worlds_cannot_draw_is_refused_before_logging():
+    with pytest.raises(ValueError, match="idle runs longer"):
+        calibrate_generator._spec(PARAMS | {"idle_share": 0.9, "idle_run": 1})
 
 
 def test_summarise_marks_a_rule_unsafe_in_its_worst_setting():
