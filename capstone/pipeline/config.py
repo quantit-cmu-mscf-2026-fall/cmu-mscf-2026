@@ -114,6 +114,9 @@ class E2EConfig:
     )
     deepen_selector: Selector = "memory"
     deepen_on_budget: OnBudget = "raise"
+    # `[deepen] max_children_per_family`: children deepen may propose per family (a
+    # parent's hypothesis). None: unlimited. Enters the digest only when set.
+    deepen_max_children_per_family: int | None = None
     stage3: Stage3Settings = Stage3Settings()
     search_start: str | None = None  # None: the market rows' first date
     # Papers against the store as the paper phase found it, side by side (paper_pool;
@@ -147,6 +150,9 @@ class E2EConfig:
             raise ValueError(f"deepen selector must be one of {get_args(Selector)}")
         if self.deepen_on_budget not in get_args(OnBudget):
             raise ValueError(f"deepen on_budget must be one of {get_args(OnBudget)}")
+        cap = self.deepen_max_children_per_family
+        if cap is not None and (isinstance(cap, bool) or not isinstance(cap, int) or cap < 1):
+            raise ValueError("[deepen] max_children_per_family must be at least 1")
         if self.paper_mode not in get_args(PaperMode):
             raise ValueError(f"paper_mode must be one of {get_args(PaperMode)}")
         if self.concurrency < AUTO:
@@ -170,6 +176,13 @@ class E2EConfig:
         tag = f"e2e-run:{self.run_id}"
         return f"{tag}:placebo" if self.placebo is not None else tag
 
+    @property
+    def data_tag(self) -> str:
+        """Tag on every trial of every run over this data label and search period, so the
+        multiple-testing charge accumulates across reruns (a new run id does not reset it)."""
+        tag = f"e2e-data:{self.data_label}:{self.search_start or 'start'}:{self.search_end}"
+        return f"{tag}:placebo" if self.placebo is not None else tag
+
 
 _SECTIONS = {
     "run": {
@@ -185,7 +198,15 @@ _SECTIONS = {
     },
     "periods": {"search_start", "search_end", "holdout_start", "holdout_end"},
     "factors": {f.name for f in fields(FactorConfig)} | {"regime_operators"},
-    "deepen": {"rounds", "max_calls", "hold", "neutral", "selector", "on_budget"},
+    "deepen": {
+        "rounds",
+        "max_calls",
+        "hold",
+        "neutral",
+        "selector",
+        "on_budget",
+        "max_children_per_family",
+    },
     "evaluation": {"holds", "neutral"},
     "gate": {"generator", "n_boot", "thresholds"},
     "trading": {"gross", "min_trade"},
@@ -235,6 +256,7 @@ def load_config(path: str | Path | None = None) -> E2EConfig:
         deepen_max_calls=int(deepen.get("max_calls", 10)),
         deepen_selector=deepen.get("selector", "memory"),
         deepen_on_budget=deepen.get("on_budget", "raise"),
+        deepen_max_children_per_family=deepen.get("max_children_per_family"),
         scorer=TradingSpec(deepen.get("hold", 1), deepen.get("neutral", "none")),
         specs=tuple(grid(ev["holds"], ev["neutral"])),
         generator=gate_values["generator"],

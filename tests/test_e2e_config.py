@@ -141,3 +141,29 @@ def test_incubation_and_stage3_settings_check_themselves():
         IncubationSettings(confirm_accepted=1)
     with pytest.raises(ValueError, match="stage3 factors"):
         Stage3Settings(factors="ff3")
+
+
+def test_deepen_max_children_per_family_is_read_checked_and_kept_out_of_the_digest_unless_set(
+    tmp_path,
+):
+    from capstone.pipeline.search_identity import config_digest
+
+    config = load_config()
+    assert config.deepen_max_children_per_family is None
+    path = _edited(tmp_path, "rounds = 2\n", "rounds = 2\nmax_children_per_family = 3\n")
+    capped = load_config(path)
+    assert capped.deepen_max_children_per_family == 3
+    assert config_digest(capped) != config_digest(config)
+    unset = replace(capped, deepen_max_children_per_family=None, papers=config.papers)
+    assert config_digest(unset) == config_digest(config)
+    for bad in (0, -1, True, 1.5):
+        with pytest.raises(ValueError, match="max_children_per_family"):
+            replace(config, deepen_max_children_per_family=bad)
+
+
+def test_the_data_tag_names_the_data_and_period_not_the_run():
+    config = load_config()
+    assert config.data_tag == "e2e-data:synthetic-crsp:start:2005-12-30"
+    other = replace(config, run_id="another", search_start="2001-01-02")
+    assert other.data_tag == "e2e-data:synthetic-crsp:2001-01-02:2005-12-30"
+    assert config.run_tag != other.run_tag
