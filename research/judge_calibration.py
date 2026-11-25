@@ -411,7 +411,9 @@ class JevBackend:
                 response = self.post(JEV_URL, self.headers, body)
                 break
             except urllib.error.HTTPError as exc:
-                if exc.code not in (429, 500, 502, 503, 504) or attempt == self.retries:
+                if (
+                    exc.code not in (429, 500, 502, 503, 504, 529) or attempt == self.retries
+                ):  # 529: overloaded
                     raise
                 self.sleep(2.0**attempt)
         try:

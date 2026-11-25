@@ -235,12 +235,12 @@ def test_jev_retries_on_429_and_5xx_then_gives_up():
     def flaky(url, headers, body):
         attempts.append(1)
         if len(attempts) < 3:
-            raise urllib.error.HTTPError(url, 429 if len(attempts) == 1 else 503, "x", {}, None)
+            raise urllib.error.HTTPError(url, 429 if len(attempts) == 1 else 529, "x", {}, None)
         return _jev_response()
 
     item = _items()[0][0]
     backend = jc.JevBackend("jev-latest", "K", post=flaky, sleep=naps.append)
-    assert backend.answer(item, "").probs
+    assert backend.answer(item, "").probs  # 529 (overloaded) is retried like 429
     assert len(attempts) == 3 and len(naps) == 2
 
     def forbidden(url, headers, body):
