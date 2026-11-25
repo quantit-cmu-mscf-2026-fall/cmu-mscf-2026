@@ -78,6 +78,13 @@ def test_the_summary_ranks_the_variants_by_net_sharpe(ran):
     assert variants["count"] == ran["summary"]["n_variants"]
 
 
+def test_the_top_table_labels_the_screen_p_value_as_unadjusted(ran):
+    variants = ran["summary"]["variants"]
+    top = variants["top"][0]
+    assert "pvalue_screen_unadjusted" in top and "pvalue_screen" not in top
+    assert variants["note"] == "pvalue_screen is unadjusted; the gate adjusts for trial_count"
+
+
 def test_the_run_registers_the_gate_config_and_never_looks(ran):
     names = [e["name"] for e in ran["entries"]]
     assert gate.REGISTRATION_NAME in names and gate.LOOK_NAME not in names
