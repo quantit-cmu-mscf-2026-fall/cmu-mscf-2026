@@ -1,7 +1,8 @@
 """Distributions of scores at each funnel stage (1-3), search period only.
 
     python research/funnel_distributions.py --matrix M --summary S --run NAME
-        [--null-matrix NM --null-summary NS] [--classes classes.parquet]
+        [--null-matrix NM --null-summary NS] [--null-dir DIR ...] [--null-n-boot N]
+        [--classes classes.parquet]
         [--n-boot 1999 --seed 0 --q1 0.1] [--out DIR]
 
 Report only: reproduces the gate's stage 1-3 block without the look and writes
@@ -25,6 +26,13 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--run", required=True)
     p.add_argument("--null-matrix", type=Path)
     p.add_argument("--null-summary", type=Path)
+    p.add_argument(
+        "--null-dir",
+        type=Path,
+        action="append",
+        help="a placebo run folder (matrix.parquet + summary.parquet); repeatable",
+    )
+    p.add_argument("--null-n-boot", type=int, help="bootstrap draws for nulls (default --n-boot)")
     p.add_argument("--classes", type=Path)
     p.add_argument("--n-boot", type=int, default=1999)
     p.add_argument("--seed", type=int, default=0)
@@ -37,6 +45,8 @@ def main(argv: list[str] | None = None) -> None:
         run=a.run,
         null_matrix_path=a.null_matrix,
         null_summary_path=a.null_summary,
+        null_dirs=a.null_dir,
+        null_n_boot=a.null_n_boot,
         classes_path=a.classes,
         n_boot=a.n_boot,
         seed=a.seed,

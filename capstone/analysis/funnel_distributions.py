@@ -164,6 +164,55 @@ def comparison_table(real: Scored, null: Scored) -> pd.DataFrame:
     return pd.DataFrame(rows).set_index(["metric", "quantile"])
 
 
+BAND_QUANTILES = (0.05, 0.5, 0.95)
+
+
+def null_band_table(real: Scored, nulls: list[Scored]) -> pd.DataFrame:
+    """Real value against the min / median / max over null seeds, per metric.
+
+    `n_null_below_real` counts the seeds whose value the real one exceeds.
+    """
+
+    def row(metric: str, quantile: float, rv: float, nv: list[float]) -> dict:
+        a = np.asarray(nv, dtype=float)
+        return {
+            "metric": metric,
+            "quantile": quantile,
+            "real": rv,
+            "null_min": float(np.nanmin(a)),
+            "null_median": float(np.nanmedian(a)),
+            "null_max": float(np.nanmax(a)),
+            "n_null": len(a),
+            "n_null_below_real": int((rv > a).sum()),
+            "share_null_below_real": float((rv > a).mean()),
+        }
+
+    rows = []
+    for label, get in (
+        ("variant_sharpe_net", lambda s: s.variants["sharpe_net"]),
+        ("variant_sharpe_gross", lambda s: s.variants["sharpe_gross"]),
+        ("family_p1_bootstrap", lambda s: s.families["p1_bootstrap"]),
+    ):
+        for p in BAND_QUANTILES:
+            rows.append(
+                row(
+                    label,
+                    p,
+                    float(get(real).quantile(p)),
+                    [float(get(n).quantile(p)) for n in nulls],
+                )
+            )
+    rows.append(
+        row(
+            "stage1_survivors",
+            -1.0,
+            float(real.families["stage1"].sum()),
+            [float(n.families["stage1"].sum()) for n in nulls],
+        )
+    )
+    return pd.DataFrame(rows).set_index(["metric", "quantile"])
+
+
 def _summary_stats(prefix: str, s: Scored, inputs: tuple[str, ...]) -> dict[str, Stat]:
     v, f = s.variants, s.families
     p = v["pvalue_screen"].dropna()
@@ -217,11 +266,18 @@ def _summary_stats(prefix: str, s: Scored, inputs: tuple[str, ...]) -> dict[str,
 def build_outputs(
     real: Scored,
     *,
-    null: Scored | None,
+    null: Scored | None = None,
     inputs: tuple[str, ...],
     null_inputs: tuple[str, ...] = (),
+    nulls: list[Scored] | None = None,
 ) -> tuple[dict[str, pd.DataFrame], dict[str, Stat], list[Statement]]:
-    """The tables, stats and statements for `outputs.write_outputs`."""
+    """The tables, stats and statements for `outputs.write_outputs`.
+
+    `nulls` (several placebo runs) gives the band statements; one null, given as
+    `null` or as a single-item `nulls`, keeps the single-draw comparison.
+    """
+    if nulls is not None and len(nulls) == 1 and null is None:
+        null, nulls = nulls[0], None
     tables = {
         "variants": real.variants,
         "families": real.families,
@@ -340,7 +396,116 @@ def build_outputs(
                     "null_dropped_variants",
                 )
             )
+    if nulls:
+        _add_band(tables, stats, statements, real, nulls, inputs + null_inputs, base)
     return tables, stats, statements
+
+
+def _add_band(
+    tables: dict[str, pd.DataFrame],
+    stats: dict[str, Stat],
+    statements: list[Statement],
+    real: Scored,
+    nulls: list[Scored],
+    both: tuple[str, ...],
+    base: str,
+) -> None:
+    n = len(nulls)
+    band = null_band_table(real, nulls)
+    tables["null_band"] = band
+    tables["null_seeds"] = pd.DataFrame(
+        {
+            "n_variants": [s.n_variants for s in nulls],
+            "n_dropped": [len(s.dropped) for s in nulls],
+            "stage1_survivors": [int(s.families["stage1"].sum()) for s in nulls],
+            "sharpe_gross_q050": [s.variants["sharpe_gross"].quantile(0.5) for s in nulls],
+            "sharpe_gross_q095": [s.variants["sharpe_gross"].quantile(0.95) for s in nulls],
+            "sharpe_net_q050": [s.variants["sharpe_net"].quantile(0.5) for s in nulls],
+        }
+    ).rename_axis("null_seed")
+    surv = band.loc[("stage1_survivors", -1.0)]
+    sv = {
+        "real": int(surv["real"]),
+        "null_min": int(surv["null_min"]),
+        "null_median": float(surv["null_median"]),
+        "null_max": int(surv["null_max"]),
+        "n_null": n,
+    }
+    stats["n_null_runs"] = Stat(n, "number of placebo runs in the band", both)
+    stats["null_band_stage1_survivors"] = Stat(
+        sv, "stage-1 survivor families: real run vs min / median / max over null runs", both
+    )
+    gross = {}
+    for q, name in ((0.5, "median"), (0.95, "p95")):
+        r = band.loc[("variant_sharpe_gross", q)]
+        real_q = real.variants["sharpe_gross"].quantile(q)
+        gaps = [real_q - s.variants["sharpe_gross"].quantile(q) for s in nulls]
+        gross[name] = {
+            "k": int(r["n_null_below_real"]),
+            "n": n,
+            "gap_min": float(min(gaps)),
+            "gap_max": float(max(gaps)),
+        }
+    stats["null_band_gross_sharpe"] = Stat(
+        gross,
+        "variants' gross Sharpe (before costs): seeds where the real median / 95th percentile "
+        "exceeds the null's, with the range of real-minus-null gaps",
+        both,
+    )
+    net = band.loc[("variant_sharpe_net", 0.5)]
+    stats["null_band_net_sharpe_median"] = Stat(
+        {
+            "real": float(net["real"]),
+            "null_min": float(net["null_min"]),
+            "null_max": float(net["null_max"]),
+            "k": int(net["n_null_below_real"]),
+            "n": n,
+        },
+        "variants' median net Sharpe: real vs range over null runs",
+        both,
+    )
+    statements += [
+        Statement(
+            f"The real run has {sv['real']} stage-1 survivors; the {n} null runs have "
+            f"{sv['null_min']} to {sv['null_max']} (median {sv['null_median']:g}).",
+            "null_band_stage1_survivors",
+            f"A null should have about none; {n} draws bound the range only roughly. " + base,
+        ),
+        Statement(
+            f"Real median gross Sharpe exceeds the null median in {gross['median']['k']} of "
+            f"{n} seeds, with real-minus-null gaps from {gross['median']['gap_min']:+.2f} to "
+            f"{gross['median']['gap_max']:+.2f}.",
+            "null_band_gross_sharpe",
+            "Search period only; the placebo is a cross-section permutation, so it is only as "
+            "comparable as its construction is to the real run.",
+        ),
+        Statement(
+            f"Real 95th-percentile gross Sharpe exceeds the null's in {gross['p95']['k']} of "
+            f"{n} seeds, with gaps from {gross['p95']['gap_min']:+.2f} to "
+            f"{gross['p95']['gap_max']:+.2f}.",
+            "null_band_gross_sharpe",
+            "The upper tail of many correlated variants is driven by few families.",
+        ),
+        Statement(
+            f"Real median net Sharpe is {net['real']:.2f} against a null range of "
+            f"{net['null_min']:.2f} to {net['null_max']:.2f}; net comparisons are dominated "
+            "by the placebo's much higher turnover costs, so gross is the fair comparison.",
+            "null_band_net_sharpe_median",
+            "A permuted signal trades far more than a real one.",
+        ),
+    ]
+    dropped = sum(len(s.dropped) for s in nulls)
+    if dropped:
+        stats["null_dropped_total"] = Stat(
+            dropped, "null variants left out for too few returns, summed over null runs", both
+        )
+        statements.append(
+            Statement(
+                f"{dropped} null variants were left out for too few returns across "
+                f"the {n} null runs.",
+                "null_dropped_total",
+            )
+        )
 
 
 def run_analysis(
@@ -350,6 +515,8 @@ def run_analysis(
     run: str,
     null_matrix_path: Path | None = None,
     null_summary_path: Path | None = None,
+    null_dirs: list[Path] | None = None,
+    null_n_boot: int | None = None,
     classes_path: Path | None = None,
     n_boot: int = 1999,
     seed: int = 0,
@@ -365,6 +532,14 @@ def run_analysis(
         "matrix": Path(matrix_path).name,
         "matrix_digest": file_digest(matrix_path),
         "null_matrix_digest": file_digest(null_matrix_path) if null_matrix_path else None,
+        "null_n_boot": null_n_boot if null_n_boot is not None else n_boot,
+        "null_dirs": {
+            str(d): {
+                "matrix_digest": file_digest(Path(d) / "matrix.parquet"),
+                "summary_digest": file_digest(Path(d) / "summary.parquet"),
+            }
+            for d in null_dirs or ()
+        },
         "n_boot": n_boot,
         "seed": seed,
         "search_end": search_end,
@@ -379,7 +554,9 @@ def run_analysis(
     )
     classes = pd.read_parquet(classes_path) if classes_path else None
 
-    def load(m: Path, s: Path) -> Scored:
+    nb = null_n_boot if null_n_boot is not None else n_boot
+
+    def load(m: Path, s: Path, n_boot: int = n_boot) -> Scored:
         matrix = pd.read_parquet(m)
         if "date" in matrix.columns:
             matrix = matrix.set_index("date")
@@ -395,7 +572,16 @@ def run_analysis(
         )
 
     real = load(matrix_path, summary_path)
-    null = load(null_matrix_path, null_summary_path) if null_matrix_path is not None else None
     ins = (Path(matrix_path).name, Path(summary_path).name)
+    dirs = [Path(d) for d in null_dirs or ()]
+    if dirs:
+        if null_matrix_path is not None:
+            raise ValueError("give null dirs or a null matrix, not both")
+        nulls = [load(d / "matrix.parquet", d / "summary.parquet", nb) for d in dirs]
+        null_ins = tuple(
+            f"{d.name}/{f}" for d in dirs for f in ("matrix.parquet", "summary.parquet")
+        )
+        return build_outputs(real, nulls=nulls, inputs=ins, null_inputs=null_ins)
+    null = load(null_matrix_path, null_summary_path, nb) if null_matrix_path is not None else None
     null_ins = (Path(null_matrix_path).name, Path(null_summary_path).name) if null else ()
     return build_outputs(real, null=null, inputs=ins, null_inputs=null_ins)

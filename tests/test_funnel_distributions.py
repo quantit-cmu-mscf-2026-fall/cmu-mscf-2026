@@ -156,3 +156,105 @@ def test_a_variant_too_short_for_the_bootstrap_is_dropped_and_counted():
     _, stats, statements = fd.build_outputs(scored, null=None, inputs=("m",))
     assert stats["dropped_variants"].value == [short]
     assert any(s.source == "dropped_variants" for s in statements)
+
+
+def _gross_frames(m, shift=0.0):
+    returns, summary = frames(m)
+    summary = summary.assign(sharpe_gross=summary["sharpe_net"] + shift)
+    return returns, summary
+
+
+def _fake(gross, stage1_n, n=20):
+    """A Scored whose variant gross Sharpe is a ramp starting at `gross` and n-1 more up to +1."""
+    v = pd.DataFrame(
+        {
+            "sharpe_net": np.linspace(-1, 1, n),
+            "sharpe_gross": np.linspace(gross, gross + 1, n),
+            "pvalue_screen": np.linspace(0.01, 0.9, n),
+            "family": [f"f{i % 4}" for i in range(n)],
+        }
+    )
+    f = pd.DataFrame(
+        {
+            "p1_bootstrap": np.linspace(0.01, 0.9, 4),
+            "stage1": [True] * stage1_n + [False] * (4 - stage1_n),
+            "stage2": [False] * 4,
+            "stage3": [False] * 4,
+        },
+        index=[f"f{i}" for i in range(4)],
+    )
+    return fd.Scored(v, f, 0.5, n)
+
+
+def test_band_counts_seeds_exceeded_on_a_constructed_case():
+    real = _fake(1.0, 3)
+    nulls = [_fake(0.0, 0), _fake(0.5, 1), _fake(2.0, 0)]  # real exceeds the first two on gross
+    band = fd.null_band_table(real, nulls)
+    g = band.loc[("variant_sharpe_gross", 0.5)]
+    assert g["n_null"] == 3 and g["n_null_below_real"] == 2
+    assert g["null_min"] == pytest.approx(0.5) and g["null_max"] == pytest.approx(2.5)
+    assert g["share_null_below_real"] == pytest.approx(2 / 3)
+    s = band.loc[("stage1_survivors", -1.0)]
+    assert (s["real"], s["null_min"], s["null_max"], s["n_null_below_real"]) == (3, 0, 1, 3)
+    _, stats, statements = fd.build_outputs(real, nulls=nulls, inputs=("m",), null_inputs=("n",))
+    assert stats["null_band_gross_sharpe"].value["median"]["k"] == 2
+    assert any("2 of 3 seeds" in st.text for st in statements)
+
+
+def test_three_null_worlds_give_an_ordered_sourced_band(tmp_path):
+    real = fd.score_run(*_gross_frames(planted(), 0.1), n_boot=N_BOOT)
+    nulls = [
+        fd.score_run(*_gross_frames(market(seed=s, share_real=0.0)), n_boot=N_BOOT)
+        for s in (4, 5, 6)
+    ]
+    tables, stats, statements = fd.build_outputs(
+        real, nulls=nulls, inputs=("m",), null_inputs=("n",)
+    )
+    b = tables["null_band"]
+    assert (b["null_min"] <= b["null_median"]).all() and (b["null_median"] <= b["null_max"]).all()
+    assert (b["n_null"] == 3).all() and len(tables["null_seeds"]) == 3
+    assert all(s.source in stats for s in statements)
+    assert any("net comparisons are dominated" in s.text for s in statements)
+    assert stats["n_null_runs"].value == 3
+    write_outputs(tmp_path / "o", title="t", tables=tables, stats=stats, statements=statements)
+
+
+def test_single_null_in_a_list_equals_the_single_null_path():
+    real = fd.score_run(*_gross_frames(planted()), n_boot=N_BOOT)
+    null = fd.score_run(*_gross_frames(market(seed=4, share_real=0.0)), n_boot=N_BOOT)
+    t1, s1, st1 = fd.build_outputs(real, null=null, inputs=("m",), null_inputs=("n",))
+    t2, s2, st2 = fd.build_outputs(real, nulls=[null], inputs=("m",), null_inputs=("n",))
+    assert "null_band" not in t2 and set(t1) == set(t2) and set(s1) == set(s2)
+    assert [s.text for s in st1] == [s.text for s in st2]
+
+
+def test_run_analysis_with_null_dirs_logs_one_entry_with_digests(tmp_path):
+    m = planted()
+    returns, summary = _gross_frames(m)
+    mp, sp = tmp_path / "m.parquet", tmp_path / "s.parquet"
+    returns.to_parquet(mp)
+    summary.to_parquet(sp)
+    dirs = []
+    for i in range(2):
+        d = tmp_path / f"seed{i}"
+        d.mkdir()
+        r, s = _gross_frames(market(seed=10 + i, share_real=0.0))
+        r.to_parquet(d / "matrix.parquet")
+        s.to_parquet(d / "summary.parquet")
+        dirs.append(d)
+    tables, stats, _ = fd.run_analysis(
+        mp,
+        sp,
+        run="r",
+        null_dirs=dirs,
+        n_boot=N_BOOT,
+        null_n_boot=N_BOOT // 2,
+        search_end=str(m.search_end.date()),
+    )
+    assert "null_band" in tables and stats["n_null_runs"].value == 2
+    entries = _ledger_lines()
+    assert len(entries) == 1
+    p = entries[0]["params"]
+    assert p["null_n_boot"] == N_BOOT // 2
+    assert set(p["null_dirs"]) == {str(d) for d in dirs}
+    assert all(len(v["matrix_digest"]) == 16 for v in p["null_dirs"].values())
