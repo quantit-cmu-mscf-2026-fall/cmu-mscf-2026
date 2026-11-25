@@ -83,3 +83,13 @@ memory_signed_quality = false
 memory_max_correlation = 0.70
 memory_pool_capacity = 50
 memory_children_per_parent = 5
+
+# Opt-in parent-selection penalties for the deepen move (not yet read from this
+# file: `Deepener(family_penalty=..., complexity_penalty=...)`, like
+# max_children_per_family; both default 0, which changes nothing). A parent's
+# selection score is multiplied by (1 + c_f) ** -lambda * exp(-mu * nodes), c_f
+# being the children its family has drafted so far. An offline study (synthetic
+# panels, random editor) found lambda 2-4 and mu 0.1 best; the values are a team
+# decision, and the agent selector path has not been tested with a real model.
+# family_penalty = 0.0      # lambda
+# complexity_penalty = 0.0  # mu

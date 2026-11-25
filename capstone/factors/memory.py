@@ -602,6 +602,9 @@ class ParentView:
     quality: float
     rho_max: float
     times_selected: int
+    # Multiplies S_ledger for ranking only (the deepen move's opt-in family and
+    # complexity penalties); `quality` and `context` stay the parent's own.
+    selection_scale: float = 1.0
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.quality):
@@ -636,7 +639,7 @@ def select_action(
     lam = warmup(t, config)
     best: list[Action] = []
     for parent in sorted(parents, key=lambda p: p.id):
-        s = ledger_score(
+        s = parent.selection_scale * ledger_score(
             parent.quality, parent.rho_max, parent.times_selected, config.memory_signed_quality
         )
         for motif in PRODUCIBLE_MOTIFS:

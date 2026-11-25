@@ -559,6 +559,14 @@ class Deepener:
     offers no parent, so the rounds left go to the other families; a round
     asks for no more children than its family has left. With every family
     at the cap, `step` raises `FamiliesCapped` before any call.
+
+    Two opt-in penalties shape parent selection (both default 0: no change).
+    A parent's selection score is multiplied by
+    `(1 + c_f) ** -family_penalty * exp(-complexity_penalty * nodes)`, with
+    c_f the drafts its family has had and nodes its formula's size. They
+    reach only the ranking (`ParentView.selection_scale`): the quality
+    reported, logged and used for pool admission, and the memory context, are
+    the parent's own. Not wired to a TOML key yet, like the cap.
     """
 
     con: sqlite3.Connection
@@ -582,8 +590,14 @@ class Deepener:
     fallbacks: int = 0  # rounds where every pair was vetoed and the pick was random
     max_children_per_family: int | None = None  # None: unlimited
     children_by_family: Counter = field(default_factory=Counter)  # hypothesis id -> drafts
+    family_penalty: float = 0.0  # lambda: crowding penalty on a family's drafts so far
+    complexity_penalty: float = 0.0  # mu: penalty per node of the parent's formula
 
     def __post_init__(self) -> None:
+        for name in ("family_penalty", "complexity_penalty"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not math.isfinite(value) or value < 0:
+                raise ValueError(f"{name} must be finite and >= 0, got {value!r}")
         cap = self.max_children_per_family
         if cap is not None and (isinstance(cap, bool) or not isinstance(cap, int) or cap < 1):
             raise ValueError(f"max_children_per_family must be None or at least 1, got {cap!r}")
@@ -606,6 +620,14 @@ class Deepener:
         if cap is None:
             return None
         return max(cap - self.children_by_family[self.family(fid)], 0)
+
+    def selection_scale(self, fid: str) -> float:
+        """The factor the selection score of `fid` is multiplied by (1.0 with no penalty)."""
+        if not (self.family_penalty or self.complexity_penalty):
+            return 1.0
+        crowd = 1 + self.children_by_family[self.family(fid)]
+        nodes = node_count(self.trees[fid])
+        return crowd**-self.family_penalty * math.exp(-self.complexity_penalty * nodes)
 
     def _open(self, views: list[ParentView]) -> list[ParentView]:
         """`views` whose family is under the cap (all of them with no cap)."""
@@ -692,6 +714,7 @@ class Deepener:
                 q,
                 self.pool.rho_max(fid),
                 self.selected[fid],
+                self.selection_scale(fid),
             )
             for fid, q in sorted(self.pool.quality.items())
         ]
@@ -733,7 +756,8 @@ class Deepener:
         views = sorted(
             self._open(self._views()),
             key=lambda v: (
-                -ledger_score(
+                -v.selection_scale
+                * ledger_score(
                     v.quality, v.rho_max, v.times_selected, self.config.memory_signed_quality
                 ),
                 v.id,
@@ -808,8 +832,7 @@ class Deepener:
             drafts = self.editor.drafts(
                 parent_tree, motif, n, self.lineage(parent.id), self._vetoes(parent.context)
             )
-        if left is not None:
-            self.children_by_family[self.family(parent.id)] += len(drafts)
+        self.children_by_family[self.family(parent.id)] += len(drafts)
         frequent = frequent_root_genes(
             [tree for _, tree in store.factor_trees(self.con)], self.config.avoid_frequent_subtrees
         )
