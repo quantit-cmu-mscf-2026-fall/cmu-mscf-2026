@@ -19,14 +19,30 @@ PRICE_COLUMNS = ["dlyopen", "dlyhigh", "dlylow", "dlyprc", "dlybid", "dlyask"]
 EXPRESSIONS = [
     "close",
     "-rank(close)",
+    "-rank(ts_mean(close, 5))",
     "close / ts_max(close, 10)",
+    "log(close)",
+    "rank(log(close) - ts_mean(log(close), 4))",
     "rank(close * shares)",
     "rank(close + volume)",
     "ts_corr(close, volume, 10)",
+    "rank(signed_power(close, 0.5))",
     "rank(ema(close, 5)) - rank(volume / shares)",
+    "ts_cov(log(close), volume, 6)",
+    "zscore(rank(close), 5)",
     "ts_mean(rank(close * shares), 3)",
+    "ema(rank(close), 4)",
     "rank(close) * returns + scale(volume)",
+    "ts_product(log(close), 3)",
+    "bear_gate(rank(close))",
 ]
+# The trees whose time-series operator reads a cross-sectional level: block by block.
+BLOCKS = {
+    "zscore(rank(close), 5)",
+    "ts_mean(rank(close * shares), 3)",
+    "ema(rank(close), 4)",
+    "ts_product(log(close), 3)",
+}
 
 
 def split(rows: pd.DataFrame, permno: int, day: pd.Timestamp, ratio: float) -> pd.DataFrame:
@@ -56,7 +72,7 @@ def split_rows(seed=0):
 
 
 def signal(expression, panel):
-    return factor_signal(parse(expression), panel)
+    return factor_signal(parse(expression, regime_operators=True), panel)
 
 
 def assert_same(a: pd.DataFrame, b: pd.DataFrame, rtol=1e-9):
@@ -74,7 +90,7 @@ def test_a_split_appended_after_the_history_leaves_every_past_level_signal_and_w
     for name in pit.LEVEL_FIELDS:
         pd.testing.assert_frame_equal(base.fields[name][early], later.fields[name][early])
     assert_same(signal(expression, base)[early], signal(expression, later)[early])
-    tree = parse(expression)
+    tree = parse(expression, regime_operators=True)
     assert_same(factor_weights(tree, base)[early], factor_weights(tree, later)[early])
 
 
@@ -108,13 +124,26 @@ def test_rescaling_each_stocks_cumulative_factors_changes_nothing(expression):
 @pytest.mark.parametrize("expression", EXPRESSIONS)
 def test_each_date_is_the_tree_on_the_panel_re_anchored_at_that_date(expression):
     panel = build_panel(split_rows(seed=4))
-    tree = parse(expression)
+    tree = parse(expression, regime_operators=True)
     got = factor_signal(tree, panel)
     dates = panel.universe.index
     for at in (dates[14], dates[15], dates[29], dates[30], dates[41], dates[-1]):
         fields = pit.anchored_at(panel.fields, panel.split_factors, at)
         want = evaluate(tree, fields).loc[at].where(panel.universe.loc[at])
         np.testing.assert_allclose(got.loc[at], want, rtol=1e-9, atol=1e-12, equal_nan=True)
+
+
+@pytest.mark.parametrize("expression", EXPRESSIONS)
+def test_the_shortcut_agrees_with_the_block_evaluation(expression):
+    panel = build_panel(split_rows(seed=4))
+    tree = parse(expression, regime_operators=True)
+    base = pit.consistent_fields(panel.fields, panel.split_factors)
+    price, shares = pit.anchors(panel.split_factors)
+    slow = pit._evaluate_blocks(
+        tree, base, price, shares, strict_domains=True, cross_sectional_universe=panel.universe
+    ).where(panel.universe)
+    assert_same(factor_signal(tree, panel), slow)
+    assert (pit.anchor_kind(tree) == "blocks") == (expression in BLOCKS)
 
 
 def test_a_level_on_its_own_date_is_the_nominal_level():
