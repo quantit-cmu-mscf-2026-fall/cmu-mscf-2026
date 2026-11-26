@@ -1,0 +1,7 @@
+# Rendered by `python -m capstone.pipeline.autopilot.ops.schedule`.
+# One autopilot tick a day at [schedule] time (local); install with `crontab -e` or
+# `crontab <rendered file>` (it replaces the user's crontab). Exit 2 is logged, not retried:
+# the next scheduled tick retries every blocked stage, and a STOP waits for `clear`.
+# Until the `tick` command lands in `python -m capstone.pipeline.autopilot` (today only
+# `preflight` and `init` exist), every scheduled run exits 2 in argparse.
+${MINUTE} ${HOUR} * * * mkdir -p "$$(dirname ${LOG})" && cd ${CHECKOUT} && PYTHONPATH=${CHECKOUT} PYTHONUTF8=1 ${PYTHON} -m capstone.pipeline.autopilot tick --config ${CONFIG} >> ${LOG} 2>&1 # ${TASK_NAME}
