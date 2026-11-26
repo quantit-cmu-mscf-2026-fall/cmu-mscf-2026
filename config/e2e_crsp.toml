@@ -73,6 +73,8 @@ final_trials = "survivors"
 
 # Fama-French 5 + momentum (capstone.data.load_ff5_momentum; downloaded once
 # and cached), cut to the search period.
+# The gate measures stage 3 only when its config registers this frame's digest
+# and thresholds.alpha3 (capstone.gate); otherwise stage 3 passes through.
 [stage3]
 factors = "ff5_momentum"
 seed = 0

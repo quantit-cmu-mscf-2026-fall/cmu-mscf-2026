@@ -7,7 +7,7 @@ to be trusted, everything it decides with is fixed before any stage runs:
 - **`GateConfig`** holds the thresholds, the bootstrap draws and seed, the
   search and holdout dates, the generator, the data version, the ledger
   scope of the trial count, and the digest of stage 3's factor frame (None
-  until the spanning test exists). Its hash is SHA-256 of its canonical
+  for no stage-3 test). Its hash is SHA-256 of its canonical
   JSON content, so equal content hashes equally in every process.
 - **`register`** logs the config and its hash to the ledger
   (`runlog.log_run`, tags "gate" and "synthetic") before anything is scored.
@@ -55,9 +55,22 @@ their own name.
    (a hashed field; `load_registered` reads the registered one): the baseline
    is BH at its q on the stage-1 bootstrap p-values, the funnel is every stage
    passing. The funnel's verdict stays on the card as `funnel_pass` either way.
-6. **Stage 3 is not measured yet:** it passes stage 2's survivors through and
-   the scorecard says so (`s3_measured` False). A config that registers a
-   factor frame is refused until the spanning test is connected.
+6. **Stage 3 is measured only when the config registers it.** A config with
+   `factors_digest` and `thresholds.alpha3` set tests each stage-2 survivor's
+   chosen variant (search period) with `spanning.factor_alpha` against the
+   frame passed as `factors`, whose digest (`factors_frame_digest`) must be
+   the registered one. The returns are tested as excess returns, as given:
+   the gate's matrix is dollar-neutral long-short (the backtest default), so
+   no `RF` is subtracted. The one-sided alpha p-values are BH-adjusted across
+   the families tested and must be <= `alpha3`. Before that, each p is
+   adjusted for the family's k variants (`search_adjusted_pvalue`, rho from
+   the variants' residual correlation on the factors). This is not stage 1's
+   correction repeated: stage 1 tests mean return, stage 3 the chosen
+   variant's alpha, and because variants of one idea share their factor
+   exposure, choosing the best Sharpe also chooses a high alpha estimate, so
+   the chosen variant's raw alpha p is anti-conservative. A config with neither passes stage 2's
+   survivors through (`s3_measured` False), exactly as before; one with only
+   one of them is refused.
 
 The gate's own ledger entries carry the tags "gate" and "synthetic" and are
 never counted as trials (`_trial_count`).
@@ -79,7 +92,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from capstone import funnel, grading, runlog
+from capstone import funnel, grading, runlog, spanning
+from capstone.data import FF5_MOMENTUM_REGRESSORS
 from capstone.evaluate import average_correlation, bh_adjusted
 from capstone.funnel import Thresholds, thresholds_dict
 from capstone.scorecard import (
@@ -89,6 +103,7 @@ from capstone.scorecard import (
     GateResult,
     TrialScope,
 )
+from capstone.search_fdr import search_adjusted_pvalue
 
 __all__ = [
     "DEFAULT_MIN_HOLDOUT_COVERAGE",
@@ -104,6 +119,7 @@ __all__ = [
     "HoldoutAlreadyOpened",
     "HoldoutProvider",
     "TrialScope",
+    "factors_frame_digest",
     "load_registered",
     "register",
     "required_holdout_obs",
@@ -124,6 +140,8 @@ SYNTHETIC_DATA_VERSION = "synthetic"
 HOLDOUT_OPENS = datetime.date(2021, 1, 1)
 # Stage 4's minimum holdout coverage per survivor (`GateConfig.min_holdout_coverage`).
 DEFAULT_MIN_HOLDOUT_COVERAGE = 0.5
+# Annualises stage 3's daily alpha for the scorecard.
+TRADING_DAYS = 252
 
 
 # Stage 4's source of holdout returns: (variant ids, holdout_start, holdout_end)
@@ -442,12 +460,129 @@ def required_holdout_obs(config: GateConfig) -> int:
     return max(funnel.MIN_PERIOD_OBS, math.ceil(config.min_holdout_coverage * n_days))
 
 
-def _checked_stage3(config: GateConfig) -> None:
-    if config.factors_digest is not None:
+def factors_frame_digest(frame: pd.DataFrame) -> str:
+    """SHA-256 hex digest of a factor frame: its column names, dates and values.
+
+    What a config registers as `factors_digest` and `run_gate` checks the
+    frame it is given against. It reads the frame as passed, so register the
+    digest of the search-period frame the gate will be handed.
+    """
+    h = hashlib.sha256()
+    h.update(json.dumps([str(c) for c in frame.columns]).encode("utf-8"))
+    h.update(frame.index.to_numpy(dtype="datetime64[ns]").tobytes())
+    h.update(np.ascontiguousarray(frame.to_numpy(dtype=np.float64)).tobytes())
+    return h.hexdigest()
+
+
+def _checked_stage3(
+    config: GateConfig, factors: pd.DataFrame | None, returns: pd.DataFrame
+) -> bool:
+    """Whether stage 3 is measured; refuses a half-registered or mismatched setup.
+
+    Runs before stage 1 and before any look.
+    """
+    digest, alpha3 = config.factors_digest, config.thresholds.alpha3
+    if digest is None and alpha3 is None:
+        if factors is not None:
+            raise ValueError(
+                "a factor frame was passed but the config registers none (factors_digest): "
+                "register it, or pass factors=None"
+            )
+        return False
+    if digest is None or alpha3 is None:
         raise ValueError(
-            "this config registered a factor frame (factors_digest) but the gate has no "
-            "stage-3 test yet: register it with factors_digest=None"
+            "stage 3 needs both factors_digest and thresholds.alpha3 registered; "
+            f"this config has factors_digest={digest!r}, alpha3={alpha3!r}"
         )
+    if not isinstance(factors, pd.DataFrame) or not isinstance(factors.index, pd.DatetimeIndex):
+        raise ValueError(
+            "this config registers a factor frame: pass it as factors=, indexed by date"
+        )
+    actual = factors_frame_digest(factors)
+    if actual != digest:
+        raise ValueError(
+            f"the factor frame's digest {actual[:12]} is not the registered "
+            f"factors_digest {digest[:12]}"
+        )
+    if factors.empty or factors.index.max() > pd.Timestamp(config.search_end):
+        raise ValueError(
+            f"factors must be non-empty and end by search_end {config.search_end}: "
+            "stage 3 takes the search period only"
+        )
+    missing = [c for c in FF5_MOMENTUM_REGRESSORS if c not in factors.columns]
+    if missing:
+        raise ValueError(f"factors is missing columns {missing}")
+    complete = factors[FF5_MOMENTUM_REGRESSORS].dropna().index
+    absent = returns.index.difference(complete)
+    if len(absent):
+        raise ValueError(
+            f"factors lack {len(absent)} of the {len(returns)} search dates (first: "
+            f"{absent[0].date()}): stage 3 needs a complete factor row on each"
+        )
+    return True
+
+
+def _factor_residuals(returns: pd.DataFrame, factors: pd.DataFrame) -> pd.DataFrame:
+    """Each column's OLS residual on [1, factors], fitted on its own non-missing dates."""
+    x_all = factors[FF5_MOMENTUM_REGRESSORS].reindex(returns.index)
+    out = {}
+    for name in returns.columns:
+        y = returns[name].dropna()
+        x = np.column_stack([np.ones(len(y)), x_all.loc[y.index].to_numpy(dtype=float)])
+        coef, *_ = np.linalg.lstsq(x, y.to_numpy(dtype=float), rcond=None)
+        out[name] = pd.Series(y.to_numpy(dtype=float) - x @ coef, index=y.index)
+    return pd.DataFrame(out, index=returns.index)
+
+
+def _stage3(
+    search: pd.DataFrame,
+    labels: pd.Series,
+    best: pd.Series,
+    tested: pd.Series,
+    factors: pd.DataFrame,
+    alpha3: float,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Spanning alpha of each tested family's chosen variant, adjusted, then BH.
+
+    `tested` flags the families to test (stage 2's survivors). The raw p is the
+    chosen variant's one-sided alpha p. It is adjusted for the family's k
+    variants (`search_adjusted_pvalue`, with the variants' average residual
+    correlation as rho), then BH-adjusted across the families tested.
+
+    The k adjustment is not stage 1's correction repeated. Stage 1 tests mean
+    return and pays for picking the best of k on that. Stage 3 tests the chosen
+    variant's alpha, and variants of one idea share their factor exposure, so
+    picking the best Sharpe also picks a high alpha estimate: the raw p of the
+    chosen variant is anti-conservative (about 31% pass at a nominal 10% in the
+    testbed's null families). A variant that cannot be estimated gets p = 1 and
+    still counts toward m. Returns the s3_* columns (NaN on untested families),
+    with `s3_pass`, and the loadings.
+    """
+    names = best[tested]
+    fit = spanning.factor_alpha(search[list(names)], factors, returns_are_excess=True)
+    fit.index = names.index
+    raw = fit["pvalue_greater"]
+    ks, rhos = {}, {}
+    for family in names.index:
+        variants = labels.index[labels == family]
+        ks[family] = len(variants)
+        rho = 0.0
+        if len(variants) > 1:
+            avg = average_correlation(_factor_residuals(search[variants], factors))
+            rho = float(np.clip(avg, 0.0, 1.0)) if np.isfinite(avg) else 0.0
+        rhos[family] = rho
+    usable = raw.dropna()
+    adjusted = search_adjusted_pvalue(
+        usable, pd.Series(ks)[usable.index], rho=pd.Series(rhos)[usable.index]
+    )
+    p = adjusted.reindex(raw.index).fillna(1.0)
+    cols = pd.DataFrame(index=best.index, columns=["s3_stat", "s3_alpha", "s3_t"], dtype=float)
+    cols.loc[names.index, "s3_stat"] = bh_adjusted(p)
+    cols.loc[names.index, "s3_alpha"] = fit["alpha"] * TRADING_DAYS
+    cols.loc[names.index, "s3_t"] = fit["tstat"]
+    cols["s3_pass"] = (cols["s3_stat"] <= alpha3).fillna(False).astype(bool)
+    loadings = fit[spanning.BETA_COLUMNS].set_axis(FF5_MOMENTUM_REGRESSORS, axis=1)
+    return cols, loadings
 
 
 def run_gate(
@@ -457,6 +592,7 @@ def run_gate(
     *,
     holdout: HoldoutProvider,
     authorizer: str,
+    factors: pd.DataFrame | None = None,
 ) -> GateResult:
     """Run the registered gate once.
 
@@ -471,6 +607,11 @@ def run_gate(
             called when nothing reaches stage 4.
         authorizer: who authorises the look at the holdout; required, recorded
             in the look entry.
+        factors: stage 3's daily FF5 + Momentum frame (`data.load_ff5_momentum`)
+            cut to the search period; required exactly when the config
+            registers `factors_digest` and `thresholds.alpha3`. Its digest
+            (`factors_frame_digest`) must be the registered one, and it must
+            hold a complete row on every date of `returns`.
         (The config's `decision_rule` decides `accepted`: the baseline is BH
         on the stage-1 bootstrap p-values at its q; the funnel is every
         stage passing. The other is reported (`funnel_pass`, the stage
@@ -479,8 +620,10 @@ def run_gate(
 
     Raises:
         ValueError: no authorizer, bad inputs, returns past `search_end`, too
-            few bootstrap draws, a registered factor frame (no stage-3 test
-            yet), or fewer ledger trials in scope than variants in `returns`
+            few bootstrap draws, a factor frame that is missing, unregistered,
+            not the registered digest, past `search_end` or lacking a search
+            date, a half-registered stage 3, or fewer ledger trials in scope
+            than variants in `returns`
             (an unlogged search). All raised before the holdout is opened.
         GateNotRegistered: no registration entry has this config's hash.
         HoldoutAlreadyOpened: the holdout was looked at under this hash.
@@ -500,7 +643,7 @@ def run_gate(
     if _entries_for(LOOK_NAME, h):
         raise HoldoutAlreadyOpened(f"the holdout was already opened under gate config {h[:12]}")
     labels = _checked_search(returns, family, config)
-    _checked_stage3(config)
+    measured = _checked_stage3(config, factors, returns)
     th = config.thresholds
     n_trials = _trial_count(config.trial_scope)
     if n_trials < returns.shape[1]:
@@ -520,6 +663,11 @@ def run_gate(
         q=th.q1,
     )["reuse"]
     stages = funnel.screen(stats, th)
+    s3 = None
+    loadings = pd.DataFrame()
+    if measured:
+        s3, loadings = _stage3(search, labels, stats["best"], stages["stage2"], factors, th.alpha3)
+        stages["stage3"] = stages["stage2"] & s3.pop("s3_pass")
     p1 = funnel.stage1_pvalues(stats, th.stage1)
     avg_corr = average_correlation(search) if search.shape[1] > 1 else float("nan")
     # Graded scores and batch diagnostics read only the search period, so they
@@ -574,12 +722,14 @@ def run_gate(
     card["s2_stat"] = stats["p2"]
     card["s2_threshold"] = th.alpha2
     card["s2_pass"] = stages["stage2"]
-    card["s3_stat"] = np.nan  # not measured: stage 3 passes stage 2's survivors
-    card["s3_threshold"] = np.nan
+    # Unmeasured: stage 3 passes stage 2's survivors. Measured: BH-adjusted
+    # spanning p against alpha3 on the stage-2 survivors (other rows NaN).
+    card["s3_stat"] = np.nan if s3 is None else s3["s3_stat"]
+    card["s3_threshold"] = np.nan if s3 is None else th.alpha3
     card["s3_pass"] = stages["stage3"]
-    card["s3_measured"] = False
-    card["s3_alpha"] = np.nan
-    card["s3_t"] = np.nan
+    card["s3_measured"] = False if s3 is None else stages["stage2"]
+    card["s3_alpha"] = np.nan if s3 is None else s3["s3_alpha"]
+    card["s3_t"] = np.nan if s3 is None else s3["s3_t"]
     card["s4_stat"] = grading.stage4_stat(stats, alive, th)
     card["s4_threshold"] = th.q4 if th.final == "bh" else th.d4
     card["s4_pass"] = s4
@@ -629,4 +779,4 @@ def run_gate(
         decision_rule=decision_rule,
     )
     accepted = tuple(card.index[card["accepted"]])
-    return GateResult(card, header, accepted)
+    return GateResult(card, header, accepted, loadings)
