@@ -54,7 +54,7 @@ class SearchRun:
     found: e2e.Search
 
 
-def _refuse_existing(workdir: Path) -> None:
+def refuse_existing(workdir: Path) -> None:
     for name in (manifest.MANIFEST_FILE, "factors.db"):
         if (workdir / name).exists():
             raise FileExistsError(f"{workdir / name} exists: this workdir already holds a search")
@@ -102,7 +102,7 @@ def run_search(
     require_discovery_query(config.search_end)
     e2e.check_thresholds(config, allow_default_thresholds=allow_default_thresholds)
     workdir = Path(workdir)
-    _refuse_existing(workdir)
+    refuse_existing(workdir)
 
     default = loader is None
     rows = _search_rows(config, CachedRows(DAILY_FILE, COLUMNS) if default else loader)
